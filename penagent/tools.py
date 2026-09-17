@@ -11,11 +11,17 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+# 模式冻结参数（Policy.capability.constraints）在 args 中的保留键：
+# 值为命令行 token 串，CLI 工具执行时按原样追加到命令尾部；函数型工具
+# 入参按 spec.parameters 过滤，本键不会传入函数。
+FROZEN_ARGS_KEY = "_frozen_args"
 
 
 @dataclass
@@ -30,6 +36,11 @@ class ToolSpec:
     timeout: int = 300
     dangerous: bool = False           # 高危动作（默认需确认）
     positional: bool = False          # CLI 参数按位置传递（不带 --key）
+    arg_flags: dict = field(default_factory=dict)   # 参数名 -> 自定义 flag
+    #    有些 CLI 只认单横线或专有写法（如 RsaCtfTool 的 -n/-e），
+    #    在配置里声明 flag 即可，无需改内核渲染逻辑
+    sandbox: str = ""                 # 该工具要求的隔离级别（"" = 无要求）
+    network: bool = False             # 容器执行时是否需要出网（默认断网）
 
     def to_schema(self) -> dict:
         return {"name": self.name, "description": self.description,
@@ -50,8 +61,11 @@ class ToolResult:
 
 
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(self, sandbox: Optional["SandboxPolicy"] = None) -> None:
         self._tools: dict[str, ToolSpec] = {}
+        # 沙箱策略由注册表持有：执行前裁决发生在 execute 内部，
+        # 任何调用方（内核循环 / MCP 入口）都无法绕过
+        self.sandbox = sandbox
 
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
@@ -73,14 +87,28 @@ class ToolRegistry:
             return ToolResult(tool=name, ok=False, error=f"未知工具: {name}")
         import time
 
+        wrapper = None
+        if self.sandbox is not None:
+            decision = self.sandbox.decide(spec)
+            if not decision.allowed:
+                # 沙箱裁决拒绝：不执行、不降级直跑（硬规则 1/3）
+                return ToolResult(tool=name, ok=False, error=decision.reason)
+            wrapper = decision.wrap
+
         started = time.time()
         try:
             if spec.kind == "function":
                 out = spec.fn(**{k: v for k, v in args.items()
                                  if k in (spec.parameters or {})})
                 result = ToolResult(tool=name, output=out)
+            elif spec.kind == "mcp":
+                # 外部 MCP Server 工具：参数按远端 schema 原样透传；
+                # 模式冻结参数是 CLI 概念，不带给远端
+                call_args = {k: v for k, v in (args or {}).items()
+                             if k != FROZEN_ARGS_KEY}
+                result = ToolResult(tool=name, output=spec.fn(**call_args))
             elif spec.kind == "cli":
-                result = self._run_cli(spec, args)
+                result = self._run_cli(spec, args, wrapper)
             else:
                 result = ToolResult(tool=name, ok=False,
                                     error=f"不支持的工具类型: {spec.kind}")
@@ -89,22 +117,25 @@ class ToolRegistry:
         result.duration_ms = int((time.time() - started) * 1000)
         return result
 
-    def _run_cli(self, spec: ToolSpec, args: dict) -> ToolResult:
-        """CLI 工具执行：模板替换 + 存在性校验。"""
+    def _run_cli(self, spec: ToolSpec, args: dict, wrapper=None) -> ToolResult:
+        """CLI 工具执行：模板替换 + 存在性校验（容器执行时由 wrapper 接管）。"""
         cmd = []
         for part in spec.command:
             if part == "{args}":
                 cmd.extend(self._cli_args(spec, args))
             else:
                 cmd.append(part)
-        # 可执行文件存在性校验
-        first = cmd[0] if cmd else ""
-        if first and not Path(first).exists() \
-                and shutil.which(first) is None:
-            return ToolResult(
-                tool=spec.name, ok=False,
-                error=(f"工具 {first} 不可用（未安装或本地版本滞后，"
-                       f"请以远程仓库最新版为准）"))
+        if wrapper is not None:
+            # 容器执行：可执行文件在镜像内，宿主存在性校验不适用
+            cmd = wrapper(cmd)
+        else:
+            first = cmd[0] if cmd else ""
+            if first and not Path(first).exists() \
+                    and shutil.which(first) is None:
+                return ToolResult(
+                    tool=spec.name, ok=False,
+                    error=(f"工具 {first} 不可用（未安装或本地版本滞后，"
+                           f"请以远程仓库最新版为准）"))
         proc = subprocess.run(
             cmd, cwd=spec.workdir or None, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=spec.timeout)
@@ -114,14 +145,23 @@ class ToolRegistry:
 
     @staticmethod
     def _cli_args(spec: ToolSpec, args: dict) -> list[str]:
+        # 模式冻结参数单独拎出：按原样追加在命令尾部（不参与 --key 渲染）
+        args = args or {}
+        frozen = str(args.get(FROZEN_ARGS_KEY, "") or "").strip()
+        params = {k: v for k, v in args.items() if k != FROZEN_ARGS_KEY}
         if getattr(spec, "positional", False):
-            return [str(v) for v in (args or {}).values()]
-        parts = []
-        for key, value in (args or {}).items():
-            if isinstance(value, bool):
-                if value:
-                    parts.append(f"--{key}")
-            else:
-                parts.append(f"--{key}")
-                parts.append(str(value))
+            parts = [str(v) for v in params.values()]
+        else:
+            parts = []
+            for key, value in params.items():
+                flag = (getattr(spec, "arg_flags", None) or {}).get(
+                    key, f"--{key}")
+                if isinstance(value, bool):
+                    if value:
+                        parts.append(flag)
+                else:
+                    parts.append(flag)
+                    parts.append(str(value))
+        if frozen:
+            parts.extend(shlex.split(frozen))
         return parts

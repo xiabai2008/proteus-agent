@@ -16,26 +16,47 @@ from pathlib import Path
 from typing import Optional
 
 from penagent.agent import PenAgent, Policy
-from penagent.builtin_tools import register_builtins
 from penagent.evidence import EvidenceChain
-from penagent.external_tools import load_external_tools
 from penagent.llm import LLMConfig
 from penagent.memory import Memory
 from penagent.reflect import Reflector
-from penagent.tools import ToolRegistry
+from penagent.registry import ToolCenter, build_center
+from penagent.tools import ToolSpec
 
 MCP_VERSION = "2025-06-18"
+
+# 服务端高层能力：只暴露给 MCP 客户端，不进入内核 ReAct 循环
+SERVER_TOOLS = [
+    ToolSpec(name="pentest_run",
+             description="执行完整渗透任务（LLM 决策循环：侦察/扫描/利用），"
+                         "返回总结与证据引用。危险动作需 authorize=true。",
+             parameters={"target": {"type": "string"},
+                         "objective": {"type": "string"},
+                         "authorize": {"type": "boolean"}}),
+    ToolSpec(name="pentest_skills",
+             description="列出经验库技能（按成功率排序）",
+             parameters={}),
+    ToolSpec(name="pentest_missions",
+             description="列出作战记录",
+             parameters={}),
+    ToolSpec(name="pentest_reflect",
+             description="对指定任务反思并沉淀技能",
+             parameters={"mission_id": {"type": "string"}}),
+]
 
 
 class PentestMCPServer:
     """MCP Server：工具注册表 + Agent 高层能力。"""
 
     def __init__(self, data_dir: str = "data",
-                 allowed_targets: Optional[list[str]] = None) -> None:
+                 allowed_targets: Optional[list[str]] = None,
+                 center: Optional[ToolCenter] = None) -> None:
         self.data_dir = data_dir
-        self.registry = ToolRegistry()
-        register_builtins(self.registry)
-        load_external_tools(self.registry)
+        # 工具清单统一来自注册中心：内置 function + external_tools.json 的 CLI
+        # + 已发现的 MCP server 工具（discover_mcp 前不连接任何外部服务）
+        self.center = center or build_center()
+        self.center.register_server_tools(SERVER_TOOLS)
+        self.registry = self.center.build_registry()
         self.memory = Memory(data_dir)
         self.evidence = EvidenceChain(Path(data_dir) / "chain.jsonl")
         self.llm = LLMConfig.from_env()
@@ -52,24 +73,24 @@ class PentestMCPServer:
     # ------------------------------------------------------------------
     # MCP tools 定义
     def _tools_schema(self) -> list[dict]:
-        tools = [t.to_schema() for t in self.registry._tools.values()]
-        tools += [
-            {"name": "pentest_run",
-             "description": "执行完整渗透任务（LLM 决策循环：侦察/扫描/利用），"
-                            "返回总结与证据引用。危险动作需 authorize=true。",
-             "parameters": {"target": {"type": "string"},
-                            "objective": {"type": "string"},
-                            "authorize": {"type": "boolean"}}},
-            {"name": "pentest_skills",
-             "description": "列出经验库技能（按成功率排序）",
-             "parameters": {}},
-            {"name": "pentest_missions",
-             "description": "列出作战记录",
-             "parameters": {}},
-            {"name": "pentest_reflect",
-             "description": "对指定任务反思并沉淀技能",
-             "parameters": {"mission_id": {"type": "string"}}},
-        ]
+        """按 MCP 规范导出工具清单：name / description / inputSchema。
+
+        官方 SDK 客户端会严格校验报文——缺 inputSchema 会整份列表解析失败，
+        结果是一个工具都注册不上（DSH 的 mcp-client 即如此）。所以这里只吐
+        规范字段：内核侧的 dangerous 标记映射到 annotations.destructiveHint，
+        非规范的 parameters 不再外泄。
+        """
+        tools = []
+        for schema in self.center.schemas():
+            tool = {
+                "name": schema["name"],
+                "description": schema.get("description", ""),
+                "inputSchema": {"type": "object",
+                                "properties": schema.get("parameters") or {}},
+            }
+            if schema.get("dangerous"):
+                tool["annotations"] = {"destructiveHint": True}
+            tools.append(tool)
         return tools
 
     # ------------------------------------------------------------------
@@ -130,9 +151,17 @@ class PentestMCPServer:
                     "error": {"code": -32603, "message": str(exc)}}
 
     @staticmethod
-    def _result(msg_id, content) -> dict:
+    def _result(msg_id, content, is_error: bool = False) -> dict:
+        """工具调用结果：按 MCP 规范包成 content 块数组（文本载 JSON）。
+
+        规范要求 content 是内容块数组、失败在 isError 上表达；直接回吐裸
+        对象会让严格客户端（官方 SDK）解析失败。
+        """
+        text = (content if isinstance(content, str)
+                else json.dumps(content, ensure_ascii=False))
         return {"jsonrpc": "2.0", "id": msg_id,
-                "result": {"content": content}}
+                "result": {"content": [{"type": "text", "text": text}],
+                           "isError": is_error}}
 
     # ------------------------------------------------------------------
     def serve_stdio(self) -> None:

@@ -1,0 +1,22 @@
+# modes/ctf-crypto.yaml
+id: ctf-crypto
+label: CTF Crypto 模式
+inherits: base
+persona: {system_prompt: prompts/ctf.md, output_format: raw_flag}
+capability:
+  allow: [rsactf_attack, python_solve, codec_decode, codec_chain, file_type]
+  deny: [nuclei, fscan, sqlmap]
+permission:
+  default: ask
+  auto_approve: [codec_decode, codec_chain, file_type]
+  require_confirm: [python_solve, rsactf_attack]
+  hard_deny: []
+budget: {max_steps: 60, max_minutes: 20, max_cost_usd: 1.0}
+scope: {network_egress: true}
+verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
+skills: [ctf-crypto]
+memory_namespace: ctf-crypto
+# CTF 解题依赖一次性脚本（python_solve 声明 sandbox: docker）；
+# 本档显式选择宿主直跑——解题脚本与题目文件都是本机资产，不引入容器依赖。
+# 要改回严格容器隔离：把这里换成 docker（容器不可用时该工具会被拒绝执行）。
+sandbox: local

@@ -1,0 +1,22 @@
+# modes/ctf-web.yaml
+id: ctf-web
+label: CTF Web 模式
+inherits: base
+persona: {system_prompt: prompts/ctf.md, output_format: raw_flag}
+capability:
+  # 前半为原始抽象名（保持语义不变），后半为阶段二实装后真实存在的工具名
+  # ——allow 是工具名精确匹配，抽象名不落到真实注册表就永远解不出题
+  allow: [http_test, browser_auto, script_run, file_read, crypto_tools, python_solve, codec_decode, codec_chain, file_type, rsactf_attack]
+  deny: [nuclei, fscan, sqlmap]
+permission:
+  default: ask
+  auto_approve: [codec_decode, codec_chain, file_type]
+  require_confirm: [python_solve, rsactf_attack]
+  hard_deny: []
+budget: {max_steps: 60, max_minutes: 20, max_cost_usd: 1.0}
+scope: {network_egress: true}
+verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
+skills: [ctf-web]
+memory_namespace: ctf-web
+# 同 ctf-crypto：CTF 解题脚本走宿主直跑档，换 docker 即启用容器隔离
+sandbox: local

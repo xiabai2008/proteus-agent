@@ -1,16 +1,31 @@
 """作战记录与经验库：自我进化的记忆底座。
 
-- 作战记录（missions/）：每轮任务的完整轨迹（目标/决策/工具/结果/反思）
-- 经验库（skills/）：LLM 反思后沉淀的可复用技能（带证据引用）
+- 作战记录（missions/<namespace>/）：每轮任务的完整轨迹（目标/决策/工具/结果/反思）
+- 经验库（skills/<namespace>/）：LLM 反思后沉淀的可复用技能（带证据引用）
+
+按 memory_namespace 分区：每个模式读写自己的记忆域，模式间互不串库
+（渗透沉淀的技能不会被 CTF 任务检索到，反之亦然）。
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+DEFAULT_NAMESPACE = "default"
+_NAMESPACE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _safe_namespace(namespace: str) -> str:
+    """校验分区名：只允许字母数字与 . _ -，拒绝路径穿越。"""
+    name = (namespace or "").strip() or DEFAULT_NAMESPACE
+    if name in (".", "..") or not _NAMESPACE_PATTERN.match(name):
+        raise ValueError(f"非法 memory_namespace: {namespace!r}")
+    return name
 
 
 @dataclass
@@ -48,14 +63,29 @@ class Skill:
 
 
 class Memory:
-    """作战记录 + 经验库。"""
+    """作战记录 + 经验库（按 namespace 分区）。"""
 
-    def __init__(self, root: str | Path = "data") -> None:
+    def __init__(self, root: str | Path = "data",
+                 namespace: str = DEFAULT_NAMESPACE) -> None:
         self.root = Path(root)
-        self.missions_dir = self.root / "missions"
-        self.skills_dir = self.root / "skills"
+        self.namespace = _safe_namespace(namespace)
+        self.missions_dir = self.root / "missions" / self.namespace
+        self.skills_dir = self.root / "skills" / self.namespace
         self.missions_dir.mkdir(parents=True, exist_ok=True)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
+
+    def for_namespace(self, namespace: str) -> "Memory":
+        """返回同一根目录下、指定分区的 Memory（模式切换记忆域用）。"""
+        return Memory(self.root, namespace=namespace)
+
+    def namespaces(self) -> list[str]:
+        """已存在的分区名（含当前分区）。"""
+        found = set()
+        for kind in ("missions", "skills"):
+            base = self.root / kind
+            if base.is_dir():
+                found.update(p.name for p in base.iterdir() if p.is_dir())
+        return sorted(found)
 
     # ------------------------------------------------------------------
     # 作战记录

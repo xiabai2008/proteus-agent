@@ -1,0 +1,50 @@
+# host 平面补丁：为 Proteus 部署绑定审批档位（只配置，不改 DSH 核心代码）。
+#
+# 为什么审批档位不写在 preset 里：沙箱与审批栈属于 HOST 平面
+# （packages/bundle/base/cordis.patch.yml 挂 @deepseek-ai/dsh-sandbox-local、
+# dsh-sandbox-policy、dsh-user-approval、dsh-permission-presets），随包发布的
+# 三个 preset 也都不拥有它——preset 里再挂一次，要么与根 realm 冲突，
+# 要么在私有 realm 里造一份 host 读不到的副本（见 standard preset 头部注释）。
+# DSH 提供的正确姿势就是本文件：按 id 覆盖 host 行，最后一次写入生效。
+#
+# 应用方式（二选一）：
+#   1) 单次启动叠加：dsh --profile web --patch <本文件>
+#   2) 固化到本机：把下面的行并入 $DSH_HOME/cordis.patch.yml
+#
+# 注意：补丁是"整行 config 替换"，不是深合并——所以官方三档在这里原样重申，
+# 以免被这次覆盖抹掉。
+
+- id: approval
+  config:
+    # ask：高危动作交给审批应答者；never 则自动拒绝（无人值守 CI 姿态）。
+    policy: ask
+
+- id: permission
+  config:
+    presets:
+      # ── 官方三档（原样保留）──
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+      # ── Proteus 三档 ──
+      # 侦察与证据固化：只读沙箱 + 逐步审批
+      proteus-safe:
+        sandbox: read-only
+        approval: ask
+      # 常规渗透：工作区可写 + 逐步审批（默认档）
+      proteus-standard:
+        sandbox: workspace-write
+        approval: ask
+      # CTF 解题：分钟级预算，工具密集调用，不再逐步打断
+      # （沙箱放到最宽，仅用于自有靶机 / 隔离环境）
+      proteus-ctf:
+        sandbox: danger-full-access
+        approval: never
+    # 取消注释即把 proteus-standard 设为新会话默认档（会覆盖部署默认）。
+    # defaultPreset: proteus-standard

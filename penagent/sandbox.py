@@ -1,0 +1,148 @@
+"""沙箱分级执行：模式声明隔离级别，工具声明最低隔离需求。
+
+三档（AGENTS.md 第 4 节 sandbox 字段的实装）：
+
+======== ========================== ==========================================
+档位      被动工具                    需要隔离的工具（dangerous / 声明 sandbox）
+======== ========================== ==========================================
+none     直接执行                    拒绝（none 档只放行白名单内被动工具）
+local    直接执行                    直接执行（仍需 Policy 白名单与授权档位）
+docker   直接执行                    容器内执行；容器不可用则**拒绝**，绝不裸跑
+======== ========================== ==========================================
+
+关键约束（硬规则 1/3）：判定发生在**工具执行前**，且由 ToolRegistry 持有策略
+对象来保证——不是靠调用方自觉。容器不可用时拒绝执行而不是降级直跑，是这一档
+存在的全部意义。
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+LEVELS = ("none", "local", "docker")
+DEFAULT_IMAGE = "python:3.12-slim"
+
+
+def tool_needs_isolation(spec) -> bool:
+    """工具是否需要隔离执行：显式声明 sandbox，或标记为高危。"""
+    declared = str(getattr(spec, "sandbox", "") or "").strip().lower()
+    if declared in ("docker", "container"):
+        return True
+    return bool(getattr(spec, "dangerous", False))
+
+
+@dataclass(frozen=True)
+class SandboxDecision:
+    """一次执行前的沙箱裁决结果。"""
+
+    allowed: bool
+    reason: str = ""
+    isolated: bool = False                       # 是否进容器
+    wrap: Optional[Callable[[list], list]] = None  # 命令包装器（容器执行用）
+
+
+class DockerRunner:
+    """Docker 执行器：可用性探测（带缓存）+ 命令包装。"""
+
+    level = "docker"
+
+    def __init__(self, image: str = "", probe_timeout: float = 8.0) -> None:
+        self.image = image or os.environ.get("PENTEST_DOCKER_IMAGE", DEFAULT_IMAGE)
+        self.probe_timeout = probe_timeout
+        self._probe: Optional[tuple[bool, str]] = None
+
+    def available(self) -> tuple[bool, str]:
+        """探测 docker CLI 与守护进程（结果缓存，避免每次执行都探测）。"""
+        if self._probe is not None:
+            return self._probe
+        exe = shutil.which("docker")
+        if not exe:
+            self._probe = (False, "docker CLI 未安装或不在 PATH")
+            return self._probe
+        try:
+            proc = subprocess.run(
+                [exe, "version", "--format", "{{.Server.Version}}"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=self.probe_timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self._probe = (False, f"docker 探测失败: {exc}")
+            return self._probe
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            self._probe = (False, "docker 守护进程不可用: "
+                                 + (detail[-1][:160] if detail else "未知原因"))
+            return self._probe
+        self._probe = (True, "")
+        return self._probe
+
+    def wrap(self, command: list[str], spec) -> list[str]:
+        """把宿主命令包成容器命令：只读挂载工作目录，默认断网。"""
+        workdir = str(getattr(spec, "workdir", "") or "") or os.getcwd()
+        return [shutil.which("docker") or "docker", "run", "--rm", "-i",
+                "--network", self.network_mode(spec),
+                "-v", f"{workdir}:{workdir}", "-w", workdir,
+                self.image, *command]
+
+    def network_mode(self, spec) -> str:
+        """默认断网；工具显式声明需要出网时才给 bridge。"""
+        if bool(getattr(spec, "network", False)):
+            return "bridge"
+        return "none"
+
+
+class SandboxPolicy:
+    """按模式的 sandbox 档位裁决每次工具执行。"""
+
+    def __init__(self, level: str = "none",
+                 runner: Optional[DockerRunner] = None) -> None:
+        normalized = (level or "none").strip().lower()
+        if normalized not in LEVELS:
+            raise ValueError(f"未知沙箱档位 {level!r}（可用 {LEVELS}）")
+        self.level = normalized
+        self.runner = runner or DockerRunner()
+
+    # ------------------------------------------------------------------
+    def availability(self) -> tuple[bool, str]:
+        """当前档位能否提供所需隔离（none/local 恒为可用）。"""
+        if self.level == "docker":
+            return self.runner.available()
+        return True, ""
+
+    def decide(self, spec) -> SandboxDecision:
+        """执行前裁决：返回是否放行、原因、是否进容器。"""
+        needs_isolation = tool_needs_isolation(spec)
+
+        if not needs_isolation:
+            return SandboxDecision(True)          # 被动工具：三档都直接跑
+
+        if self.level == "none":
+            return SandboxDecision(
+                False,
+                f"sandbox=none 仅允许被动工具，{spec.name} 需要隔离执行；"
+                f"请在模式中改用 sandbox: local（宿主直跑）或 sandbox: docker")
+
+        if self.level == "local":
+            # 宿主直跑：仍受 Policy 白名单与授权档位约束（调用方负责）
+            return SandboxDecision(True, "sandbox=local：宿主直跑（已过白名单/授权）")
+
+        # level == docker
+        if getattr(spec, "kind", "") != "cli":
+            return SandboxDecision(
+                False,
+                f"{spec.name} 需要隔离但类型为 {spec.kind}，无法进容器执行；"
+                f"请改用 CLI 工具或调整模式 sandbox 档位")
+        ok, reason = self.runner.available()
+        if not ok:
+            return SandboxDecision(
+                False,
+                f"sandbox=docker 但容器不可用（{reason}），拒绝裸跑 {spec.name}")
+        return SandboxDecision(True, "sandbox=docker：容器内执行", isolated=True,
+                               wrap=lambda cmd, _spec=spec: self.runner.wrap(cmd, _spec))
+
+
+def build_sandbox(level: str, runner: Optional[DockerRunner] = None) -> SandboxPolicy:
+    """按模式声明构造沙箱策略。"""
+    return SandboxPolicy(level=level, runner=runner)

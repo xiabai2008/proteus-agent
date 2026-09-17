@@ -1,0 +1,31 @@
+{
+  "note": "CTF 解题 CLI 工具链。命令里 {python} 展开为当前解释器；参数级 flag 覆盖默认的 --key 渲染（RsaCtfTool 用单横线 -n/-e）。这些工具只在 ctf-* 模式挂载，渗透模式看不到。",
+  "tools": {
+    "rsactf_attack": {
+      "description": "RSA 参数攻击与解密（RsaCtfTool）：给出 n/e/c 即可尝试解密，可用 attack 指定 fermat/pollard_rho/wiener/all 等；适用弱素数、共用素数、低指数、Wiener 等套路",
+      "command": ["{python}", "-m", "RsaCtfTool", "{args}"],
+      "parameters": {
+        "n": {"type": "string", "flag": "-n", "description": "模数 n（十进制或 0x 十六进制）"},
+        "e": {"type": "string", "flag": "-e", "description": "公钥指数 e"},
+        "decrypt": {"type": "string", "flag": "--decrypt", "description": "待解密密文 c（整数）"},
+        "attack": {"type": "string", "flag": "--attack", "description": "指定攻击方式，留空则由工具自选"},
+        "timeout": {"type": "string", "flag": "--timeout", "description": "单次攻击超时秒数"}
+      },
+      "dangerous": false,
+      "timeout": 300,
+      "modes": ["ctf-web", "ctf-crypto"]
+    },
+    "python_solve": {
+      "description": "运行一次性解题脚本（等价 python -c）：解码/爆破/数学计算/读写题目文件。每次调用独立进程，无网络依赖",
+      "command": ["{python}", "-c", "{args}"],
+      "parameters": {
+        "code": {"type": "string", "description": "要执行的 Python 代码（单参数，按位置传入）"}
+      },
+      "positional": true,
+      "dangerous": true,
+      "sandbox": "docker",
+      "timeout": 60,
+      "modes": ["ctf-web", "ctf-crypto"]
+    }
+  }
+}

@@ -14,7 +14,9 @@ from typing import Optional
 from penagent.evidence import EvidenceChain
 from penagent.llm import LLMConfig, LLMError, chat_json
 from penagent.memory import Memory
-from penagent.tools import ToolRegistry
+from penagent.modes import ModeProfile
+from penagent.tools import FROZEN_ARGS_KEY, ToolRegistry
+from penagent.verifier import EvidenceChainVerifier, Verifier, build_verifier
 
 SYSTEM_PROMPT = """你是 XPentest——一个 LLM 驱动的渗透测试 Agent。
 约束：
@@ -50,15 +52,86 @@ class MissionResult:
 
 
 class Policy:
-    """安全护栏：授权目标 + 高危动作确认。规则写死，不参与决策。"""
+    """安全护栏：模式能力/权限裁决 + 授权目标 + 高危动作确认。
+
+    规则写死，不参与决策。模式驱动部分（硬规则 1/3，全部在工具执行前生效）：
+    - capability.deny / permission.hard_deny：直接拒绝，任何运行期开关都不可放行；
+    - permission.require_confirm 与 default=ask：记为 blocked 待人工确认，
+      运行期 `authorize=True`（操作者已授权）方可放行；
+    - capability.constraints：执行前把冻结参数追加进 args；
+    - scope.target_allowlist：只可收紧，不可放宽运行期显式授权范围。
+
+    不传 mode 时行为与升级前完全一致（向后兼容）。
+    """
 
     def __init__(self, allowed_targets: Optional[list[str]] = None,
-                 authorize: bool = False) -> None:
-        self.allowed_targets = list(allowed_targets or
-                                    ["127.0.0.1", "localhost"])
+                 authorize: bool = False,
+                 mode: Optional[ModeProfile] = None) -> None:
+        self._runtime_targets = list(allowed_targets or
+                                     ["127.0.0.1", "localhost"])
+        self.allowed_targets = self._narrow_by_mode(self._runtime_targets, mode)
         self.authorize = authorize
+        self.mode = mode
+
+    @staticmethod
+    def _narrow_by_mode(runtime_targets: list[str],
+                        mode: Optional[ModeProfile]) -> list[str]:
+        """模式白名单只可收紧：与运行期显式授权取交集（硬规则 3）。
+
+        模式声明 "required"（空列表）时不改变运行期授权范围；
+        模式声明的目标若从未被运行期授权过，一律不生效（取交集后为空即全拒）。
+        """
+        if mode is None or not mode.scope.target_allowlist:
+            return list(runtime_targets)
+        authorized = {t.strip().lower() for t in runtime_targets if t.strip()}
+        return [t for t in mode.scope.target_allowlist
+                if t.strip().lower() in authorized]
+
+    def bind_mode(self, mode: ModeProfile) -> "Policy":
+        """返回挂载了模式裁决的副本（不改动原实例）。"""
+        return Policy(allowed_targets=self._runtime_targets,
+                      authorize=self.authorize, mode=mode)
+
+    def level_for(self, tool: str, spec=None) -> str:
+        """工具适用的权限档位：ok | ask | deny。
+
+        无模式时沿用升级前语义：危险工具未授权 = ask，其余 = ok。
+        """
+        if self.mode is not None:
+            return self.mode.permission.level_for(tool)
+        if spec is not None and getattr(spec, "dangerous", False):
+            return "ok" if self.authorize else "ask"
+        return "ok"
+
+    def apply_constraints(self, tool: str, args: dict) -> dict:
+        """把模式冻结参数追加进 args（执行前调用，机制性生效）。
+
+        冻结串按命令行 token 追加，由 ToolRegistry 在执行时拼到命令尾部；
+        函数型工具不受影响（其入参按 spec.parameters 过滤）。
+        """
+        frozen = (self.mode.capability.constraint_for(tool)
+                  if self.mode is not None else "")
+        if not frozen:
+            return args
+        merged = dict(args or {})
+        existing = str(merged.get(FROZEN_ARGS_KEY, "")).strip()
+        merged[FROZEN_ARGS_KEY] = (f"{existing} {frozen}".strip()
+                                   if existing else frozen)
+        return merged
 
     def check(self, tool: str, spec, args: dict) -> tuple[bool, str]:
+        # 模式能力与权限档位裁决（先于任何执行动作）
+        if self.mode is not None:
+            if not self.mode.capability.allows(tool):
+                return False, (f"模式 {self.mode.id} 禁用该工具："
+                               f"{self.mode.capability.denial_reason(tool)}")
+            level = self.mode.permission.level_for(tool)
+            if level == "deny":
+                return False, (f"模式 {self.mode.id} 权限档位 deny："
+                               f"{tool} 被硬拒绝执行")
+            if level == "ask" and not self.authorize:
+                return False, (f"模式 {self.mode.id} 权限档位 ask："
+                               f"{tool} 待人工确认（未执行）")
         # 高危动作
         if getattr(spec, "dangerous", False) and not self.authorize:
             return False, (f"高危工具 {tool} 未授权（--authorize 才可执行）")
@@ -91,13 +164,40 @@ class PenAgent:
     def __init__(self, registry: ToolRegistry, memory: Memory,
                  evidence: EvidenceChain, llm: Optional[LLMConfig] = None,
                  policy: Optional[Policy] = None,
-                 max_steps: int = 12,
-                 skill_policy: Optional["SkillPolicy"] = None) -> None:
-        self.registry = registry
-        self.memory = memory
+                 skill_policy: Optional["SkillPolicy"] = None,
+                 mode: Optional[ModeProfile] = None,
+                 verifier: Optional[Verifier] = None,
+                 max_steps: Optional[int] = None) -> None:
+        self.mode = mode
+        # 成功判定器：模式决定判据（CTF 挂 flag 正则，渗透挂证据链）；
+        # 不传模式时沿用升级前的证据链语义（require_poc 关闭）
+        if verifier is not None:
+            self.verifier = verifier
+        elif mode is not None:
+            self.verifier = build_verifier(mode.verifier)
+        else:
+            self.verifier = EvidenceChainVerifier()
+        # 模式约束在工具执行前机制性生效：被 capability 禁用的工具不进入
+        # 注册表——既不进 system prompt 的工具 schema，也无法被执行。
+        self.registry = (mode.filtered_registry(registry)
+                         if mode is not None else registry)
+        if mode is not None and getattr(self.registry, "sandbox", None) is None:
+            # 注册表必须带沙箱策略：否则换一个构造路径就绕过了隔离档位
+            from penagent.sandbox import build_sandbox
+
+            self.registry.sandbox = build_sandbox(mode.sandbox)
+        # 记忆按模式分区：读写只落 current namespace，模式间互不串库
+        self.memory = (memory.for_namespace(mode.memory_namespace)
+                       if mode is not None else memory)
         self.evidence = evidence
         self.llm = llm or LLMConfig.from_env()
         self.policy = policy or Policy()
+        if mode is not None and self.policy.mode is None:
+            # 显式传入的 Policy 也必须挂上模式裁决，避免绕过模式约束
+            self.policy = self.policy.bind_mode(mode)
+        # 步数预算：显式传参优先；否则由模式 budget 决定（不传模式时沿用 12）
+        if max_steps is None:
+            max_steps = mode.budget.max_steps if mode is not None else 12
         self.max_steps = max_steps
         self.skill_policy = skill_policy   # RL 技能选择策略（可选）
         self._used_skills: list = []
@@ -140,6 +240,46 @@ class PenAgent:
                 ranked.insert(0, ranked.pop(idx))
         return ranked[-3:]
 
+    def _blocked(self, mission_id: str, step: int, tool: str, args: dict,
+                 reason: str, level: str) -> dict:
+        """记录被模式/护栏拦截的工具调用（证据链 + 作战记录），回灌消息。"""
+        self.evidence.append("tool_call", {"tool": tool, "args": args,
+                                           "blocked": True, "reason": reason,
+                                           "level": level})
+        self.memory.add_step(mission_id, {"step": step, "tool": tool,
+                                          "args": args, "blocked": True,
+                                          "reason": reason})
+        return {"role": "user", "content": f"护栏拦截: {reason}"}
+
+    def _mission_context(self, since_seq: int) -> str:
+        """本任务期间观察到的工具输出原文（供按任务输出判定的判定器使用）。
+
+        取自证据链中 seq 大于本任务起点的 tool_call 记录，天然按任务隔离，
+        不会把历史任务的输出带进本次判定。
+        """
+        chunks = []
+        for record in self.evidence.load():
+            if record.seq <= since_seq or record.kind != "tool_call":
+                continue
+            output = str(record.content.get("output", "") or "")
+            if output:
+                chunks.append(output)
+        return "\n".join(chunks)
+
+    def _system_prompt(self, skills: list) -> str:
+        """组装 system prompt：模式 persona 模板（无模式时用内核默认提示词）。
+
+        工具 schema 来自已按模式过滤的注册表，被禁用的工具不会出现在
+        提示词里——这是模式约束在提示词层的呈现，机制性拦截在注册表层。
+        """
+        template = (self.mode.read_system_prompt()
+                    if self.mode is not None else SYSTEM_PROMPT)
+        return template.replace(
+            "{tools}", json.dumps(self.registry.schemas(),
+                                  ensure_ascii=False)).replace(
+            "{skills}", json.dumps([s.to_dict() for s in skills],
+                                   ensure_ascii=False))
+
     # ------------------------------------------------------------------
     def run(self, target: str, objective: str,
             fingerprint: str = "", stealth: bool = False) -> MissionResult:
@@ -151,11 +291,10 @@ class PenAgent:
                                    stealth=stealth)
         mission.injected_skills = [s.title for s in skills[-3:]]
         self._used_skills = skills[-3:]   # 本次任务复用的技能（结果回写）
-        system = SYSTEM_PROMPT.replace(
-            "{tools}", json.dumps(self.registry.schemas(),
-                                  ensure_ascii=False)).replace(
-            "{skills}", json.dumps([s.to_dict() for s in skills[-3:]],
-                                   ensure_ascii=False))
+        self.verifier.reset()
+        tail = self.evidence.tail()
+        mission_start_seq = tail.seq if tail is not None else 0
+        system = self._system_prompt(skills[-3:])
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": (
@@ -180,45 +319,58 @@ class PenAgent:
                 "step": step, "thought": decision.get("thought", "")})
 
             if decision.get("done"):
-                refs = [int(r) for r in decision.get("evidence_refs", [])]
-                valid = self.evidence.valid_refs(refs)
-                if refs and len(valid) != len(refs):
-                    # 反幻觉：结论引用不存在的证据 -> 拒绝产出
+                # 收口判定交给注入的 verifier（模式决定判据）：
+                # 反幻觉校验是内核底线，任何判定器都先过这一关
+                verdict = self.verifier.verify(
+                    decision, self.evidence,
+                    context=self._mission_context(mission_start_seq))
+                if not verdict.ok:
+                    if verdict.retryable:
+                        # 判定未过但可重试：回灌原因，让模型再试（不结束任务）
+                        messages.append({"role": "user", "content":
+                                         f"判定未通过: {verdict.reason}"})
+                        continue
                     mission.outcome = "failed"
-                    mission.summary = (
-                        f"反幻觉拦截：结论引用 {len(refs) - len(valid)} 条"
-                        f"不存在的证据")
+                    mission.summary = verdict.reason
                     self.memory.finish(mission_id, mission.outcome,
                                        mission.summary)
                     self._record_skill_outcomes(False)
                     return mission
                 mission.outcome = "success"
                 mission.summary = decision.get("summary", "")
-                mission.evidence_refs = valid
+                mission.evidence_refs = list(verdict.evidence_refs)
                 self.evidence.append("conclusion", {
-                    "summary": mission.summary, "evidence_refs": valid})
+                    "summary": mission.summary,
+                    "evidence_refs": mission.evidence_refs,
+                    "verdict": verdict.reason})
                 self.memory.finish(mission_id, mission.outcome)
                 self._record_skill_outcomes(True)
                 return mission
 
             tool = decision.get("tool", "")
             args = decision.get("args", {}) or {}
+            # 模式参数冻结：命中 capability.constraints 的工具，在护栏裁决前
+            # 就把冻结参数并进 args（后续裁决与执行、留证看到的都是实参）
+            args = self.policy.apply_constraints(tool, args)
             spec = self.registry.get(tool)
             if spec is None:
+                # 被模式 capability 禁用的工具已不在注册表：给出机制性
+                # 拒绝的准确原因（而非笼统的"工具不存在"）
+                if self.mode is not None \
+                        and not self.mode.capability.allows(tool):
+                    reason = (f"模式 {self.mode.id} 禁用该工具："
+                              f"{self.mode.capability.denial_reason(tool)}")
+                    messages.append(self._blocked(mission_id, step, tool,
+                                                  args, reason, "deny"))
+                    continue
                 messages.append({"role": "user",
                                  "content": f"工具 {tool!r} 不存在，请重新选择"})
                 continue
             allowed, reason = self.policy.check(tool, spec, args)
             if not allowed:
-                self.evidence.append("tool_call", {"tool": tool,
-                                                   "args": args,
-                                                   "blocked": True,
-                                                   "reason": reason})
-                messages.append({"role": "user",
-                                 "content": f"护栏拦截: {reason}"})
-                self.memory.add_step(mission_id, {
-                    "step": step, "tool": tool, "args": args,
-                    "blocked": True, "reason": reason})
+                messages.append(self._blocked(
+                    mission_id, step, tool, args, reason,
+                    self.policy.level_for(tool, spec)))
                 continue
 
             tool_result = self.registry.execute(tool, args)
@@ -236,8 +388,42 @@ class PenAgent:
                 "content": (f"工具 {tool} 执行结果:\n"
                             f"{json.dumps(tool_result.to_dict(), ensure_ascii=False)[:2500]}")})
 
+        # 步数预算耗尽：不硬退出，换策略——追加一轮"强制收口"，要求模型
+        # 停止工具调用、基于已有证据给出最终结论，再交判定器裁决
+        self.evidence.append("decision", {
+            "step": self.max_steps, "phase": "budget_exhausted",
+            "thought": "步数预算耗尽，切换收口策略"})
+        messages.append({"role": "user", "content": (
+            f"步数预算已用尽（max_steps={self.max_steps}）。切换策略："
+            "不要再调用任何工具，基于已获得的证据直接给出最终结论；"
+            "若没有有效证据，如实说明任务未完成。")})
+        try:
+            decision = chat_json(self.llm, messages)
+        except LLMError as exc:
+            mission.outcome = "failed"
+            mission.summary = f"步数预算耗尽且收口调用失败: {exc}"
+            self.memory.finish(mission_id, mission.outcome, mission.summary)
+            self._record_skill_outcomes(False)
+            return mission
+
+        verdict = self.verifier.verify(
+            decision, self.evidence,
+            context=self._mission_context(mission_start_seq))
+        if decision.get("done") and verdict.ok:
+            mission.outcome = "success"
+            mission.summary = decision.get("summary", "")
+            mission.evidence_refs = list(verdict.evidence_refs)
+            self.evidence.append("conclusion", {
+                "summary": mission.summary,
+                "evidence_refs": mission.evidence_refs,
+                "verdict": verdict.reason, "phase": "budget_concluded"})
+            self.memory.finish(mission_id, mission.outcome)
+            self._record_skill_outcomes(True)
+            return mission
+
         mission.outcome = "failed"
-        mission.summary = f"超过最大步数 {self.max_steps}，任务未完成"
+        mission.summary = (f"步数预算耗尽（max_steps={self.max_steps}），"
+                           f"切换收口策略后仍未通过判定: {verdict.reason}")
         self.memory.finish(mission_id, mission.outcome, mission.summary)
         self._record_skill_outcomes(False)
         return mission

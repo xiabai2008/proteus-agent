@@ -28,39 +28,51 @@ def test_initialize(server):
     assert r["result"]["protocolVersion"]
 
 
+def _payload(response) -> object:
+    """取 MCP 规范 content 块数组里的 JSON 文本并解析回对象。"""
+    blocks = response["result"]["content"]
+    assert isinstance(blocks, list) and blocks[0]["type"] == "text"
+    return json.loads(blocks[0]["text"])
+
+
 def test_tools_list(server):
     r = _call(server, "tools/list")
-    names = {t["name"] for t in r["result"]["tools"]}
+    tools = {t["name"]: t for t in r["result"]["tools"]}
     assert {"port_scan", "http_probe", "dns_lookup", "robots_fetch",
             "poxiao_scan", "pentest_run", "pentest_skills",
-            "pentest_missions", "pentest_reflect"} <= names
+            "pentest_missions", "pentest_reflect"} <= set(tools)
+    # 官方 SDK 客户端会严格校验：inputSchema 必须存在且是 object
+    for tool in tools.values():
+        assert tool["inputSchema"]["type"] == "object"
+        assert "parameters" not in tool          # 非规范字段不外泄
 
 
 def test_tool_call_builtin(server):
     r = _call(server, "tools/call", {
         "name": "dns_lookup", "arguments": {"domain": "localhost"}}, msg_id=2)
     assert "error" not in r
-    assert "127.0.0.1" in r["result"]["content"]["output"]["ips"]
+    payload = _payload(r)
+    assert "127.0.0.1" in payload["output"]["ips"]
 
 
 def test_tool_call_unknown_tool(server):
     r = _call(server, "tools/call",
               {"name": "ghost", "arguments": {}}, msg_id=3)
-    content = r["result"]["content"]
-    assert content["ok"] is False
-    assert "未知工具" in content["error"]
+    payload = _payload(r)
+    assert payload["ok"] is False
+    assert "未知工具" in payload["error"]
 
 
 def test_pentest_skills_empty(server):
     r = _call(server, "tools/call",
               {"name": "pentest_skills", "arguments": {}}, msg_id=4)
-    assert r["result"]["content"] == []
+    assert _payload(r) == []
 
 
 def test_pentest_missions_empty(server):
     r = _call(server, "tools/call",
               {"name": "pentest_missions", "arguments": {}}, msg_id=5)
-    assert r["result"]["content"] == []
+    assert _payload(r) == []
 
 
 def test_unknown_method(server):

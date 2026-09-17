@@ -1,0 +1,21 @@
+# modes/base.yaml
+# 基础模式：只放"公共默认值"，供其他模式 inherits 继承（不直接作为运行模式）。
+# 注意：本文件刻意不写 verifier.require_poc —— 否则会随深合并泄漏进 CTF 模式。
+id: base
+label: 基础模式（公共默认，供继承）
+persona: {system_prompt: prompts/pentest.md, output_format: markdown_report}
+capability:
+  allow: ["*"]
+  deny: []
+  constraints: {}
+permission:
+  default: ask
+  auto_approve: []
+  require_confirm: []
+  hard_deny: []
+budget: {max_steps: 40, max_minutes: 180, max_cost_usd: 5.0, model_tier: {recon: cheap, reason: strong}}
+scope: {target_allowlist: required, network_egress: false}
+verifier: {type: evidence_chain}
+skills: []
+memory_namespace: base
+sandbox: docker

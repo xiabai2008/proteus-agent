@@ -1,0 +1,33 @@
+{
+  "note": "外部 MCP Server 注册表（声明式，不在此处连接）。路径按 AGENTS.md 第 7 条以绝对路径引用外部项目，不搬迁、不 vendor。discover_mcp() 时才真正连接；不可用的 server 不注册其工具。",
+  "servers": {
+    "rayscan": {
+      "transport": "http",
+      "url": "http://127.0.0.1:18000/mcp",
+      "start": "python -m wvs mcp --host 127.0.0.1 --port 18000",
+      "workdir": "<WS>/RayScan",
+      "description": "RayScan 全栈 Web 扫描（工具：scan / list_modules / get_report）",
+      "timeout": 60,
+      "dangerous": true,
+      "modes": ["pentest-standard"],
+      "tool_overrides": {
+        "list_modules": {"dangerous": false},
+        "get_report": {"dangerous": false}
+      }
+    },
+    "chameleon": {
+      "transport": "stdio",
+      "command": ["<WS>/Chameleon/.venv/Scripts/python.exe", "-m", "chameleon.interfaces.mcp_server"],
+      "workdir": "<WS>/Chameleon",
+      "pythonpath": "<WS>/Chameleon/src",
+      "description": "Chameleon 反检测抓取（12 工具；三引擎 + 反爬升级）",
+      "timeout": 60,
+      "dangerous": false,
+      "modes": [],
+      "tool_overrides": {
+        "crawl_site": {"dangerous": true},
+        "map_site": {"dangerous": true}
+      }
+    }
+  }
+}
