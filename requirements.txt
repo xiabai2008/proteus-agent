@@ -8,9 +8,19 @@ PyYAML>=6.0
 pytest>=8.0
 
 # 可选依赖：RL 进化链路（penagent/ppo.py、examples/train_ppo.py、examples/eval_closed_loop.py）
-# 需要 torch（CPU 版即可）。未安装时相关测试自动跳过（pytest.importorskip），
-# 不阻塞其余功能与测试。需要时：pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# 可选依赖：RL 进化链路（penagent/ppo.py、examples/train_ppo.py、examples/eval_closed_loop.py）
-# 需要 torch（CPU 版即可）。未安装时相关测试自动跳过（pytest.importorskip），
-# 不阻塞其余功能与测试。需要时：pip install torch --index-url https://download.pytorch.org/whl/cpu
+# 需要 torch（CPU 版即可）。**刻意不进上面的安装列表**——保持可选依赖定位
+# （AGENTS.md 硬规则 5）：未安装时相关测试自动跳过（pytest.importorskip），
+# 不阻塞其余功能与测试。
+#
+# 状态：已验证（2026-09-18，命令与原始数据见 docs/RL链路实测记录.md）
+#   环境：pytest 解释器 <PY312>\python.exe + torch 2.8.0+cpu
+#   数据：屏蔽 torch 时 165 passed / 3 skipped；torch 就位后 173 passed / 0 skipped
+#        （3 处 importorskip 用例全部真跑通过）
+# 安装（二选一）：
+#   pip install torch -i https://mirrors.aliyun.com/pypi/simple/
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# 注意：评测脚本 examples/eval_evolution.py 与 eval_closed_loop.py 还需要 07 靶场的
+# `warfare` 包（<WS>\网安项目开发规划\07-agent-war-range）。跑 pytest 时
+# conftest.py 会自动解析并注入 PYTHONPATH；直接跑脚本要自己带上：
+#   PYTHONPATH="<WS>\网安项目开发规划\07-agent-war-range" python examples/eval_evolution.py

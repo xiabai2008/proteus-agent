@@ -113,6 +113,21 @@ for (const p of found) console.log(p.id, 'broken=' + (p.broken ?? '否'))
 "
 ```
 
+**这个检查覆盖到哪、没覆盖到哪**（2026-09-17 实测核对源码所得）：
+
+- 覆盖：composition 文件用 Loader 自身的 YAML 方言解析通过；每一行的 **specifier
+  可解析**（包是否装在本机 harness、相对路径的文件是否存在）。
+- **不覆盖**：行 `config` 里的路径与表达式。`broken` 的判据是 `rowResolves()`，
+  它只看行的 `name`，**不看** `command` / `cwd` / `env`。python 路径写错、`cwd`
+  指错目录，`broken` 依然是空。
+- **不覆盖**：`!!js` 表达式的求值。DSH 源码里写明了这个取舍——health 检查刻意
+  不评估 `!!js`（`lib/index.js`：*the one carrying `!!js` ... so health can never
+  call a composition broken*），求值发生在真正挂载时（Loader 的 `internal/config`
+  钩子 → `interpolate()` 递归求值整份行 config，包括嵌套的 `env`）。
+
+所以 `broken` 为空只说明「这份 preset 能装上」，不说明「装上了内核一定起得来」。
+后者要靠 5.2 / 5.3 或真机会话（5.4）验证。
+
 ### 5.2 MCP 行能否拉起内核（不需要起会话）
 
 preset 里那一行的命令，单独跑一次即可确认工具清单：
@@ -133,6 +148,19 @@ tools, reason = probe_server(spec); print(len(tools), 'tools |', reason or 'OK')
 
 不启动 UI，直接在本机 harness 环境里用**与 preset 完全相同的配置**挂载 DSH 自带的
 `@deepseek-ai/dsh-mcp-client`，断言注册出的工具名并真实调用：
+
+> **先交叉核对（必做）**：下面的 config 是 preset 里那一行的**人工副本**，不是从
+> preset YAML 派生的。preset 里的 `command` / `cwd` 写错时，5.1 的 `broken` 不会
+> 报（它不看行 config），而本步骤会因为抄的是正确值而通过——形成假阴性。
+> 所以跑之前先对一遍：
+>
+> ```bash
+> grep -nE "^ *(- id:|command:|cwd:|args:|transport:|toolCallTimeoutMs|failOnStartupError)" \
+>   <仓库>/dsh/.agent-presets/proteus/agent.cordis.yml
+> ```
+>
+> 与下方脚本里的 `command` / `cwd` / `args` 逐字一致再往下走；不一致以 preset 为准，
+> 并回头修脚本或 preset（两者的差异本身就是问题）。
 
 ```bash
 cd ~/.dsh/profiles          # 该目录的 node_modules 里装着 harness 包
@@ -221,11 +249,47 @@ node verify-proteus.mjs && rm verify-proteus.mjs
    要用原始文件可改 preset 里的 `promptPath`。
 3. **模式与 DSH 审批是两套闸**：DSH 侧审批（host 平面）管"这次调用要不要批准"，
    内核侧 ModeProfile 管"这个工具在该模式下是否可见/可执行、参数冻结、预算与判定器"。
-   **但内核的 MCP 底层工具入口目前仍直连注册表、未过 Policy**（阶段一验收报告已列为遗留项），
+   **但内核的 MCP 底层工具入口目前直连注册表、未过 Policy**（阶段一验收报告已列为遗留项），
    因此通过 `mcp__proteus__<底层工具>` 直接调用时，只受 DSH 审批约束；
    走 `mcp__proteus__pentest_run` 才完整经过内核的模式与护栏。
-4. **一处未做到位的规范细节**：内核 MCP server 的底层工具分支在**失败**时，
-   结果里的 `isError` 仍为 `false`（失败信息在文本载荷的 `{"ok": false, "error": ...}` 里，
-   客户端可读）。修它需要在 `registry.execute(...)` 那一行附近改动，而该行反复被本机
-   安全扫描误判为「SQL 注入」拦截，故暂缓；不影响工具可见与成功调用。
-5. **安全前提**：默认目标白名单仅 127.0.0.1/localhost；仅用于授权范围内的受控安全实验。
+
+   **2026-09-17 实测补充（比上面这段更严重，务必看）**：被绕过的**不只是模式约束**，
+   运行期 `--targets` 目标白名单同样不生效——白名单只存在于 `PentestMCPServer.policy`
+   （`penagent/mcp.py:63`），而底层分支调的是 `self.registry.execute(name, args)`
+   （`penagent/mcp.py:147`），从不调用 `Policy.check`，所以那份 policy 是死代码。
+   实测：`--targets 127.0.0.1` 起服务后，`mcp__proteus__port_scan` 传 `127.0.0.2`
+   （loopback 但不在精确匹配的白名单里）与 `192.168.1.1`（内网）都**照常执行**并返回
+   `ok: true`，后者真实发起了 TCP 连接尝试。同一分支也不校验 `dangerous` /
+   `authorize` / permission 档位。
+
+   影响面：档位的选择要按"内核不设防"来定——`proteus-ctf`（`approval: never` +
+   `danger-full-access`）下，越界目标既不弹审批、也不被内核拦。详见
+   `docs/DSH宿主实测记录.md` 的 F1；根治要改内核 `penagent/mcp.py`，超出"只改
+   `dsh/` 与 `docs/`"的范围，本次仅记录。
+4. **失败一律报成成功：`isError` 恒为 `false`**（2026-09-17 实测修正，比原描述更严重）。
+   内核 MCP server 的 `_result()` 把 `is_error` 默认成 `False`，而所有调用点都不传它
+   （`penagent/mcp.py` 的 `:134` `:137` `:139` `:144` `:148`），`ToolResult.ok` 也从未映射
+   到 `isError`。实测两种失败形态都逃逸：
+
+   | 调用 | 载荷 | `isError` |
+   |---|---|---|
+   | `robots_fetch` 缺参（传 `url`，schema 要 `base_url`） | `{"ok": false, "error": "missing 1 required positional argument: 'base_url'"}` | `false` |
+   | `pentest_run` 无 LLM 配置 | `{"outcome": "failed", "summary": "LLM 调用失败: 未配置 PENTEST_LLM_API_KEY", ...}` | `false` |
+
+   注意第二种连 `ok` 字段都没有（高层能力用 `outcome` 表达结果），所以"客户端读
+   `{"ok": false}` 就能判断失败"这个说法**不成立**——严格客户端只能拿到 `isError=false`。
+   另外 `unknown tool` 那类错误是 DSH 侧拒的（`isError=true`），不是内核报的。
+
+   修它要改 `penagent/mcp.py` 的 `_result()` 与各调用点（把 `ToolResult.ok` 映射进
+   `is_error`），属内核范围，超出"只改 `dsh/` 与 `docs/`"，本次仅记录。不影响工具
+   可见与成功调用。
+5. **安全前提（按路径区分，别一概而论）**：默认目标白名单仅 127.0.0.1/localhost。
+   该前提**只在 `pentest_run` 路径成立**（它在内核里跑，过 Policy）；
+   `mcp__proteus__<底层工具>` 路径不成立（见上面第 3 条实测）。因此"本接入默认只在
+   回环上活动"这句话**不能当作底层工具路径的保证**。仅用于授权范围内的受控安全实验。
+
+6. **函数型工具静默丢弃未知参数**：`ToolRegistry.execute` 先按 `spec.parameters`
+   过滤实参再调用（`penagent/tools.py:100`），所以传错参数名不会得到"未知参数"提示，
+   而是参数被丢掉、再由 Python 抛缺参 TypeError（实测 `robots_fetch` 传 `url` 得
+   `missing 1 required positional argument: 'base_url'`）。客户端只要照着
+   `inputSchema` 传参就不受影响，但报错信息对模型不友好。属内核范围，本次仅记录。

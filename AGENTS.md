@@ -30,6 +30,10 @@
 - 已知重构点：`agent.py` 的 `Policy.authorize` 是硬编码布尔值、`SYSTEM_PROMPT` 是模块级常量——这两处是模式化的改造入口。
 - 模式雏形参考：`<WS>\dawnforge-pentest\config\modes.yaml`（tool_constraints 机制性禁用的做法直接借鉴）。
 - CTF 现状：`dawnforge-pentest/skills/pentest_skills/ctf-*` 只有 SKILL.md 文档，无实现；本地已有 rsactftool / jadx / x64dbg 等二进制（`<TOOLS_DIR>\bin`）。
+- RL 进化链路（`ppo.py` / `rl.py` + `examples/eval_evolution.py`、`eval_closed_loop.py`）：**已验证**（2026-09-18，命令与原始输出见 `docs/RL链路实测记录.md`）。
+  环境：pytest 解释器 `<PY312>\python.exe` 上装的是 `torch 2.8.0+cpu`；torch 保持**可选依赖**定位不变（硬规则 5，不进 `requirements.txt` 安装列表），屏蔽 torch 时 165 passed / 3 skipped，就位后 173 passed / 0 skipped。
+  数据：`eval_evolution.py` 决策步数 6.0 → 3.0（下降 50%，与内核 README 声称一致）；`eval_closed_loop.py` 四层叠加为基线 4.28 → Q 学习 2.60（-39%）→ PPO 2.50（-42%），三次重跑逐位一致。
+- 外部依赖 **07 靶场**：两个评测脚本需要 `warfare` 仿真包，位于 `<WS>\网安项目开发规划\07-agent-war-range`（注意**不在** `<WS>\07-agent-war-range`）。`conftest.py` 按 `PENTEST_G07_ROOT` → 相邻布局 → 本机绝对路径的顺序解析并注入 `PYTHONPATH`（供测试用 subprocess 拉起的评测脚本继承）；直接跑脚本时须自行设 `PYTHONPATH`，否则报 `ModuleNotFoundError: No module named 'warfare'`。
 
 ## 4. ModeProfile 规范（阶段一的核心交付）
 
