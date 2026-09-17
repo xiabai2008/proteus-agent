@@ -98,6 +98,8 @@ def test_run_uses_ranked_skills(tmp_path, monkeypatch):
 def test_rank_with_ppo_policy(tmp_path):
     """PPO 策略（神经网络）与 _rank_skills 接口兼容，按策略结果排序。"""
 
+    pytest.importorskip("torch", reason="PPO 进化链路需要 torch（可选依赖，未安装时本用例跳过）")
+
     import torch
 
     from penagent.ppo import PPOSkillPolicy, VOCAB

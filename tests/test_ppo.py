@@ -7,6 +7,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import pytest
 
+pytest.importorskip("torch", reason="PPO 进化链路需要 torch（可选依赖，未安装时本模块跳过）")
+
 from penagent.ppo import PPOSkillPolicy, state_feature
 
 SKILLS = ["web-exploit", "ssh-exploit", "full-recon"]

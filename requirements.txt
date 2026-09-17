@@ -1,4 +1,16 @@
-# 运行时零依赖（Python 标准库）
+# 运行时近乎零依赖（Python 标准库为主）
 # LLM 调用：OpenAI 兼容端点（.env 配置）
+# 模式定义（modes/*.yaml）解析：取用 YAML 事实标准库 PyYAML，
+# 模式模型与校验仍为手写（不引 Pydantic / LangChain，见 AGENTS.md 硬规则 5）
+PyYAML>=6.0
+
 # 测试：
 pytest>=8.0
+
+# 可选依赖：RL 进化链路（penagent/ppo.py、examples/train_ppo.py、examples/eval_closed_loop.py）
+# 需要 torch（CPU 版即可）。未安装时相关测试自动跳过（pytest.importorskip），
+# 不阻塞其余功能与测试。需要时：pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# 可选依赖：RL 进化链路（penagent/ppo.py、examples/train_ppo.py、examples/eval_closed_loop.py）
+# 需要 torch（CPU 版即可）。未安装时相关测试自动跳过（pytest.importorskip），
+# 不阻塞其余功能与测试。需要时：pip install torch --index-url https://download.pytorch.org/whl/cpu

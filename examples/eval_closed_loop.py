@@ -60,7 +60,12 @@ def evaluate(hosts, choose_seq, fallback: bool = False) -> dict:
 
 
 def main() -> int:
-    import torch
+    try:
+        import torch
+    except ModuleNotFoundError:
+        print("闭环评测含 PPO 层，需要 torch（可选依赖）。"
+              "安装：pip install torch --index-url https://download.pytorch.org/whl/cpu")
+        return 2
 
     torch.manual_seed(42)
     rng = random.Random(42)

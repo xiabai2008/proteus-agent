@@ -10,6 +10,7 @@ import pytest
 
 def test_closed_loop_script():
     """闭环回归评测可运行：四层策略对比输出收益链。"""
+    pytest.importorskip("torch", reason="闭环评测含 PPO 层，需要 torch（可选依赖，未安装时本用例跳过）")
     import subprocess
 
     proc = subprocess.run(
