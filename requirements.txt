@@ -1,0 +1,4 @@
+# 运行时零依赖（Python 标准库）
+# LLM 调用：OpenAI 兼容端点（.env 配置）
+# 测试：
+pytest>=8.0

@@ -1,0 +1,475 @@
+# 多模式渗透测试 Agent 调研报告
+
+> **调研主题**：开发一款支持多模式切换（常规渗透测试模式 / CTF 比赛模式等）的渗透测试 Agent
+> **调研范围**：GitHub 同类项目架构调研 · 本地 `<WS>` 资产复用评估 · 自研 vs 二次开发路线对比 · 多方案推荐
+> **数据时点**：2026-09-17（GitHub 星标、许可、语言均经 API 实时核验）
+> **配套文件**：本报告替代 2026-08 版《网安 agent 渗透调研报告-团队版》（该版本侧重学术/商业全景，无本地代码复用评估与路线决策，本版为其升级与收敛）
+
+---
+
+## 0. 结论速览
+
+先给结论，再讲论证。
+
+**第一，你的起点比你以为的高得多。** 本地已经存在一款可运行的渗透测试 Agent（`网安项目开发规划/10-pentest-agent`，代号 XPentest，7210 行 Python，64 个测试用例），自带 ReAct 决策内核、证据链反幻觉、记忆与技能沉淀、MCP Server（10 个工具）、16 项工具矩阵配置。同时 `dawnforge-pentest` 里已经有一份 `config/modes.yaml`，定义了 safe / normal / aggressive 三档模式与关键词触发。**"多模式"不是从零建立，而是把已有雏形抽象成正式的一等公民机制。**
+
+**第二，"从零完全自研"这条路线可以直接排除。** 不是因为难，而是因为没有任何一条理由成立——你已经付过这笔成本了。
+
+**第三，"魔改 deepseek-harness"不应作为主线。** DSH 是 TypeScript / Cordis 插件框架，架构优秀（无特权内核、profile + bundle + patch 分层、现成的沙箱与审批骨架）。但你的全部安全资产是 Python，把 DSH 当内核意味着所有能力都要跨语言重写或包一层 MCP。**正确用法是：把 DSH 当作"可选宿主前端"，而不是当作内核。**
+
+**第四，主推路线是"自有内核 + MCP 工具化 + 宿主双入口"**（方案 C）。核心逻辑一句话：能力层用 MCP 统一暴露，内核保持语言中立、可脱离宿主独立运行，DSH / Claude Code / Codex 只是其中一个调用方。这与你自己在《红队平台设计/自建方案》里已经写下的原则完全一致——**"手脚不依赖大脑也能跑，dsh 挂了 CLI 照常能用"**。
+
+**优先推荐：方案 C（演进式）**，三阶段：先做模式抽象层（1~2 周出可用版本）→ 再做工具 MCP 化与 CTF 能力补齐 → 最后接 DSH 宿主与 Web 控制台。落地方案 C 与 D 不冲突，D 是 C 的宿主侧配件。
+
+| 方案 | 一句话 | 落地难度 | 预期收益 | 建议 |
+|---|---|---|---|---|
+| **A 完全自研** | 全部重写 | 高 | 低 | **排除** |
+| **B 魔改 DSH 为内核** | 以 TypeScript harness 为地基 | 高 | 中 | **不作为主线** |
+| **C 自有内核 + MCP 工具化** | XPentest 做内核，能力 MCP 化，宿主可选 | **中低** | **高** | **主推** |
+| **D DSH 宿主插件化** | 做成 DSH agent-preset + 插件包 | 中 | 中高 | **作为 C 的宿主层并行做** |
+
+---
+
+## 第一部分 · 现有同类项目调研
+
+### 1.1 调研口径
+
+初筛 72 个仓库，深读 37 个（github.com，2026-09-17）。分层标准：**按"是否依赖外部终端 harness"划路线**，因为这条标准直接决定你的架构选择。星标、语言、许可证均经 GitHub API 实时核验，非二手引用。
+
+### 1.2 生态地图：三条技术路线
+
+调研下来，现有项目清晰地分成三条路线，没有第四条。
+
+**路线一：独立 CLI Agent（自带决策循环）。**
+代表：`usestrix/strix`（63,063 星，Python，Apache-2.0）、`vxcontrol/pentagi`（24,592 星，Go，MIT）、`0x4m4/hexstrike-ai`（11,922 星，Python，MIT）、`GreyDGL/PentestGPT`（15,495 星，Python，MIT，2023-02 起，生态最老）。
+特征：自己实现 agent loop + 工具调度，用户直接跑它的 CLI。**能力上限受自己的循环质量限制，但可独立运行、可进 CI、可脱离任何商业 harness。**
+
+**路线二：终端 Harness 延伸型（依附于 Claude Code / Codex 等宿主）。**
+代表：`CyberStrikeus/CyberStrike`、`cdxiaodong/cain-agent`、`chainreactors/aiscan`、各类 `pentest-skills` 技能包。
+特征：自己不实现循环，靠宿主 harness 的循环 + 技能/子智能体/权限机制工作。**开发成本极低（只写技能与工具描述），但能力天花板 = 宿主天花板，且无法脱离宿主独立交付。**
+
+**路线三：多智能体框架 + 领域微调模型。**
+代表（学术系）：`PurpleAILAB/Decepticon`、`GH05TCREW/pentestagent`、RapidPen、Cochise、HackSynth、xOffense。
+特征：规划器 / 执行器 / 分析器分工，部分配领域微调模型。**架构最"重"，真实环境可靠性未验证；核心价值是架构范式而非可用产品。**
+
+**你的定位判断**：XPentest 属于**路线一**（自带 ReAct 循环 + MCP Server），dawnforge-pentest 属于**路线二**（Agent 无关的技能层，明确支持 Claude Code / Codex / OpenCode / Cline / Trae / WorkBuddy）。**你已经在两条路线上都有资产——这是罕见的优势，也是本报告主推"双入口"的根本原因。**
+
+### 1.3 重点项目架构解剖
+
+#### Strix（usestrix/strix）— 63,063 星，Python，Apache-2.0，2025-08 创建
+
+**架构**：多 agent 编排（Graph of Agents），每个 agent 在**独立 Docker 沙箱**中运行，配备完整工具链 + 浏览器。Agent 之间通过共享状态通信，主 agent 负责规划与分发。
+
+**可借鉴点（三个，都很硬）**：
+1. **多 agent 并行 + 每个人一个容器**。这是解决"工具污染 / 状态串味"的工程答案，也是端到端可靠性的前提。单体循环在长任务里必然退化。
+2. **动态验证代替静态猜测**。它强调"真实可复现 PoC"，拒绝仅凭模式匹配下结论。这与你的三态判定（Conf / Safe / Unknown）思想同源——核心都是**区分"已验证"与"未验证"**。
+3. **三档运行模式**：快速 / 标准 / 深度，按时间预算切换策略。这是模式切换最朴素的形态。
+
+**短板**：Python + Docker 沙箱在 Windows 上体验差（依赖 WSL2）；面向 Web/API，内网横向覆盖弱；定位动态应用安全测试而非完整渗透。
+
+#### PentAGI（vxcontrol/pentagi）— 24,592 星，Go，MIT
+
+**架构**：Go 后端 + PostgreSQL + Docker 容器化运行环境，前端 Web 控制台。核心是**角色化 agent 团队**（researcher / developer / executor 三类角色），每个角色有独立工具集与提示词。
+
+**可借鉴点（三个）**：
+1. **角色化 agent 而非通用 agent**。这是"模式切换"的一种天然实现——换模式 = 换角色编队 + 换工具集。
+2. **权限注册表与角色绑定**。工具的执行权限不写死在代码里，而是与角色配置绑定，**这是权限模型与模式系统解耦的关键设计**。
+3. **完整的物化环境**：终端 + 浏览器 + 代码编辑 + 知识图谱（Graphiti 长期记忆）在同一个容器内。解决了 agent"看得见但摸不着"的问题。
+
+**短板**：Go 技术栈与你现有 Python 资产完全不通用；组件重（Postgres + Docker + 多容器），单机演示成本高；无内置反幻觉/取证机制。
+
+#### HexStrike AI（0x4m4/hexstrike-ai）— 11,922 星，Python，MIT
+
+**架构**：典型的 **MCP 工具聚合型**——把 150+ 安全工具的调用封装成 MCP Server，LLM 客户端（Claude / GPT / Copilot）通过 MCP 协议调用。
+
+**可借鉴点**：**"工具层与决策层彻底解耦"的教科书实现**。工具只负责"给参数、拿结果"，不关心是谁在调。这直接回答了你最关心的一个问题：**新增能力不需要改 agent 内核**。
+
+**短板**：它是"工具箱"不是"agent"——没有规划、没有记忆、没有证据链、没有状态管理。模式切换、任务分解、结果研判全部依赖宿主 LLM 的临场发挥。**这也正是为什么纯工具聚合路线做不出稳定产品。**
+
+#### PentestGPT（GreyDGL/PentestGPT）— 15,495 星，Python，MIT
+
+**架构演进**：2023 年的初代三模块设计（推理 / 生成 / 解析）解决 LLM 长上下文丢失问题；2025 年后重构为 **agentic + MCP + 可插拔模型后端**，支持多 LLM provider 与 Claude Code 集成。
+
+**可借鉴点**：**它证明了"单一 agent 循环 + 外部知识检索"路线的生命周期极限**。初代设计曾在 GPT-3.5 上把任务完成度提升 228.6%，但后续评测（AI-Pentest-Benchmark）显示：换成 GPT-4o / LLaMA3.1-405B 后仍难全自动完成。**结论：架构不改，光换模型救不了。**
+
+**短板**：Web 场景为主，内网/AD 覆盖弱；端到端全自动成功率低。
+
+#### Decepticon / pentestagent / RapidPen / Cochise（学术系）
+
+| 项目 | 架构核心 | 值得借鉴的机制 |
+|---|---|---|
+| **PurpleAILAB/Decepticon** | 感知 → 推理 → 规划 → 执行 闭环 | 独立红队 agent，闭环分层清晰，可作架构参考 |
+| **GH05TCREW/pentestagent** | 黑盒安全测试 agent 框架 | 面向漏洞赏金/红队工作流的任务组织方式 |
+| **RapidPen** | ReAct 规划 + 检索增强利用知识库 | **成功案例复用**（HTB 目标 200-400 秒拿 shell，单次成本 0.3-0.6 美元）。与你的"技能沉淀"机制同源 |
+| **Cochise** | Planner-Executor，630 行 Python | **可回放的轨迹日志 + analyze 工具**。极轻量，是"可审计"的最佳参考实现 |
+| **HackSynth** | Planner + Summarizer 双模块 | CTF 导向；反馈聚合（Summarizer）设计值得抄 |
+| **VMS** | Planner + Summarizer + 容器化 | 容器化安全环境限制危害范围 |
+
+#### CyberStrike / cain-agent / aiscan（Harness 延伸型）
+
+| 项目 | 关键设计 |
+|---|---|
+| **CyberStrikeus/CyberStrike** | 13+ 自治 agent、150+ LLM provider、7600+ 攻击技能、176+ MCP 工具。**规模化的技能库组织方式**值得参考，但技能质量参差 |
+| **cdxiaodong/cain-agent** | 云厂商专项（AWS/Azure/GCP + 阿里/腾讯/华为云）模块化。**"按目标类型装插件"的模式化思路** |
+| **chainreactors/aiscan** | 单二进制、类 pi 的网安 agent。Go 生态，工程化程度高 |
+
+### 1.4 【关键】模式切换的五种公开实现范式
+
+这是本次调研最直接回答你需求的部分。所有成熟项目的模式切换，拆开来看只有五种机制，**且它们可以叠加**：
+
+| 范式 | 实现方式 | 代表项目 | 适合承载什么差异 |
+|---|---|---|---|
+| **P1 配置档（Profile）** | 一份 YAML/JSON 定义模块开关、参数、并发、超时、目标白名单 | `dawnforge-pentest/config/modes.yaml`（safe/normal/aggressive）、你的 `网安工具自研/profiles/*.yaml` | 工具开关、参数约束、性能预算 |
+| **P2 提示词人格（Persona）** | 换 system prompt 文件即换行为范式 | DSH `packages/preset/persona`、strix 各 agent 提示词 | 思维方式、输出格式、风险偏好 |
+| **P3 工具白名单 + 参数冻结（Constraint）** | 模式决定可用工具集合，并对工具追加固定参数 | `dawnforge` 的 `tool_constraints`（如 safe 模式 `nuclei: null` 直接禁用） | 危险能力开关（主动攻击 vs 被动收集） |
+| **P4 权限策略（Permission Policy）** | 模式绑定审批档位：自动放行 / 人工确认 / 直接拒绝 | DSH `packages/guard` + `user-approval`、pentagi 权限注册表 | 高危操作闸门（反连 shell、写 webshell） |
+| **P5 预算策略（Budget）** | 模式决定时间/步数/token/成本上限 | strix 三档（快速/标准/深度） | CTF（分秒必争）vs 常规渗透（小时级） |
+
+**范式落地的一条硬规则**：模式必须在**工具执行前**生效，而不是只在提示词里"提醒模型"。DawnForge 的 `modes.yaml` 已经做对了这件事——safe 模式下 `nuclei` 配成 `null`，是**机制性禁用**，不是靠模型自觉。你的 XPentest 目前只有提示词层的 `stealth` 参数和 `Policy` 的 `authorize` 布尔值，**这是最大的待补短板**。
+
+### 1.5 【关键】CTF 模式 vs 常规渗透模式的设计差异
+
+这是"多模式"里真正困难的部分。两者不是参数不同，而是**目标函数不同**。逐项对比：
+
+| 维度 | 常规渗透测试 | CTF 比赛 | 对架构的要求 |
+|---|---|---|---|
+| **目标已知性** | 目标模糊，需先做资产发现与范围界定 | 目标明确（一个 IP / 一个 URL / 一个文件），无需侦察 | 模式决定**是否启用侦察阶段**（CTF 下侦察是浪费预算） |
+| **成功判据** | 主观：漏洞验证 + 证据链 + 报告 | **客观：flag 字符串正则匹配** | 需要**可插拔的"成功判定钩子"**——CTF 用 flag 正则，渗透用证据链校验。这是最关键的差异点 |
+| **时间预算** | 小时到天级，可从容规划 | 分钟级（比赛 2-48 小时，单题 10-30 分钟为宜） | 预算必须进模式定义，且要触发"超时换策略"而非硬退出 |
+| **工具集** | Web 扫描 / 内网 / 后渗透 / 报告 | Web / Crypto / Pwn / Reverse / Misc / 取证 | 工具集差异极大——**Crypto/Pwn/Reverse 你目前完全没有** |
+| **核心动作** | 调用成熟工具 + 研判结果 | **大量写一次性脚本**（解 RSA、写 pwntools exploit、反编译分析） | 对**代码执行与文件操作**工具的依赖，远高于对扫描器的依赖 |
+| **反馈信号** | 稀疏（扫描结果） | **密集**（每题有明确对错，可快速迭代） | CTF 模式适合更强的自动重试与策略搜索 |
+| **外网连通性** | 通常隔离内网，无外连 | 常需拉取资料 / pip install / 连接远程靶机 | 沙箱策略必须**按模式切换网络白名单** |
+| **幻觉代价** | 高（错误结论进报告，影响信誉） | 中（试错成本低，但会烧掉比赛时间） | 反幻觉强度可随模式调节 |
+
+**这张表直接推导出三个架构结论**：
+
+1. **模式不能只是"提示词 + 参数"**，必须能挂载**不同的成功判定器（Verifier）**。这是 CTF 与渗透的分水岭。
+2. **CTF 需要一组全新的工具能力**（crypto / pwn / reverse），而这类任务高度依赖"写脚本 + 跑脚本"，不是"调扫描器"。这意味着 CTF 模式的工具层要**以代码执行沙箱为核心**，而非以扫描器为核心。
+3. **CTF 模式需要有"题面解析"入口**：常规渗透的输入是目标地址，CTF 的输入是"附件文件 + 题面文字 + 远程连接串"。**输入协议本身就要分模式。**
+
+### 1.6 从竞品得出的六条设计结论
+
+1. **端到端全自动仍不可靠**（AutoPenBench 全自动 21% / 半自动 64%；PentestEval 端到端 31%）。**多模式的价值不在"更自动"，而在"更匹配场景"**——CTF 模式追求速度与试错，渗透模式追求可审计与低误报。
+2. **侦察是瓶颈，不是利用**（给定准确漏洞上下文时功能成功率可达 90%，但自主侦察召回率仅约 50%）。模式设计应允许"人工喂侦察结果"作为一等输入。
+3. **失败分两类**：Type A（能力空白，工程可补）、Type B（规划/状态管理缺陷，换模型救不了）。**你的模式系统主要解 Type A，性价比最高**。
+4. **工具层与决策层必须解耦**（HexStrike 的核心贡献）。MCP 已成事实标准：Metasploit、ZAP、BloodHound、Nuclei 均已有官方或半官方 MCP 支持。
+5. **多 agent 并行 + 独立沙箱是长任务的可靠性前提**（strix 的答案）。单体循环在长会话里必然上下文退化。
+6. **技能沉淀 = 复利**（RapidPen 的成功案例复用、你的 XPentest 已有的技能成功率回写）。**这是你相对开源项目最独特的资产，务必保住并强化。**
+
+---
+
+## 第二部分 · 本地资产复用评估
+
+### 2.1 最重要的发现：你已经有一个渗透 Agent
+
+| 发现 | 路径 | 为什么重要 |
+|---|---|---|
+| **XPentest 渗透 Agent（可运行）** | `网安项目开发规划/10-pentest-agent/` | 7210 行 Python、64 测试、ReAct 内核 + 证据链 + 记忆 + 技能沉淀 + MCP Server（10 工具）+ 16 项外部工具配置。**"从零自研"这个选项因此不成立** |
+| **DawnForge 多 Agent 渗透工作台** | `dawnforge-pentest/`（部署于 `<TOOLS_DIR>`） | Agent 无关技能层，**69 个技能包含 5 个 CTF 技能**（ctf-web / ctf-crypto / ctf-pwn / ctf-reverse / ctf-misc），证据强制反幻觉，**已有 `config/modes.yaml` 三档模式 + 关键词触发** |
+| **本地工具军火库（已部署）** | `<TOOLS_DIR>\bin`（约 70 个）+ `tools/` | nuclei / fscan / sqlmap / httpx / subfinder / katana / naabu / dalfox / gobuster / ffuf / nmap / masscan / hydra / impacket / ysoserial / mimikatz / mitmproxy / jadx / x64dbg / rsactftool / stegoveritas / PEASS-ng 等，**binary 级复用，零适配成本** |
+| **模式化雏形（两份）** | `dawnforge-pentest/config/modes.yaml`、`网安工具自研/profiles/{default,aggressive}.yaml` | 已被验证可行的配置档设计，可直接抽象升级为统一模式规范 |
+
+**关键判断：你现在的真正缺口不是"Agent 有没有"，而是"模式机制没有抽象成一等公民"，以及"CTF 能力只有技能文档、没有实现"。**
+
+### 2.2 可复用资产总表
+
+按"在 Agent 中承担的层级"分组。复用评级：直接复用 / 小改适配 / 抽离重构 / 仅参考设计。
+
+#### 层一：Agent 内核与编排
+
+| 资产 | 路径 | 可复用组件 | 评级 | 集成方式 |
+|---|---|---|---|---|
+| **XPentest 决策内核** | `10-pentest-agent/penagent/agent.py`（243 行） | `PenAgent.run()` ReAct 循环、`Policy` 护栏、`_rank_skills()` 技能排序注入 | **直接复用** | 作为内核，扩展 ModeProfile 与 Verifier 接口 |
+| **证据链反幻觉** | `penagent/evidence.py`（105 行） | 链式哈希、`valid_refs()` 反幻觉引用校验（引用不存在的证据直接判失败） | **直接复用** | 内核标准组件，渗透模式必开 |
+| **记忆与技能沉淀** | `penagent/memory.py`（158 行）、`reflect.py`（87 行） | 作战记录、经验库、按指纹检索、成功率回写排序 | **直接复用** | 按模式隔离存储（技能库分域） |
+| **技能盲区发现** | `penagent/gaps.py`（98 行） | 工具调用热力统计、失败率分析、LLM 生成待补能力清单 | **直接复用** | 进化闭环 |
+| **RL 策略选择** | `penagent/ppo.py`（237 行）、`rl.py`（92 行） | Q-learning / PPO 技能选择策略 | 小改适配 | 可作"模式内策略搜索"（CTF 快速迭代场景） |
+| **工具注册表** | `penagent/tools.py`（127 行）+ `external_tools.json` | function / CLI 双模工具、危险标记、positional 参数、运行时存在性校验 | **直接复用** | 需增加"模式可用性"字段 |
+| **Playbook 引擎** | `AI驱动的自动化攻防对抗训练平台/core/playbook_engine.py` | DAG 并发编排、fail-closed 失败关闭 | **抽离重构** | 用于"模式内阶段编排"（如渗透五阶段流水线） |
+| **工具注册与治理** | `AI驱动的自动化攻防对抗训练平台/core/tool_registry.py` | 白名单 + 超时 + 结果脱敏 | **抽离重构** | 替代 XPentest 较薄的 `ToolRegistry` |
+| **红蓝判三方架构** | `AI驱动的自动化攻防对抗训练平台/agents/{red,blue,judge}_agent/` | 角色化 agent + ATT&CK 映射（`judge_agent/attck_map.py`）+ 评测反馈 | **抽离重构** | CTF 模式可复刻"解题-judge-反馈"结构 |
+
+#### 层二：工具执行与检测引擎
+
+| 资产 | 路径 | 可复用组件 | 评级 | 集成方式 |
+|---|---|---|---|---|
+| **RayScan** | `RayScan/`（v2.3.0，186 py，497 测试） | `wvs/mcp_server.py` + `wvs/modules/mcp`（**已有 MCP Server**）、20+ 检测模块、7 个外部引擎封装（nuclei/sqlmap/msf/awvs/nessus/ffuf/wappalyzer）、`wvs/exploit/engine.py`、证据包导出（含可复现 curl） | **直接复用** | 已 MCP 化，注册即用 |
+| **Chameleon** | `Chameleon/`（101 py） | **MCP Server（12 工具）+ REST API + CLI + Python SDK 四形态**、6 级反爬自动升级、三引擎（HTTP / 浏览器 / API 逆向）、SSRF 防护 + 审计日志 | **直接复用** | 已 MCP 化，是"工具层该怎么写"的范式样板 |
+| **poxiao 破晓** | `poxiao/`（v3.x，749 测试，71% 覆盖率） | SRC 全流程（子域/侦察/指纹/CVE 匹配/三层降噪）、`frostmoon/guanxing/jingzhe` 多命令入口 | **小改适配** | CLI 子进程（已在 XPentest 配置内） |
+| **ruoyi-scan** | `ruoyi-scan/` | 若依专项检测、三态判定（Conf/Safe/Unknown）、51 POC | **小改适配** | CLI 子进程（已接入） |
+| **LogicHunt** | `LogicHunt/`（36 py） | **LLM 推理驱动 Playwright 浏览器自动化挖逻辑漏洞** | **小改适配** | CTF-Web 模式的利器；建议 MCP 化 |
+| **PacketForge** | `PacketForge/`（45 py） | Nmap 端口/服务/漏洞扫描 adapter | **小改适配** | `penagent/adapters/packetforge.py` 已存在 |
+| **redforge** | `redforge/` | SRC 流水线引擎（子域→指纹→扫描→整理）、**诚实区分"已确认 / 未知"** | **抽离重构** | 与三态判定同源思想，可作批量模式的执行引擎 |
+| **ENScan_GO** | `ENScan_GO/`（34 go） | 企业资产测绘（多 API 聚合） | 小改适配 | CLI 子进程 |
+| **asset-survey** | `asset-survey/`（12 go） | AsamF 开源重写版，资产测绘 CLI | 小改适配 | CLI 子进程 |
+| **本地 Armory** | `<TOOLS_DIR>\bin` + `tools/` | 约 70 个已部署二进制工具 | **直接复用** | 配置化注册（无需复制代码） |
+| **hzr_tools 工具集** | `hzr_tools/` | Goby 红队版（1000+ POC）、天狐渗透工具箱、cipherlens、password-manager | 仅参考设计 | 作为工具来源与字典库 |
+
+#### 层三：宿主层与前端
+
+| 资产 | 路径 | 可复用组件 | 评级 | 集成方式 |
+|---|---|---|---|---|
+| **DawnForge 技能库** | `dawnforge-pentest/skills/pentest_skills/`（69 个技能包） | Web 漏洞全谱（SQLi/XSS/SSRF/SSTI/反序列化/请求走私/原型链…）+ **CTF 五件套** + 工具集成技能（poxiao/rayscan/ruoyi-scan/chameleon/sstimap/jyso/dalfox） | **直接复用** | 作为模式绑定的技能包，按模式加载 |
+| **模式定义雏形** | `dawnforge-pentest/config/modes.yaml`、`网安工具自研/profiles/*.yaml` | 三档模式 + `tool_constraints` + 关键词触发 | **抽离重构** | 抽象为统一 ModeProfile schema |
+| **DSH AgentTeams 插件** | `dsh-agent-teams/` | 团队创建 / 成员续聊 / 任务依赖 / 成员直连消息 + Web 活动面板 | **直接复用** | 多 agent 并行渗透的现成基础设施 |
+| **DSH Web UI** | `dsh-web-ui/`（647 文件，pnpm monorepo） | 现成 Web 客户端框架、组件库 | **小改适配** | 作控制台外壳 |
+| **dsh-ego-browser** | `dsh-ego-browser-src/` | 浏览器自动化（含 vitest 测试） | 小改适配 | CTF-Web / 逻辑漏洞模式 |
+| **渗透 Agent 设计文档** | `网安项目开发规划/docs/个人渗透Agent产品设计.md` | 第一原则（LLM 决策 / 规则只做护栏）、进化闭环五单元、里程碑 | **直接复用** | 本次升级的设计基线 |
+| **红队平台自建方案** | `红队平台设计/自建方案-SRC渗透流水线.md` | "手脚不依赖大脑也能跑"分层原则、S1-S5 五阶段流水线、SQLite 状态层 | **直接复用** | 架构决策依据 |
+
+#### 层四：知识库 / 靶场 / 无关资产
+
+| 资产 | 结论 |
+|---|---|
+| `ai渗透测试/`（100 md）、`shengtou_tools`、`StarMap`、`secublog`、`WEB_self` | 知识库与学习材料，仅作语料来源 |
+| `AI驱动的自动化攻防对抗训练平台/` | 靶场 + 红蓝对抗环境，**CTF 模式的评测靶场可直接复用** |
+| `10-pentest-agent/data/{ppo,rl}` + `examples/`（30+ 评测脚本） | 规避变体评测、检测感知训练、真实靶场对抗数据，作 CTF/规避模式的评测基线 |
+| `quantum-rl-scheduler`、`temperforge`、`reasonix-dev`、`dsh-deep-whale`、`game`、`minecraft-3d*` | 与本 Agent 无关 |
+
+### 2.3 Top 10 可复用资产（按复用价值降序）
+
+| # | 资产 | 复用价值 | 理由 |
+|---|---|---|---|
+| 1 | **XPentest 内核**（`10-pentest-agent/penagent/`） | 极高 | 成品 Agent，含反幻觉与记忆进化，是内核不二之选 |
+| 2 | **DawnForge 69 技能包 + modes.yaml** | 极高 | 技能全覆盖 + 已有模式雏形 + 含 CTF 五件套 |
+| 3 | **本地工具 Armory（约 70 个二进制）** | 极高 | 零适配成本，直接配置化注册 |
+| 4 | **XPentest MCP Server（`penagent/mcp.py`）** | 高 | 已有 10 工具 MCP 暴露能力，是"宿主双入口"的现成通道 |
+| 5 | **RayScan（含 MCP + 497 测试 + 证据包导出）** | 高 | 检测引擎主力，已 MCP 化，证据可复现 |
+| 6 | **Chameleon（MCP 12 工具 + 四形态接口）** | 高 | 工具层范式样板，且是 CTF-Web/逻辑漏洞的关键手 |
+| 7 | **证据链 + 反射技能沉淀**（`evidence.py` / `reflect.py` / `memory.py`） | 高 | 你相对开源项目的核心差异化 |
+| 8 | **攻防平台 core**（`playbook_engine.py` / `tool_registry.py` / `guardrail/`） | 中高 | DAG 编排 + 工具治理 + 护栏，工程化程度优于 XPentest |
+| 9 | **DSH AgentTeams 插件** | 中高 | 多 agent 并行的现成基础设施 |
+| 10 | **LogicHunt + dsh-ego-browser** | 中 | 浏览器自动化挖逻辑漏洞，补足动态交互能力 |
+
+### 2.4 缺口清单（本地没有、必须新建）
+
+| # | 缺口 | 影响 | 补充建议 |
+|---|---|---|---|
+| 1 | **模式切换机制（一等公民）** | 模式只存在于提示词与 skill 文档中，无机制性约束 | **核心新建项**，见方案 C |
+| 2 | **可插拔成功判定器（Verifier）** | 无法区分 CTF（flag 正则）与渗透（证据链） | 核心新建项 |
+| 3 | **CTF 解题实现（Crypto / Pwn / Reverse）** | 仅有 5 个 SKILL.md 文档，无代码；本地有 rsactftool / x64dbg / jadx 二进制但未封装 | 优先补 Crypto 与 Misc（性价比最高） |
+| 4 | **跨语言工具注册中心** | Python / Go / 二进制工具各自为政，XPentest 用 JSON、工具自研用 YAML | 统一为 MCP 注册中心 |
+| 5 | **统一 LLM Provider 抽象** | XPentest 用 openai 兼容层，其余项目各自为政；多模式需要"便宜模型跑侦察、贵模型跑推理"的分级路由 | DSH 已有模型适配器可参考 |
+| 6 | **运行时沙箱（Windows）** | 无隔离，高危工具直接跑在宿主上 | DSH `sandbox-windows-acl` 可参考，或改用 Docker/WSL2 |
+| 7 | **统一记忆层** | XPentest 有 missions/skills，DawnForge 有 memory，互不相通 | 按模式分区 + 统一检索接口 |
+| 8 | **输入协议分模式** | 目前只接受 `--target`；CTF 需要接受附件文件 + 题面 + 远程连接串 | 扩展 CLI/SDK 入参 schema |
+
+---
+
+## 第三部分 · 路线对比
+
+### 3.1 三条路线
+
+- **路线 A：从零完全自研。** 连 agent loop 都自己写。
+- **路线 B：基于成熟 Agent（DSH）二次开发 / 魔改。** 以 DSH 为内核，改造成渗透 Agent。
+- **路线 C：在自有 Agent（XPentest）基础上演进扩展。** 保住已有内核，补模式机制与能力。
+
+### 3.2 五维对比
+
+| 维度 | A 从零自研 | B 魔改 DSH | C 演进自有内核 |
+|---|---|---|---|
+| **技术契合度** | 无历史包袱，但全部重写 | **低**：DSH 是 TypeScript/Cordis，你的资产是 Python；每接一个能力都要跨语言桥接 | **高**：Python 原生，现有 7210 行代码与 70 个二进制工具直接可用 |
+| **初始成本** | 最高（内核 + 工具 + 记忆 + 护栏全写） | 中：循环/沙箱/审批白拿，但跨语言桥接与 profile 学习曲线是隐性成本 | **最低**：内核已存在，只补模式层与 CTF 能力 |
+| **可控性** | 完全可控 | **中低**：受上游版本节奏影响，preset 可能随升级失效；核心行为在 Cordis 插件树里，调试链路长 | **高**：全栈自有代码，一行一行都看得懂、改得动 |
+| **风险** | 项目烂尾风险最高（历史证明：自研 harness 是 6 个月起步的坑） | 上游 breaking change、跨语言调试、TS 生态不熟 | 架构债（现有代码缺少模式抽象，需先重构） |
+| **差异化与叙事** | 有"完全自主"叙事，但实现难度稀释说服力 | **最低**：改别人的东西，"魔改"在答辩中不构成创新点 | **最高**：自有内核 + 证据链反幻觉 + 技能进化 + 多模式，全部可讲成方法论创新 |
+| **可独立交付** | 是 | **否**：脱离 DSH 就没了 | **是**：可脱离一切宿主独立运行、进 CI |
+
+### 3.3 DSH 深度评估（为什么它适合当宿主、不适合当内核）
+
+**DSH 的实际架构能力（值得尊重的部分）**：
+
+- 基于 **Cordis** 的"一切皆插件"架构，pnpm monorepo 约 50 个 package，MIT，v0.1.5-rc.2。**不存在需要打补丁的特权内核**——扩展方式是"把插件挂载到其他插件旁边"，注册是副作用，卸载时自动撤销。这个设计比绝大多数开源 agent 干净。
+- **运行形态以 profile 区分**：`web` / `headless` / `sdk` / `sdk-minimal` / `acp` / 桌面版。分层方式为：profile 列出的 bundle → profile 的 `cordis.patch.yml` → home 级 patch → `--patch` overlay。
+- **新增业务模式的挂载点极其干净**：新建 `<DSH_HOME>/.agent-presets/<id>/agent.cordis.yml`（发现逻辑在 `packages/preset/agent-presets/src/discovery.ts`），即可承载"渗透模式"的全部差异——专用 persona（`packages/preset/persona`）、自定义工具插件、沙箱/审批预设、技能目录，**全程不需要改核心代码**。
+- **高危场景的现成骨架**：sandbox 三档（`read-only` / `workspace-write` / `danger-full-access`）、permission presets（把 sandbox + approval 打包）、`tools/pre-execute` 瀑布式审批钩子、`user-approval` 的 ask 流程、`packages/guard` 的超时策略与重复工具提醒。**这些是你要自己写至少两个月的护栏基础设施。**
+- 另有 `packages/mcp`（MCP 客户端）、`skill`、`subagent`、`workflow`、`hooks`、`compaction`、`session`、`todo`、`jobs`、`schedule` 等完整能力。
+
+**但为什么不该把它当内核**：
+
+| 摩擦点 | 说明 |
+|---|---|
+| **语言鸿沟（致命）** | 你的全部安全能力（XPentest / RayScan / poxiao / Chameleon / LogicHunt / 三态判定）都是 Python。DSH 是 TypeScript。把它当内核意味着**每个能力都要包一层 MCP 或 HTTP**——既然都要包 MCP，那内核是谁就不重要了，**不如用自己的** |
+| **工具集错配** | DSH 的工具集面向"改代码"（读写文件 / shell / grep / LSP），渗透需要的扫描器编排、证据固化、目标范围校验，它一样没有 |
+| **Windows 沙箱弱** | `sandbox-windows-acl` 存在但现实是 bash 沙箱在 Windows 上被迫关闭（你的 `reasonix.toml` 里就是 `bash = "off"`）。而沙箱恰恰是渗透 Agent 最需要的 |
+| **无取证与反幻觉** | 这是你的核心差异化，DSH 不提供，必须自建 |
+| **上游演进风险** | v0.1.5-rc.2 仍是 RC，breaking change 概率高；你的 preset 与插件会被动跟随 |
+| **调试链路长** | Cordis 插件树 + 多 profile + patch overlay，出问题时定位成本远高于读自己的 Python |
+
+**结论**：DSH 的正确用法是**宿主（Host）而不是内核（Kernel）**。用它的 profile / agent-preset 机制把"渗透模式"挂上去，用它的沙箱 / 审批 / Web UI / SDK 白拿工程能力，用 MCP 连接你的 Python 能力层。**改 DSH 的配置，不改 DSH 的代码。**
+
+### 3.4 风险清单（跨方案通用）
+
+| 风险 | 具体表现 | 缓解措施 |
+|---|---|---|
+| **误报/虚报** | 商业"零误报"是话术；AI 报错后人工复核成本反升 | 坚持"可复现 PoC + 证据链引用校验"；三态判定区分 Conf/Safe/Unknown |
+| **越权与副作用** | Agent 产生破坏性副作用（写 webshell、删库、反连外网） | 目标白名单硬校验（XPentest `Policy` 已有）+ 模式绑定审批档位 + 容器隔离 |
+| **法律边界** | 未授权测试违法；责任归属模糊 | 全流程强制目标范围校验与授权开关；所有动作进证据链留痕 |
+| **MCP 工具投毒** | 恶意 MCP server 可把 agent 变成内鬼（提示注入经工具描述进入上下文） | 只接自有 / 官方 MCP server；工具输出做结构化校验与截断 |
+| **上下文耗尽（Type B 失败）** | 长任务中途上下文爆炸，agent 退化 | 复用 DSH 的 compaction 策略思路；模式绑定步数/预算上限 |
+| **成本失控** | token 与算力成本易被低估 | 分级模型路由（侦察用便宜模型、推理用强模型）；模式绑定成本预算 |
+
+---
+
+## 第四部分 · 方案推荐
+
+### 方案 A：从零完全自研 Agent
+
+**核心思路**：不依赖任何现有 loop，重新实现 agent 内核、工具层、记忆层、护栏层。
+
+**技术选型**：Python + 自研 ReAct/规划循环 + 自建工具注册表 + MCP。
+
+**落地难度**：高。内核 1-2 个月、护栏 1 个月、工具层 2 个月、模式与评测 1 个月，且大部分工作在重复劳动。
+
+**预期收益**：低。唯一收益是"完全自主"的叙事，但你已经拥有同等的自主性。
+
+**结论：排除。** 理由不是"难"，而是**你已经付过这笔成本**。XPentest 的 7210 行代码与 64 个测试就是答案。
+
+---
+
+### 方案 B：以 DSH 为内核魔改
+
+**核心思路**：fork DSH，把它的工具集替换为渗透工具，把 agent preset 改造成渗透模式，内核循环复用。
+
+**技术选型**：TypeScript / Cordis 插件 + MCP 桥接 Python 能力。
+
+**落地难度**：高（看着低，实则高）。跨语言桥接 + Cordis 学习曲线 + 上游跟随成本。
+
+**预期收益**：中。白拿沙箱 / 审批 / Web UI / 多形态运行，但失去对内核的控制，且差异化叙事被削弱（"魔改"不是创新）。
+
+**结论：不作为主线，降级为方案 C 的宿主层。** 如果你的目标是"最快拿到一个能在 Web 界面上跑的演示"，它是合格的权宜之计；作为毕设/竞赛主线，它撑不起创新点。
+
+---
+
+### 方案 C：自有内核 + MCP 工具化 + 宿主双入口（主推）
+
+**核心思路**：一句话——**能力层用 MCP 统一暴露，内核保持可独立运行，宿主只是其中一个调用方。**
+
+- **内核**：XPentest Python 内核（ReAct 循环 + 证据链 + 记忆 + 技能进化），**不依赖任何宿主**。
+- **模式层**：新建 `ModeProfile` 抽象，成为一等公民（详见下方 schema）。
+- **工具层**：全部能力 MCP 化（RayScan / Chameleon 已有；poxiao / ruoyi-scan / LogicHunt / 本地二进制补齐），统一注册中心。
+- **判定层**：新增可插拔 `Verifier` 接口，CTF 模式挂 flag 正则，渗透模式挂证据链校验。
+- **宿主层（双入口）**：入口一 = 自有 CLI / Python SDK（独立运行、可进 CI）；入口二 = DSH agent-preset 插件（白拿沙箱 / 审批 / Web UI）。
+
+**关键技术设计：ModeProfile Schema（这是整个方案的心脏）**
+
+```yaml
+# modes/pentest-standard.yaml
+id: pentest-standard
+label: 常规渗透测试模式
+inherits: base
+
+persona:
+  system_prompt: prompts/pentest.md      # P2 提示词人格
+  output_format: markdown_report
+
+capability:                              # P3 工具白名单 + 参数冻结
+  allow: ["*"]
+  deny:  ["msf_exploit", "webshell_write"]
+  constraints:
+    nuclei:  "-severity low,medium,high -c 25"
+    sqlmap:  "--batch --level 3 --risk 1"
+    fscan:   "-nobrute"
+
+permission:                              # P4 权限策略
+  default: ask                           # ok | ask | deny
+  auto_approve: ["httpx", "subfinder", "dnsx"]
+  require_confirm: ["sqlmap", "ffuf", "hydra"]
+  hard_deny: ["mimikatz", "ransomware_sim"]
+
+budget:                                  # P5 预算策略
+  max_steps: 40
+  max_minutes: 180
+  max_cost_usd: 5.0
+  model_tier: {recon: cheap, reason: strong}
+
+scope:
+  target_allowlist: required             # 必须显式授权
+  network_egress: false                  # 不允许外连
+
+verifier:                                # 【关键】成功判定
+  type: evidence_chain                   # CTF 模式改为 flag_regex
+  require_poc: true
+
+skills: [web-recon, sqli, ssrf, report-gen]
+memory_namespace: pentest-standard
+sandbox: docker                          # 隔离级别
+```
+
+CTF 模式的差异只体现在同级另一个文件里：
+
+```yaml
+# modes/ctf-web.yaml
+id: ctf-web
+persona: {system_prompt: prompts/ctf.md, output_format: raw_flag}
+capability:
+  allow: [http_test, browser_auto, script_run, file_read, crypto_tools]
+  deny:  [nuclei, fscan, sqlmap]         # CTF 不需要重扫描器，省预算
+budget: {max_steps: 60, max_minutes: 20, max_cost_usd: 1.0}
+scope: {network_egress: true}            # CTF 常需拉资料
+verifier:
+  type: flag_regex                       # 【分水岭】
+  pattern: '(?i)(flag|ctf)\{[^}]+\}'
+  auto_retry: 3                          # CTF 反馈密集，允许快速重试
+skills: [ctf-web]
+```
+
+**技术选型**：Python 3.12 + MCP 协议 + Pydantic（ModeProfile 校验）+ YAML 配置 + FastMCP/similar + 现有二进制工具。宿主侧 TypeScript 仅在 DSH 插件内使用。
+
+**落地难度**：**中低**。
+- 阶段一（模式抽象 + 双 Verifier）：1-2 周，可出"同一内核跑两种模式"的可演示版本。
+- 阶段二（工具 MCP 化 + CTF 能力）：3-4 周。
+- 阶段三（DSH 宿主 + Web 控制台）：2-3 周。
+
+**预期收益**：**高**。
+- 复用已有 7210 行内核 + 70 个工具 + 69 个技能包，边际成本极低。
+- 模式机制可讲成方法论（多模式判定 + 场景自适应 + 预算可控），是清晰的创新点。
+- 双入口兼顾"独立交付"与"宿主生态"，答辩与工程两头都站得住。
+
+**风险**：现有代码需先做一次小重构（把 `Policy` 从硬编码 `authorize` 布尔值升级为模式驱动的策略引擎）；需防止模式配置膨胀成新的"配置地狱"（建议用 `inherits` 继承 + Pydantic 强校验）。
+
+---
+
+### 方案 D：DSH 宿主插件化（与 C 并行，不冲突）
+
+**核心思路**：把 DawnForge 的技能层升级为 DSH agent-preset + 插件包，做成"给 DSH 用的渗透工作台"。
+
+**技术选型**：DSH agent-preset（`<DSH_HOME>/.agent-presets/<id>/agent.cordis.yml`）+ persona + MCP 工具挂载 + 技能目录。
+
+**落地难度**：中。无需改 DSH 核心代码，但要熟悉 Cordis 的 preset / patch 机制。
+
+**预期收益**：中高。白拿沙箱、审批、Web UI、AgentTeams 多 agent 并行、SDK 多形态运行。
+
+**结论**：**作为方案 C 的宿主层并行推进**。先跑通 C 的阶段一与阶段二，再把 C 的能力通过 MCP 挂到 D 上。D 不成立为独立主线（脱离 DSH 就无法交付），但它是 C 的最佳演示外壳。
+
+---
+
+### 优先推荐：方案 C 为主线，方案 D 为宿主层
+
+**推荐理由（四条）**：
+
+1. **成本最低、收益最高。** 内核、工具、技能三者都已存在，缺的只是模式抽象与 CTF 实现。这是唯一一条"投入产出比为正"的路线。
+2. **符合你自己已经验证过的架构原则。** 你在《红队平台自建方案》里写过"手脚不依赖大脑也能跑，dsh 挂了 CLI 照常能用"——方案 C 就是这条原则的完整版。方案 B 直接违反它。
+3. **叙事最强。** 毕设/竞赛需要"方法论创新"而不只是"工程实现"。自有内核 + 三态判定/证据链反幻觉 + 技能进化 + 多模式场景自适应，能构成一条完整的方法论故事；"魔改别人的 harness"构不成。
+4. **风险可控。** 全栈 Python 自有代码，调试链路短；不跟随上游版本；可随时降级为更小的范围。
+
+**落地顺序（三阶段，每阶段都可独立演示）**：
+
+| 阶段 | 目标 | 关键交付 | 验收标准 |
+|---|---|---|---|
+| **阶段一：模式抽象** | 把模式变成一等公民 | ModeProfile schema + Pydantic 校验 + 可插拔 Verifier（flag_regex / evidence_chain）+ 两个模式（pentest-standard / ctf-web）+ 模式关键词触发 | 同一内核跑同一目标，两种模式输出不同判定结果；模式禁用工具被机制性拦截（不是靠模型自觉） |
+| **阶段二：能力补齐** | 工具 MCP 化 + CTF 能力 | 统一 MCP 注册中心（RayScan / Chameleon 接入 + poxiao / ruoyi-scan / LogicHunt / 本地二进制封装）+ CTF Crypto 与 Misc 实现 + 沙箱隔离 | 新增一个工具不需要改内核代码；CTF 模式能自动解出至少 3 道 Crypto/Misc 题 |
+| **阶段三：宿主与界面** | 双入口 + 可视化 | DSH agent-preset 插件 + MCP 挂载 + Web 控制台（复用 `dsh-web-ui`）+ 多 agent 并行（复用 `dsh-agent-teams`） | 通过 DSH 界面选模式、下任务、看证据链；AgentTeams 面板可见多 agent 协同 |
+
+---
+
+## 第五部分 · 关键来源
+
+**GitHub 实时核验（2026-09-17）**：`usestrix/strix`（63,063 星 / Python / Apache-2.0）、`vxcontrol/pentagi`（24,592 / Go / MIT）、`GreyDGL/PentestGPT`（15,495 / Python / MIT）、`0x4m4/hexstrike-ai`（11,922 / Python / MIT）
+
+**其他参考**：`PurpleAILAB/Decepticon`、`GH05TCREW/pentestagent`、`CyberStrikeus/CyberStrike`、`cdxiaodong/cain-agent`、`chainreactors/aiscan`、RapidPen（arXiv 2502.16730）、Cochise（arXiv 2605.11671）、HackSynth（arXiv 2412.01778）、VMS（arXiv 2507.21113）、AutoPenBench（arXiv 2410.03225）、PentestEval（arXiv 2512.14233）、CVE-Bench（arXiv 2503.17332）、CHECKMATE / PEP（arXiv 2512.11143）、Excalibur（arXiv 2602.17622）
+
+**本地资产**：`网安项目开发规划/10-pentest-agent/`、`dawnforge-pentest/`（含 `config/modes.yaml`、`skills/pentest_skills/`）、`RayScan/`（`wvs/mcp_server.py`）、`Chameleon/`、`poxiao/`、`ruoyi-scan/`、`LogicHunt/`、`PacketForge/`、`redforge/`、`AI驱动的自动化攻防对抗训练平台/core/`、`deepseek-harness/`、`dsh-agent-teams/`、`dsh-web-ui/`、`网安工具自研/profiles/`、`红队平台设计/自建方案-SRC渗透流水线.md`、`网安项目开发规划/docs/个人渗透Agent产品设计.md`、`<TOOLS_DIR>\{bin,tools,kb}`
+
+> **安全声明**：本报告涉及的技术方案**仅用于授权范围内的受控安全实验**（自有靶机、CTF 靶场、隔离容器）。所有设计均以"目标白名单硬校验 + 高危操作审批 + 全动作证据链留痕"为前提。严禁在未授权系统上运行。

@@ -1,0 +1,24 @@
+# 密钥
+.env
+*.env
+!*.env.example
+
+# 运行时数据（作战记录/经验库/证据链）
+data/
+**/data/
+logs/
+tests/_tmp*/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 编辑器
+.vscode/
+.idea/
+*.log
+
+# 本机安全工具会话状态（非项目内容）
+.mimosa/
