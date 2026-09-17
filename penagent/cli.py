@@ -23,9 +23,23 @@ from penagent.tools import ToolRegistry
 
 
 def _make_agent(args, registry=None, memory=None, evidence=None):
-    reg = registry or ToolRegistry()
-    register_builtins(reg)
-    load_external_tools(reg)
+    mode = None
+    mode_id = getattr(args, "mode", "") or ""
+    if mode_id:
+        from penagent.modes import load_mode
+
+        mode = load_mode(mode_id)
+    if registry is not None:
+        reg = registry
+    elif mode is not None:
+        # 带模式时走统一注册中心：模式声明的工具可用性与沙箱档位随之生效
+        from penagent.registry import build_center
+
+        reg = build_center().build_registry(mode)
+    else:
+        reg = ToolRegistry()
+        register_builtins(reg)
+        load_external_tools(reg)
     from penagent.adapters.packetforge import register_packetforge
     from penagent.adapters.rayscan import register_rayscan
 
@@ -50,7 +64,8 @@ def _make_agent(args, registry=None, memory=None, evidence=None):
             print(f"Q-learning 策略已加载: {path}"
                   f"（{len(skill_policy.q)} 个状态）")
     return PenAgent(reg, mem, ev, LLMConfig.from_env(), policy,
-                    max_steps=args.max_steps, skill_policy=skill_policy)
+                    max_steps=args.max_steps, skill_policy=skill_policy,
+                    mode=mode)
 
 
 def _auto_fingerprint(target: str) -> str:
@@ -215,7 +230,11 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--stealth", action="store_true",
                        help="对抗模式：技能按隐蔽优先排序（exposure 低者在前）")
     p_run.add_argument("--targets", default="", help="授权目标，逗号分隔")
-    p_run.add_argument("--max-steps", type=int, default=12)
+    p_run.add_argument("--mode", default="",
+                       help="模式档案 id（如 pentest-standard / ctf-web / "
+                            "ctf-crypto）：决定工具白名单、权限档位、预算与判定器")
+    p_run.add_argument("--max-steps", type=int, default=None,
+                       help="步数上限（缺省取模式 budget.max_steps，无模式时 12）")
     p_run.add_argument("--data", default="data")
     p_run.add_argument("--rl-policy", default="data/rl/policy.json",
                        help="RL 策略 Q 表路径（不存在则跳过）")

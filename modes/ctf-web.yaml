@@ -16,6 +16,7 @@ permission:
 budget: {max_steps: 60, max_minutes: 20, max_cost_usd: 1.0}
 scope: {network_egress: true}
 verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
+triggers: [ctf, flag, 解题, 比赛, web]
 skills: [ctf-web]
 memory_namespace: ctf-web
 # 同 ctf-crypto：CTF 解题脚本走宿主直跑档，换 docker 即启用容器隔离

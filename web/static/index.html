@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proteus 控制台 · 千面</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <h1>Proteus 控制台 · 千面</h1>
+  <p>多模式渗透测试 Agent ｜ 后端直连 penagent（CLI 子进程 / SDK），不经过宿主</p>
+</header>
+
+<main>
+  <!-- ── 一、模式选择与关键词触发 ─────────────────────────────── -->
+  <section>
+    <div class="panel">
+      <h2>一、模式选择</h2>
+      <p class="hint">任务文本命中触发关键词时，对应模式会被高亮推荐。</p>
+      <label class="field" for="probe">任务文本（用于关键词触发）</label>
+      <textarea id="probe" placeholder="例如：解一道 CTF RSA 题，拿到 flag"></textarea>
+      <div id="modes"></div>
+    </div>
+  </section>
+
+  <!-- ── 二、任务下发与实时步骤流 ─────────────────────────────── -->
+  <section>
+    <div class="panel">
+      <h2>二、任务下发与实时步骤流</h2>
+      <p class="hint">步骤流读内核的作战记录（memory mission steps），任务边跑边出。</p>
+      <div class="grid2">
+        <div>
+          <label class="field" for="target">目标</label>
+          <input type="text" id="target" value="127.0.0.1">
+        </div>
+        <div>
+          <label class="field" for="driver">驱动</label>
+          <select id="driver">
+            <option value="scripted">离线脚本化（无需 API key，跑样例题）</option>
+            <option value="penagent">真实内核（penagent CLI 子进程，需 PENTEST_LLM_*）</option>
+          </select>
+        </div>
+      </div>
+      <label class="field" for="challenge">样例题（离线驱动用）</label>
+      <select id="challenge">
+        <option value="">全部三道</option>
+        <option value="simple-rsa">simple-rsa（相近素数 RSA）</option>
+        <option value="b64-stego">b64-stego（base64 隐写）</option>
+        <option value="encoding-chain">encoding-chain（编码链）</option>
+      </select>
+      <label class="field" for="objective">任务描述</label>
+      <textarea id="objective">解出样例题的 flag</textarea>
+      <button id="dispatch">下发任务</button>
+      <span id="dispatch-note" class="muted small"></span>
+      <div class="stream" id="stream"></div>
+    </div>
+
+    <!-- ── 三、证据链校验视图 ─────────────────────────────────── -->
+    <div class="panel">
+      <h2>三、证据链校验</h2>
+      <p class="hint">链式哈希完整性 + 收口判定（反幻觉引用校验由内核判定器完成）。</p>
+      <div id="evidence"></div>
+      <button class="ghost" id="refresh-evidence">刷新证据链</button>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

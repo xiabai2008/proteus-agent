@@ -30,7 +30,7 @@ SANDBOX_LEVELS = ("none", "local", "docker")   # 与 penagent.sandbox 保持一�
 
 _TOP_KEYS = {"id", "label", "inherits", "persona", "capability", "permission",
              "budget", "scope", "verifier", "skills", "memory_namespace",
-             "sandbox"}
+             "sandbox", "triggers"}
 _PERSONA_KEYS = {"system_prompt", "output_format"}
 _CAPABILITY_KEYS = {"allow", "deny", "constraints"}
 _PERMISSION_KEYS = {"default", "auto_approve", "require_confirm", "hard_deny"}
@@ -229,6 +229,7 @@ class ModeProfile:
     memory_namespace: str
     sandbox: str
     skills: tuple[str, ...] = ()
+    triggers: tuple[str, ...] = ()   # 关键词触发：任务文本命中即可推荐本模式
     inherits: Optional[str] = None
     source: str = ""        # 模式文件路径（诊断用）
     root: str = ""          # 模式根目录（persona.system_prompt 相对此解析）
@@ -247,6 +248,11 @@ class ModeProfile:
 
     def tool_allowed(self, tool: str) -> bool:
         return self.capability.allows(tool)
+
+    def matches_keywords(self, text: str) -> list[str]:
+        """任务文本命中的触发关键词（大小写不敏感的子串匹配）。"""
+        lowered = (text or "").lower()
+        return [k for k in self.triggers if k.lower() in lowered]
 
     def filtered_registry(self, registry: ToolRegistry) -> ToolRegistry:
         """按 capability 过滤出新的注册表：被禁用的工具既不进 schema，
@@ -406,6 +412,7 @@ def _build(data: dict, source: Path) -> ModeProfile:
         sandbox=_as_enum(data.get("sandbox", "none"), SANDBOX_LEVELS,
                          f"{where}: sandbox"),
         skills=_as_str_list(data.get("skills"), f"{where}: skills"),
+        triggers=_as_str_list(data.get("triggers"), f"{where}: triggers"),
         source=str(source),
         root=str(_mode_root(source)),
     )
