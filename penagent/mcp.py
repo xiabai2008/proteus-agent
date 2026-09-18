@@ -19,6 +19,7 @@ from penagent.agent import PenAgent, Policy
 from penagent.evidence import EvidenceChain
 from penagent.llm import LLMConfig
 from penagent.memory import Memory
+from penagent.policy_gate import PolicyGate
 from penagent.reflect import Reflector
 from penagent.registry import ToolCenter, build_center
 from penagent.tools import ToolSpec
@@ -50,25 +51,45 @@ class PentestMCPServer:
 
     def __init__(self, data_dir: str = "data",
                  allowed_targets: Optional[list[str]] = None,
-                 center: Optional[ToolCenter] = None) -> None:
+                 center: Optional[ToolCenter] = None,
+                 authorize: bool = False) -> None:
         self.data_dir = data_dir
+        # 授权目标与高危授权：服务端级（操作员给），不来自调用参数。
+        # 目标规范化必须做：CLI 的 --targets 是 "a,b" 字符串，直接 list() 会
+        # 炸成单字符、把白名单打成筛子（见 Policy.normalize_targets）
+        self.allowed_targets = Policy.normalize_targets(allowed_targets)
+        self.authorize = bool(authorize)
         # 工具清单统一来自注册中心：内置 function + external_tools.json 的 CLI
         # + 已发现的 MCP server 工具（discover_mcp 前不连接任何外部服务）
         self.center = center or build_center()
         self.center.register_server_tools(SERVER_TOOLS)
         self.registry = self.center.build_registry()
+        # 闸门挂在注册表上：MCP 底层工具入口此前直连注册表、不过 Policy，
+        # 于是 --targets 白名单形同虚设（越界目标照常执行，见
+        # docs/DSH宿主实测记录.md F1）。挂上之后越界目标与未授权高危工具
+        # 在工具体执行前就被拒，且任何调用方都绕不过去。
+        self.policy = Policy(allowed_targets=self.allowed_targets or None,
+                             authorize=self.authorize)
+        self.registry.gate = PolicyGate(self.policy)
         self.memory = Memory(data_dir)
         self.evidence = EvidenceChain(Path(data_dir) / "chain.jsonl")
         self.llm = LLMConfig.from_env()
-        self.policy = Policy(allowed_targets=allowed_targets or None)
         self._agents: dict[str, PenAgent] = {}
 
     # ------------------------------------------------------------------
     def _agent(self, authorize: bool = False) -> PenAgent:
-        return PenAgent(self.registry, self.memory, self.evidence,
-                        self.llm, Policy(allowed_targets=None,
-                                         authorize=authorize),
-                        max_steps=12)
+        """内层 ReAct Agent：复用服务端授权目标，按调用参数放大授权。
+
+        `--targets` 对 pentest_run 同样生效（此前被 `allowed_targets=None`
+        丢掉，只剩默认回环）；`authorize` 是 pentest_run 的既有契约
+        （工具描述里写明"危险动作需 authorize=true"），但只在这条路径上生效，
+        且作用范围是**本次任务的注册表副本**——不改动服务端共享注册表。
+        """
+        policy = Policy(allowed_targets=self.allowed_targets or None,
+                        authorize=bool(authorize) or self.authorize)
+        registry = self.registry.copy(gate=PolicyGate(policy))
+        return PenAgent(registry, self.memory, self.evidence,
+                        self.llm, policy, max_steps=12)
 
     # ------------------------------------------------------------------
     # MCP tools 定义
@@ -131,7 +152,8 @@ class PentestMCPServer:
             if name == "pentest_run":
                 result = self._agent(authorize=bool(args.get("authorize")))\
                     .run(args.get("target", ""), args.get("objective", ""))
-                return self._result(msg_id, result.to_dict())
+                return self._result(msg_id, result.to_dict(),
+                                    is_error=result.outcome != "success")
             if name == "pentest_skills":
                 skills = self.memory.list_skills(sort_by_rate=True)
                 return self._result(msg_id, [s.to_dict() for s in skills])
@@ -145,10 +167,14 @@ class PentestMCPServer:
                     "skill": skill.to_dict() if skill else None})
             # 底层工具
             tool_result = self.registry.execute(name, args)
-            return self._result(msg_id, tool_result.to_dict())
+            # 底层工具失败（含被闸门/沙箱拒绝）一律 isError=true
+            return self._result(msg_id, tool_result.to_dict(),
+                                is_error=not tool_result.ok)
         except Exception as exc:
-            return {"jsonrpc": "2.0", "id": msg_id,
-                    "error": {"code": -32603, "message": str(exc)}}
+            # 工具执行异常按 MCP 规范走 isError=true 的结构化结果，而不是
+            # 协议级 error——协议错误该留给非法请求（未知方法等）
+            return self._result(msg_id, {"ok": False, "error": str(exc)},
+                                is_error=True)
 
     @staticmethod
     def _result(msg_id, content, is_error: bool = False) -> dict:

@@ -18,8 +18,8 @@
 
 | 编号 | 严重度 | 一句话 | 处置 |
 |---|---|---|---|
-| F1 | **高** | MCP 底层工具入口不过 Policy：`--targets` 白名单与高危授权双双失效，越界目标照常执行 | 记录待修（根因在内核） |
-| F2 | 中 | 失败一律报成成功：`isError` 恒为 `false`，`pentest_run` 失败也报成功 | 记录待修（根因在内核） |
+| F1 | **高** | MCP 底层工具入口不过 Policy：`--targets` 白名单与高危授权双双失效，越界目标照常执行 | **已修**（Policy 全入口化，见第九节复测） |
+| F2 | 中 | 失败一律报成成功：`isError` 恒为 `false`，`pentest_run` 失败也报成功 | **已修**（失败走 `isError=true` + 结构化错误，见第九节复测） |
 | F3 | 低 | 5.1 的 `broken` 不覆盖行 `config` 与 `!!js` 求值，只证明"能装上" | 已修文档 |
 | F4 | 低 | 指南 5.3 用手抄配置而非 preset 派生，preset 写错时会假阴性 | 已修文档 |
 | F5 | 低 | 函数型工具静默丢弃未知参数，报错信息对模型不友好 | 记录待修（根因在内核） |
@@ -456,3 +456,83 @@ Python 的 TypeError 文本，对模型不友好（模型看不到"你该用 `ba
    （第六节列出的两个未验证项）。
 4. 修 F5：执行前校验必需参数，把"未知参数/缺参"变成明确报错。
 5. 可选：把 5.3 的手抄配置换成从 preset YAML 派生（F4 的彻底解法）。
+
+---
+
+## 九、复测：越界目标已被闸门拒绝（F1 / F2 修复后）
+
+> 复测日期：2026-09-18　　命令与第五节/第四节完全相同的 DSH mcp-client 挂载路径
+> （`--targets 127.0.0.1`，`authorize=off`），只把被测代码换成修复后的版本。
+
+### 9.1 修复内容（对应 F1 / F2）
+
+| 项 | 改动 |
+|---|---|
+| F1 | 新增 `penagent/policy_gate.py`：闸门（目标白名单 + 高危授权 + 协议白名单）由 **`ToolRegistry` 持有**，裁决在 `execute()` 内部、工具体之前——ReAct 循环 / MCP 底层工具 / Web 子进程都绕不过去。原实现只在 `PenAgent.run` 里调 `policy.check`，底层工具分支直连注册表 |
+| F1（附带） | `PentestMCPServer` 把 `--targets` 接进闸门；`_agent()`（pentest_run）复用服务端授权目标；新增操作员级 `--authorize`（**调用参数里的 `authorize` 一律不生效**，避免模型自我授权） |
+| F2 | MCP 结果按 `ok` / `outcome` 映射到 `isError`；工具异常改走 `isError=true` 的结构化结果，不再用协议级 `error` |
+
+### 9.2 复测输出（全文）
+
+```
+XPentest MCP Server 就绪（tools/list 可查工具，targets=127.0.0.1，authorize=off）
+[R1] port_scan {"host":"127.0.0.1","ports":"80"}
+  isError = false
+  content = [{"type":"text","text":"{\"tool\": \"port_scan\", \"ok\": true, \"output\": {\"host\": \"127.0.0.1\", \"open_ports\": []}, \"error\": \"\", \"duration_ms\": 1514}"}]
+[R2] port_scan {"host":"127.0.0.2","ports":"80"}
+  isError = true
+  content = [{"type":"text","text":"Error: {\"tool\": \"port_scan\", \"ok\": false, \"output\": \"\", \"error\": \"目标 '127.0.0.2' 不在授权范围 ['127.0.0.1']\", \"duration_ms\": 0}"}]
+[R3] port_scan {"host":"192.168.1.1","ports":"80"}
+  isError = true
+  content = [{"type":"text","text":"Error: {\"tool\": \"port_scan\", \"ok\": false, \"output\": \"\", \"error\": \"目标 '192.168.1.1' 不在授权范围 ['127.0.0.1']\", \"duration_ms\": 0}"}]
+[R4] http_probe {"url":"http://192.168.1.1/admin"}
+  isError = true
+  content = [{"type":"text","text":"Error: {\"tool\": \"http_probe\", \"ok\": false, \"output\": \"\", \"error\": \"目标 'http://192.168.1.1/admin' 不在授权范围 ['127.0.0.1']\", \"duration_ms\": 0}"}]
+[R5] robots_fetch {"url":"http://127.0.0.1/robots.txt"}
+  isError = true
+  content = [{"type":"text","text":"Error: {\"tool\": \"robots_fetch\", \"ok\": false, \"output\": \"\", \"error\": \"robots_fetch() missing 1 required positional argument: 'base_url'\", \"duration_ms\": 0}"}]
+[R6] dns_lookup {"domain":"127.0.0.1"}
+  isError = false
+  content = [{"type":"text","text":"{\"tool\": \"dns_lookup\", \"ok\": true, \"output\": {\"domain\": \"127.0.0.1\", \"ips\": [\"127.0.0.1\"]}, \"error\": \"\", \"duration_ms\": 2}"}]
+```
+
+### 9.3 前后对照
+
+| 用例 | 修复前（第三节 A3 / 第五节） | 修复后（本次） |
+|---|---|---|
+| `port_scan` 127.0.0.1（白名单内） | `ok: true`，`isError=false`，1510ms | `ok: true`，`isError=false`，1514ms（**未回归**） |
+| `port_scan` **127.0.0.2**（白名单外） | `ok: true`，真实扫了 1510ms | **`ok: false` + `isError=true` + `duration_ms: 0`**（没执行） |
+| `port_scan` **192.168.1.1**（内网） | `ok: true`，真实发起连接 | **被拒**，`duration_ms: 0` |
+| `http_probe` 白名单外 URL | 未测（同类） | **被拒** |
+| `robots_fetch` 缺参 | `ok: false` 但 `isError=false` | `ok: false` **且 `isError=true`** |
+| `dns_lookup` 白名单内 | `ok: true` | `ok: true`（**未回归**） |
+
+`duration_ms: 0` 是关键证据：拒绝发生在**工具体之前**，不存在"先连再判"。
+这一点另有单元测试钉死（`tests/test_policy_gate.py::test_registry_gate_blocks_before_tool_body_runs`
+断言工具体一次都没被调用）。
+
+### 9.4 复测中额外发现并修掉的一个 bug（值得单记）
+
+第一次复测时 R2/R3 **仍然执行了**。根因不在闸门，而在**白名单的解析**：
+
+- CLI 的 `--targets` 是**逗号分隔字符串**，`PentestMCPServer` 直接 `list(allowed_targets)`
+  → 字符串是 iterable，`list("127.0.0.1")` 炸成 `['1','2','7','.','0','.','0','.','1']`；
+- 而白名单匹配用的是 `host.endswith("." + t)`，于是单字符条目开始乱命中：
+  条目 `'2'` 命中 `127.0.0.2`、条目 `'1'` 命中 `192.168.1.1`——**白名单等于失效**。
+
+这条在 F1 修复前是隐性的（闸门根本没被调用，轮不到白名单起作用），闸门一接上就暴露了。
+CLI 的 `run` 子命令同样把字符串喂给 `Policy`，属同一根因，故修在 `Policy` 层：
+新增 `Policy.normalize_targets()`（支持 `"a,b"` 与可迭代对象，空值回落默认回环白名单），
+`PentestMCPServer` 一并改用。复测 R2/R3 随即变为拒绝。
+
+回归用例：`tests/test_policy_gate.py::test_policy_normalizes_targets`（7 组参数）与
+`::test_cli_style_string_targets_do_not_leak_single_chars`（断言 127.0.0.2 / 192.168.1.1 /
+10.0.0.1 全部被拒、127.0.0.1 放行）。
+
+### 9.5 回归
+
+```
+有 torch：204 passed（含本次新增 31 例）
+无 torch：196 passed, 3 skipped（3 处 importorskip，与原行为一致）
+```
+

@@ -67,11 +67,31 @@ class Policy:
     def __init__(self, allowed_targets: Optional[list[str]] = None,
                  authorize: bool = False,
                  mode: Optional[ModeProfile] = None) -> None:
-        self._runtime_targets = list(allowed_targets or
-                                     ["127.0.0.1", "localhost"])
+        self._runtime_targets = self.normalize_targets(allowed_targets)
         self.allowed_targets = self._narrow_by_mode(self._runtime_targets, mode)
         self.authorize = authorize
         self.mode = mode
+
+    @staticmethod
+    def normalize_targets(value) -> list[str]:
+        """把授权目标规范成列表，支持 "a,b" 字符串与可迭代对象。
+
+        **必须做这一步**：字符串本身是 iterable，`list("127.0.0.1")` 会炸成
+        单字符列表 `['1','2','7','.',...]`；而白名单匹配用的是
+        `host.endswith("." + t)`，单字符条目会意外命中大量主机（条目 `'2'`
+        命中 `127.0.0.2`、条目 `'1'` 命中 `192.168.1.1`）——白名单等于失效。
+        CLI 的 `--targets` 是逗号分隔字符串，正是这条路径踩中过。
+        空值回落到默认回环白名单。
+        """
+        if value is None or value == "":
+            return ["127.0.0.1", "localhost"]
+        if isinstance(value, str):
+            items = value.split(",")
+        else:
+            items = list(value)
+        targets = [str(item).strip() for item in items]
+        targets = [t for t in targets if t]
+        return targets or ["127.0.0.1", "localhost"]
 
     @staticmethod
     def _narrow_by_mode(runtime_targets: list[str],
@@ -195,6 +215,13 @@ class PenAgent:
         if mode is not None and self.policy.mode is None:
             # 显式传入的 Policy 也必须挂上模式裁决，避免绕过模式约束
             self.policy = self.policy.bind_mode(mode)
+        # 闸门挂在注册表上（而非只在 run() 里调用）：目标白名单、高危授权与
+        # 协议白名单因此对所有入口生效——ReAct 循环、MCP 底层工具、Web 子进程
+        # 都走 registry.execute，绕不过去（硬规则 1/3）
+        if getattr(self.registry, "gate", None) is None:
+            from penagent.policy_gate import PolicyGate
+
+            self.registry.gate = PolicyGate(self.policy)
         # 步数预算：显式传参优先；否则由模式 budget 决定（不传模式时沿用 12）
         if max_steps is None:
             max_steps = mode.budget.max_steps if mode is not None else 12

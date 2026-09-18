@@ -14,6 +14,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent
 
 CANDIDATES = [
@@ -40,3 +42,48 @@ if G07 is not None:
     _existing = os.environ.get("PYTHONPATH", "")
     _parts = [str(G07)] + ([_existing] if _existing else [])
     os.environ["PYTHONPATH"] = os.pathsep.join(_parts)
+
+
+# ----------------------------------------------------------------------
+# 测试注入：把内核注册表的沙箱档位钉成 local
+# ----------------------------------------------------------------------
+@pytest.fixture()
+def host_direct_sandbox(monkeypatch):
+    """让走内核构造路径的代码用 **local 档**沙箱建注册表。
+
+    出厂 ctf-* 模式已声明 `sandbox: docker`（python_solve 等价宿主任意代码执行，
+    容器不可用时必须被拒绝、绝不回落裸跑——见 docs/Web真内核实测记录.md F7）。
+    本 fixture 只为一件事：让"解题链路"与 Web scripted 演示路径仍被**真跑**
+    覆盖——显式注入操作员自选的 local 档（宿主直跑），而不是把用例改成 skip。
+
+    无 Docker 环境下出厂模式的行为，由
+    tests/test_sandbox.py::test_python_solve_refused_without_container_through_ctf_mode
+    钉住；两者不冲突：一个测"拒绝"，一个测"链路本身没坏"。
+    """
+    import penagent.registry as registry_mod
+    from penagent.sandbox import build_sandbox
+
+    real_build_center = registry_mod.build_center
+
+    class _HostDirectCenter:
+        """包装注册中心：build_registry 强制 local 档（测试注入用）。"""
+
+        def __init__(self, center):
+            self._center = center
+
+        def build_registry(self, mode=None, *, kernel_only=True, sandbox=None):
+            return self._center.build_registry(
+                mode, kernel_only=kernel_only, sandbox=build_sandbox("local"))
+
+        def __getattr__(self, name):
+            return getattr(self._center, name)
+
+    def _patched():
+        return _HostDirectCenter(real_build_center())
+
+    monkeypatch.setattr(registry_mod, "build_center", _patched)
+    # 模块级 `from ... import build_center` 的调用方持有自己的引用，一并替换
+    for module_name in ("eval_ctf_solve",):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "build_center"):
+            monkeypatch.setattr(module, "build_center", _patched)

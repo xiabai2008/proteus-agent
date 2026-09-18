@@ -26,7 +26,7 @@
 | F4 | 中 | prompt 要求严格 JSON，模型会改吐原生工具调用标记（DSML），解析失败即整个任务判失败 | 记录 |
 | F5 | 低 | `/api/mission/<mode>/<id>` 路由切片写错，恒定 404（前端未使用，属潜在缺陷） | 记录 |
 | F6 | 低 | 函数型工具静默丢弃未知参数，模型猜错参数名时得到空输出+无错误信息 | 记录（V1 已报 F5，本次在真机复现） |
-| F7 | **高** | `ctf-web` 的 `python_solve` 是宿主直跑、无路径约束的任意代码执行；模型自发枚举了 D: 盘根目录与 `/proc` | 记录（属模式设计，但后果需知会） |
+| F7 | **高** | `ctf-web` 的 `python_solve` 是宿主直跑、无路径约束的任意代码执行；模型自发枚举了 D: 盘根目录与 `/proc` | **已修**（ctf-* 模式改 `sandbox: docker`，见第十节） |
 
 ---
 
@@ -497,9 +497,16 @@ HITS 0
 本记录 F1 又显示内核侧的 MCP 底层入口不过 Policy。于是"不弹审批 + 内核不设防 +
 宿主直跑"三者同时成立。
 
-**修复（建议，未做）**：把 `ctf-web` 的 `sandbox` 从 `local` 换成 `docker`（字段已支持，
-`build_sandbox` 已在 `PenAgent` 构造时挂到注册表），或给 `python_solve` 加工作目录约束与
-路径只读策略。改 `modes/ctf-web.yaml` 会改变被测模式的行为，本次只记录。
+**修复（已做，2026-09-18）**：把 `ctf-web` 与 `ctf-crypto` 的 `sandbox` 从 `local` 换成
+`docker`。`python_solve` 本就声明了 `sandbox: docker`，`sandbox.py` 也早就实现了
+"容器不可用则拒绝、绝不裸跑"——缺的只是模式这一档声明，于是声明 `local` 等于给了它
+一条宿主直跑的路。改后：**无 Docker（含守护进程没起）时 `python_solve` 被拒绝执行**，
+拒绝理由里带明原因（`sandbox=docker 但容器不可用（…），拒绝裸跑 python_solve`）。
+
+复测与回归见第十节。**这条修复有代价，如实记下**：无 Docker 的环境下 CTF 模式再也解不了
+题（这正是"宁可不做也不裸跑"的取舍），Web 控制台的 scripted 离线演示路径在 ctf-* 模式下
+同样需要 Docker。测试侧的处理是显式注入 local 档（`conftest.py::host_direct_sandbox`）
+以保住"解题链路本身被真跑"的覆盖，而不是把用例改成 skip。
 
 ---
 
@@ -553,3 +560,80 @@ HITS 0
 - LLM 凭据仅写入本机 `.env`（gitignore），**未**出现在任何对话输出或本文档中；代码改动
   涉及的请求侧加固见第七节。
 - prompt 注入与工具输出均来自本地靶子，不含外部不可信内容。
+
+---
+
+## 十、复测：python_solve 已被沙箱门控拦住（F7 修复后）
+
+> 复测日期：2026-09-18
+
+### 10.1 修复内容
+
+| 项 | 改动 |
+|---|---|
+| 模式档位 | `modes/ctf-web.yaml`、`modes/ctf-crypto.yaml`：`sandbox: local` → **`sandbox: docker`** |
+| 未改的部分 | `python_solve` 的 `sandbox: docker` 声明、`sandbox.py` 的"容器不可用即拒绝、绝不裸跑"逻辑——两者本来就是对的，缺的是模式这一档 |
+| 新增用例 | `test_sandbox.py::test_python_solve_refused_without_container_through_ctf_mode`（标记文件证明脚本一次都没跑）、`::test_python_solve_is_container_only_under_ctf_mode`、`::test_registry_gets_sandbox_from_mode`（改为断言 docker） |
+
+### 10.2 复测输出
+
+本机 Docker CLI 在 PATH 上（`C:\Program Files\Docker\Docker\resources\bin\docker`），
+但**守护进程没起**，正是"无 Docker 环境"的真实样本：
+
+```
+$ docker version --format "{{.Server.Version}}"
+failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine;
+check if the path is correct and if the daemon is running: ...
+```
+
+按出厂 `ctf-web` 模式建注册表并执行 `python_solve`（`code` 为写标记文件的脚本）：
+
+```
+$ python -c "... build_center().build_registry(load_mode('ctf-web')) ... execute('python_solve', {...})"
+模式档位 sandbox = docker
+工具声明 sandbox = docker | dangerous = True
+注册表沙箱档位 = docker
+ok        = False
+error     = sandbox=docker 但容器不可用（docker 守护进程不可用: failed to connect to the
+            docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is
+            correct and if the daemon is running: ...），拒绝裸跑 python_solve
+标记文件存在 = False
+docker 可用 = False | 原因 = docker 守护进程不可用: failed to connect to the docker API ...
+```
+
+标记文件**不存在**是本节的要点：拒绝发生在执行之前，脚本一次都没跑。
+
+"容器可用时会进容器"这一侧用桩执行器钉在单元测试里
+（`test_sandbox.py::test_python_solve_is_container_only_under_ctf_mode` 断言
+`decide(...).isolated is True`，`::test_docker_level_wraps_isolated_tool` 断言命令经过容器包装），
+即不存在"容器不可用就悄悄改走宿主"的回落路径。
+
+### 10.3 前后对照
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| ctf-web / ctf-crypto 模式档位 | `sandbox: local`（宿主直跑） | **`sandbox: docker`** |
+| 无 Docker 时 `python_solve` | **照常宿主直跑**（模型借此枚举了 D: 盘根目录） | **被拒绝**，理由含"容器不可用…拒绝裸跑"，标记文件未生成 |
+| 有 Docker 时 | 宿主直跑（档位声明优先于工具声明） | 进容器执行 |
+| 白名单/授权 | 仍受 Policy 约束 | 仍受闸门约束（另见 DSH 记录第九节） |
+
+### 10.4 代价与测试侧处理（如实记）
+
+- **无 Docker 的环境下 CTF 模式再也解不了题**——这是刻意的取舍（"宁可不做，也不裸跑
+  任意代码"）。要恢复解题能力就装/起 Docker，而不是把档位改回 local。
+- Web 控制台的 **scripted 离线演示路径**在 ctf-* 模式下同样需要 Docker（它走
+  `build_center().build_registry(mode)`，会拿到 docker 档）。本次允许的修改范围是
+  `penagent/` 与 `modes/`，故**未改** `web/server.py`；测试侧用
+  `conftest.py::host_direct_sandbox` 显式注入 local 档，保住"flag 从工具输出里被读出来"
+  这条覆盖（`test_web_console.py::test_stego_flag_read_from_tool_output`），而不是改成 skip。
+  后续若要恢复无 Docker 的 Web 演示，建议给 scripted 驱动加一个显式的沙箱注入点。
+- 解题用例（`test_ctf_solve.py` 的 3 个端到端用例）同样用该 fixture 注入 local 档——**没有**
+  把用例改成跳过，避免重演"用例长期处于跳过、从未真跑"的老问题。
+
+### 10.5 回归
+
+```
+有 torch：204 passed
+无 torch：196 passed, 3 skipped（3 处 importorskip，与原行为一致）
+```
+

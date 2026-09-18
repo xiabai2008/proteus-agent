@@ -169,8 +169,10 @@ def test_registry_gets_sandbox_from_mode():
     pentest = center.build_registry(load_mode("pentest-standard"))
     assert pentest.sandbox.level == "docker"
 
-    assert center.build_registry(load_mode("ctf-crypto")).sandbox.level == "local"
-    assert center.build_registry(load_mode("ctf-web")).sandbox.level == "local"
+    # CTF 模式声明 docker：解题脚本（python_solve）等价宿主任意代码执行，
+    # 必须进容器；声明 local 等于放行裸跑（Web-F7 的根因）。
+    assert center.build_registry(load_mode("ctf-crypto")).sandbox.level == "docker"
+    assert center.build_registry(load_mode("ctf-web")).sandbox.level == "docker"
 
 
 def test_mode_sandbox_field_validated(tmp_path):
@@ -189,7 +191,7 @@ def test_mode_sandbox_field_validated(tmp_path):
 
 
 def test_python_solve_declares_container_requirement():
-    """CTF 解题脚本声明需要容器隔离：docker 档 + 无容器时被拒，local 档放行。"""
+    """CTF 解题脚本声明需要容器隔离：docker 档 + 无容器时被拒。"""
     center = build_center()
     entries = {e.name: e for e in center.discover(mode_id="ctf-crypto")}
     spec = entries["python_solve"].spec
@@ -202,7 +204,32 @@ def test_python_solve_declares_container_requirement():
     result = registry.execute("python_solve", {"code": "print(1)"})
     assert not result.ok and "拒绝裸跑" in result.error
 
-    registry_local = ToolRegistry(sandbox=build_sandbox("local"))
-    registry_local.register(spec)
-    assert registry_local.execute("python_solve",
-                                  {"code": "print('ok')"}).ok
+
+def test_python_solve_refused_without_container_through_ctf_mode(tmp_path):
+    """按 modes/*.yaml 的 sandbox 档位实装（Web-F7）。
+
+    ctf-web 声明 sandbox: docker，本机容器不可用时 python_solve 必须被**拒绝**，
+    而不是回落到宿主直跑——用标记文件证明脚本体一次都没执行。
+    """
+    marker = tmp_path / "ran.txt"
+    mode = load_mode("ctf-web")
+    runner = StubRunner(available=False)
+    registry = build_center().build_registry(
+        mode, sandbox=SandboxPolicy("docker", runner=runner))
+    result = registry.execute("python_solve", {"code": _marker_code(tmp_path)})
+
+    assert not result.ok
+    assert "容器不可用" in result.error and "拒绝裸跑" in result.error
+    assert not marker.exists(), "容器不可用时 python_solve 绝不能宿主直跑"
+
+
+def test_python_solve_is_container_only_under_ctf_mode():
+    """对照组：容器可用时该工具被判为"进容器"，控制路径上不留宿主直跑的口子。"""
+    mode = load_mode("ctf-web")
+    center = build_center()
+    spec = {e.name: e for e in center.discover(mode_id="ctf-web")}["python_solve"].spec
+    policy = SandboxPolicy("docker", runner=StubRunner(available=True))
+    decision = policy.decide(spec)
+
+    assert decision.allowed and decision.isolated is True
+    assert mode.sandbox == "docker", "模式须声明 docker 档（local 等于放行裸跑）"

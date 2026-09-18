@@ -95,8 +95,14 @@ def test_scripted_dispatch_streams_steps_and_flag(service):
     assert service.mission("ctf-web", mission_id)["outcome"] == "success"
 
 
-def test_stego_flag_read_from_tool_output(service):
-    """隐写题收口结论里没有 flag：判定语料含本任务工具输出（与判定器同源）。"""
+def test_stego_flag_read_from_tool_output(service, host_direct_sandbox):
+    """隐写题收口结论里没有 flag：判定语料含本任务工具输出（与判定器同源）。
+
+    用 host_direct_sandbox 注入 local 档（fixture 见 conftest.py）：出厂 ctf-*
+    模式已是 sandbox: docker，无 Docker 时 python_solve 会被拒绝——那是刻意的，
+    由 test_sandbox.py 钉住；本用例考的是"flag 从工具输出里被读出来"，
+    故显式给宿主直跑档，而不是把用例改成 skip。
+    """
     task = service.dispatch("ctf-web", "127.0.0.1", "解出样例题的 flag",
                             driver="scripted", challenge="b64-stego")
     mission_id = _wait_mission(service, task["key"])

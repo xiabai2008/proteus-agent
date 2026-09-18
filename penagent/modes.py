@@ -256,8 +256,13 @@ class ModeProfile:
 
     def filtered_registry(self, registry: ToolRegistry) -> ToolRegistry:
         """按 capability 过滤出新的注册表：被禁用的工具既不进 schema，
-        也无法在运行期被执行（机制性生效，非提示词约束）。"""
-        filtered = ToolRegistry(sandbox=getattr(registry, "sandbox", None))
+        也无法在运行期被执行（机制性生效，非提示词约束）。
+
+        沙箱策略与闸门一并带过去——过滤后的注册表若丢了这两样，换一条构造
+        路径就成了绕过护栏的后门。
+        """
+        filtered = ToolRegistry(sandbox=getattr(registry, "sandbox", None),
+                                gate=getattr(registry, "gate", None))
         for name in registry.names():
             if self.capability.allows(name):
                 filtered.register(registry.get(name))

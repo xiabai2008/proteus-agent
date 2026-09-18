@@ -97,8 +97,9 @@ def test_inherits_deep_merge():
     assert ctf.scope.requires_explicit_allowlist is True  # base 的 required
     assert ctf.budget.model_tier["reason"] == "strong"    # base 的 model_tier
     assert ctf.permission.default == "ask"                # base 的默认档位
-    # sandbox 被 CTF 模式显式覆盖为 local（解题脚本宿主直跑，见 ctf-web.yaml）
-    assert ctf.sandbox == "local"
+    # sandbox 被 CTF 模式显式覆盖为 docker：解题脚本等价宿主任意代码执行，
+    # 容器不可用时该工具被拒绝，绝不回落裸跑（见 ctf-web.yaml）
+    assert ctf.sandbox == "docker"
     assert load_mode("pentest-standard").sandbox == "docker"
     # base 刻意不声明 require_poc，故不会随深合并泄漏进 CTF 模式
     assert ctf.verifier.require_poc is False

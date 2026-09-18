@@ -173,9 +173,11 @@ def cmd_mcp(args) -> int:
     from penagent.mcp import PentestMCPServer
 
     server = PentestMCPServer(data_dir=args.data,
-                              allowed_targets=args.targets or None)
+                              allowed_targets=args.targets or None,
+                              authorize=getattr(args, "authorize", False))
     print(f"XPentest MCP Server 就绪（tools/list 可查工具，"
-          f"targets={args.targets or '127.0.0.1/localhost'}）",
+          f"targets={args.targets or '127.0.0.1/localhost'}，"
+          f"authorize={'on' if getattr(args, 'authorize', False) else 'off'}）",
           file=sys.stderr)
     server.serve_stdio()
     return 0
@@ -264,6 +266,9 @@ def main(argv: list[str] | None = None) -> int:
     p_mcp.add_argument("--data", default="data")
     p_mcp.add_argument("--targets", default="",
                        help="授权目标，逗号分隔（默认 127.0.0.1/localhost）")
+    p_mcp.add_argument("--authorize", action="store_true",
+                       help="操作员级高危授权：开启后白名单内的高危工具才放行"
+                            "（工具调用参数里的 authorize 一律不生效）")
     p_mcp.set_defaults(fn=cmd_mcp)
 
     p_gaps = sub.add_parser("gaps", help="技能盲区发现（能力进化分析）")

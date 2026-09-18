@@ -6,7 +6,9 @@
   运行时校验可执行文件存在性（本地可能滞后远程，缺失即明确提示）
 - http：HTTP 接口工具
 
-安全护栏：所有工具执行前经 Policy 校验（授权目标 + 工具白名单 + 高危动作确认）。
+安全护栏：所有工具执行前经**闸门**（目标白名单 + 高危授权 + 协议白名单，
+`penagent/policy_gate.py`）与**沙箱**（`penagent/sandbox.py`）两道裁决——两者都由
+注册表持有，裁决发生在 `execute()` 内部，任何调用方都绕不过去。
 """
 from __future__ import annotations
 
@@ -61,11 +63,15 @@ class ToolResult:
 
 
 class ToolRegistry:
-    def __init__(self, sandbox: Optional["SandboxPolicy"] = None) -> None:
+    def __init__(self, sandbox: Optional["SandboxPolicy"] = None,
+                 gate: Optional["PolicyGate"] = None) -> None:
         self._tools: dict[str, ToolSpec] = {}
         # 沙箱策略由注册表持有：执行前裁决发生在 execute 内部，
         # 任何调用方（内核循环 / MCP 入口）都无法绕过
         self.sandbox = sandbox
+        # 闸门（目标白名单 + 高危授权 + 协议白名单）同理由注册表持有：
+        # 无论调用来自 ReAct 循环、MCP 底层工具还是 Web 子进程，都先过闸门
+        self.gate = gate
 
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
@@ -79,6 +85,19 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return sorted(self._tools)
 
+    def copy(self, *, gate: Optional["PolicyGate"] = None) -> "ToolRegistry":
+        """复制一份注册表（工具集相同），可换装闸门。
+
+        用途：同一进程内为**一次任务**派生独立护栏（例如 MCP 的 pentest_run
+        需要按调用参数放大授权），而不去改动共享注册表的策略——直接改共享
+        对象会让一次调用的授权永久留在服务端，属于权限放大。
+        gate=None 表示沿用当前闸门；传 PolicyGate 则换装。
+        """
+        clone = ToolRegistry(sandbox=self.sandbox,
+                             gate=self.gate if gate is None else gate)
+        clone._tools = dict(self._tools)
+        return clone
+
     # ------------------------------------------------------------------
     def execute(self, name: str, args: dict,
                 confirm_high_risk: bool = True) -> ToolResult:
@@ -86,6 +105,12 @@ class ToolRegistry:
         if spec is None:
             return ToolResult(tool=name, ok=False, error=f"未知工具: {name}")
         import time
+
+        if self.gate is not None:
+            decision = self.gate.check(spec, args)
+            if not decision.allowed:
+                # 闸门拒绝：工具体一次都不执行（硬规则 1/3）
+                return ToolResult(tool=name, ok=False, error=decision.reason)
 
         wrapper = None
         if self.sandbox is not None:

@@ -28,6 +28,24 @@ def challenges(tmp_path_factory):
     return build_challenges(tmp_path_factory.mktemp("ctf"))
 
 
+# host_direct_sandbox fixture 见 conftest.py：出厂 ctf-* 模式是 sandbox: docker，
+# 解题用例显式注入 local 档以保持链路真跑（无 Docker 时的拒绝行为由
+# test_sandbox.py 的用例钉住）。
+
+
+@pytest.fixture(autouse=True)
+def _restore_chat_json():
+    """隔离全局替换：examples/eval_ctf_solve.solve() 会把 agent.chat_json 换成
+    脚本化决策且**不还原**（那是评测脚本的行为，本文件不改它）。不隔离的话，
+    同一进程里排在后面的用例会拿到一个"从空列表 pop"的假决策函数。
+    """
+    import penagent.agent as agent_mod
+
+    original = agent_mod.chat_json
+    yield
+    agent_mod.chat_json = original
+
+
 # ----------------------------------------------------------------------
 # 1. 工具登记与声明
 # ----------------------------------------------------------------------
@@ -110,7 +128,8 @@ def test_challenge_files_hide_plaintext_flag(challenges):
 # ----------------------------------------------------------------------
 @pytest.mark.parametrize("challenge_id", ["simple-rsa", "b64-stego",
                                           "encoding-chain"])
-def test_solve_challenge_in_ctf_crypto(tmp_path, challenges, challenge_id):
+def test_solve_challenge_in_ctf_crypto(tmp_path, challenges, challenge_id,
+                                       host_direct_sandbox):
     meta = challenges[challenge_id]
     result, agent = solve(tmp_path, challenge_id, meta, mode_id="ctf-crypto")
 
@@ -121,7 +140,7 @@ def test_solve_challenge_in_ctf_crypto(tmp_path, challenges, challenge_id):
     assert meta["flag"] in str(result.summary) or meta["flag"] in context
 
 
-def test_solve_in_ctf_web_mode(tmp_path, challenges):
+def test_solve_in_ctf_web_mode(tmp_path, challenges, host_direct_sandbox):
     """ctf-web 模式同样具备解题能力（两个 CTF 模式共用工具链）。"""
     meta = challenges["encoding-chain"]
     result, _ = solve(tmp_path, "encoding-chain", meta, mode_id="ctf-web")
@@ -129,7 +148,8 @@ def test_solve_in_ctf_web_mode(tmp_path, challenges):
     assert meta["flag"] in str(result.summary)
 
 
-def test_stego_verdict_comes_from_tool_output(tmp_path, challenges):
+def test_stego_verdict_comes_from_tool_output(tmp_path, challenges,
+                                              host_direct_sandbox):
     """隐写题收口结论里没有 flag：判定靠扫描任务期间的工具输出。"""
     meta = challenges["b64-stego"]
     result, agent = solve(tmp_path, "b64-stego", meta, mode_id="ctf-crypto")

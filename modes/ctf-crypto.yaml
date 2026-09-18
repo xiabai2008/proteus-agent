@@ -17,7 +17,7 @@ verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
 triggers: [ctf, crypto, rsa, 编码, 解码, 密码]
 skills: [ctf-crypto]
 memory_namespace: ctf-crypto
-# CTF 解题依赖一次性脚本（python_solve 声明 sandbox: docker）；
-# 本档显式选择宿主直跑——解题脚本与题目文件都是本机资产，不引入容器依赖。
-# 要改回严格容器隔离：把这里换成 docker（容器不可用时该工具会被拒绝执行）。
-sandbox: local
+# CTF 解题依赖一次性脚本（python_solve 声明 sandbox: docker）。
+# 本档为 docker：解题脚本等价宿主任意代码执行，必须进容器；容器不可用时
+# 该工具被**拒绝执行**（绝不回落宿主直跑）。实测见 docs/Web真内核实测记录.md F7。
+sandbox: docker

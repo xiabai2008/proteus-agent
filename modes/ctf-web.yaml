@@ -19,5 +19,6 @@ verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
 triggers: [ctf, flag, 解题, 比赛, web]
 skills: [ctf-web]
 memory_namespace: ctf-web
-# 同 ctf-crypto：CTF 解题脚本走宿主直跑档，换 docker 即启用容器隔离
-sandbox: local
+# 同 ctf-crypto：解题脚本等价宿主任意代码执行（python_solve 声明 sandbox: docker），
+# 因此本档为 docker——容器不可用时该工具被拒绝，不会回落宿主直跑。
+sandbox: docker
