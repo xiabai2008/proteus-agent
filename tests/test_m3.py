@@ -149,6 +149,11 @@ def test_workbench_tools_registered():
     """DawnForge 工作台工具矩阵接入：高价值工具从默认配置注册。"""
     from penagent.external_tools import load_external_tools
 
+    # 工具矩阵按运行时存在性注册（AGENTS.md 硬规则 1 的约定）：二进制未部署的
+    # 环境（CI / 新机器）不注册属预期行为，本用例仅在工具库就位的机器上有意义。
+    if not Path("<TOOLS_DIR>/tools/httpx.exe").exists():
+        pytest.skip("本机未部署 <TOOLS_DIR> 工具库，跳过工具矩阵断言")
+
     reg = ToolRegistry()
     load_external_tools(reg)
     for name, dangerous in [("httpx_probe", False), ("fscan_scan", True),

@@ -47,6 +47,7 @@ if G07 is not None:
 # 其余用例照常执行。设 PENTEST_G07_ROOT 指向 07-agent-war-range 即可恢复。
 G07_DEPENDENT_NODEIDS = {
     "tests/test_closed_loop.py::test_evaluate_uses_independent_hosts",
+    "tests/test_m3.py::test_evolution_eval_script",
     "tests/test_m3.py::test_evolution_llm_script_mock",
     "tests/test_rl.py::test_train_script_runs",
 }
