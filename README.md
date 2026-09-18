@@ -97,15 +97,23 @@ proteus-agent/
 
 ---
 
-## 五、下一步（三阶段，每阶段可独立演示）
+## 五、当前状态（2026-09-18）
 
-| 阶段 | 目标 | 验收标准 |
+三阶段已全部完成并通过真机验证：
+
+| 阶段 | 状态 | 验证证据 |
 |---|---|---|
-| 一 · 模式抽象 | ModeProfile schema（Pydantic 校验）+ 可插拔 Verifier + pentest-standard / ctf-web 两模式 | 同一内核同一目标，两种模式输出不同判定；模式禁用的工具被机制性拦截 |
-| 二 · 能力补齐 | MCP 统一注册中心 + CTF Crypto/Misc 实现 + 沙箱隔离 | 新增工具不改内核；CTF 模式自动解出至少 3 道 Crypto/Misc 题 |
-| 三 · 宿主与界面 | DSH agent-preset 插件 + Web 控制台 + 多 agent 并行 | DSH 界面选模式/下任务/看证据链；AgentTeams 面板可见协同 |
+| 一 · 模式抽象 | 完成 | ModeProfile + 可插拔 Verifier（evidence_chain / flag_regex）+ 记忆按模式分区；验收报告见 `docs/阶段一验收报告.md` |
+| 二 · 能力补齐 | 完成 | MCP 统一注册中心 + CTF Crypto/Misc 工具链 + 沙箱分级（无容器时拒绝而非裸跑） |
+| 三 · 宿主与界面 | 完成 | DSH agent-preset（24 工具挂载）+ Web 控制台三视图（真内核 / scripted 双驱动） |
 
-**第一阶段第一刀**：把 `penagent/agent.py` 的 `Policy.authorize` 布尔值升级为模式驱动的策略引擎——这是现有代码里唯一需要小重构的点。
+**测试**：带 torch 204 passed；无 torch 165 passed + 3 skipped（RL 进化链路为可选依赖）。双解释器独立复跑核实。
+
+**三链路真机实测**（记录见 docs/）：DSH 宿主（preset 发现 / stdio 拉起 / mcp-client 真实调用）· Web 真内核（LLM 决策 + SSE 步骤流 + 证据链 integrity）· RL 进化（步数 6.0→3.0，-50%；闭环评测 Q 层 -39% / PPO 层 -42%）。
+
+**安全姿态**：PolicyGate 由 ToolRegistry 持有，目标白名单 + 高危授权在 ReAct / MCP / Web 全入口机制性生效；MCP 失败语义修正（isError）；ctf-* 模式的脚本执行强制沙箱档位，无容器环境拒绝而非裸跑。
+
+**下一步**：端到端实战演练（CTF 三题 + 授权靶场渗透流程）· RayScan / Chameleon MCP 联调 · 竞赛 / 毕设叙事材料。
 
 ---
 

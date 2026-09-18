@@ -43,6 +43,24 @@ if G07 is not None:
     _parts = [str(G07)] + ([_existing] if _existing else [])
     os.environ["PYTHONPATH"] = os.pathsep.join(_parts)
 
+# 本机找不到 07 靶场时（CI / 新机器），依赖 warfare 包的直跑评测用例自动跳过，
+# 其余用例照常执行。设 PENTEST_G07_ROOT 指向 07-agent-war-range 即可恢复。
+G07_DEPENDENT_NODEIDS = {
+    "tests/test_closed_loop.py::test_evaluate_uses_independent_hosts",
+    "tests/test_m3.py::test_evolution_llm_script_mock",
+    "tests/test_rl.py::test_train_script_runs",
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    if G07 is not None:
+        return
+    skip = pytest.mark.skip(
+        reason="需要 07 靶场 warfare 包（设 PENTEST_G07_ROOT 指向 07-agent-war-range 后可用）")
+    for item in items:
+        if item.nodeid in G07_DEPENDENT_NODEIDS:
+            item.add_marker(skip)
+
 
 # ----------------------------------------------------------------------
 # 测试注入：把内核注册表的沙箱档位钉成 local
