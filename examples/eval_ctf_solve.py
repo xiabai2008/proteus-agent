@@ -147,8 +147,10 @@ def _solve_script(challenge_id: str, meta: dict) -> list[dict]:
              "args": {"path": path}},
             {"thought": "对 blob 块做 base64 解码", "tool": "codec_decode",
              "args": {"data": blob, "codec": "base64"}},
+            # 收口结论不得包含 flag（tests/test_ctf_solve.py 契约：判定必须
+            # 来自工具输出——FlagRegexVerifier 扫描任务上下文中的工具输出）
             {"thought": "解码结果命中 flag", "done": True,
-             "summary": f"blob 解码得到：{meta['flag']}"},
+             "summary": "blob 块解码命中目标串（见工具输出）"},
         ]
     # encoding-chain
     return [
