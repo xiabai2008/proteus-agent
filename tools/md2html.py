@@ -5,8 +5,9 @@ from pathlib import Path
 
 import markdown
 
-SRC = Path(r"<REPO>\docs\渗透测试Agent调研报告-多模式切换.md")
-DST = Path(r"<REPO>\docs\渗透测试Agent调研报告-多模式切换.html")
+REPO = Path(__file__).resolve().parent.parent
+SRC = REPO / "docs" / "渗透测试Agent调研报告-多模式切换.md"
+DST = REPO / "docs" / "渗透测试Agent调研报告-多模式切换.html"
 
 md_text = SRC.read_text(encoding="utf-8")
 

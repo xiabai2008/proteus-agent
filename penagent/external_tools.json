@@ -4,34 +4,34 @@
     "poxiao_scan": {
       "description": "PoXiao 破晓 v3.1.0：SRC 漏洞扫描（技术栈识别+CVE 匹配+降噪）",
       "parameters": {"target": {"type": "string"}},
-      "command": ["python", "<WS>/poxiao/poxiao.py",
+      "command": ["python", "${PENTEST_WS}/poxiao/poxiao.py",
                   "scan", "{args}"],
       "positional": true,
       "timeout": 600,
       "dangerous": true,
-      "workdir": "<WS>/poxiao"
+      "workdir": "${PENTEST_WS}/poxiao"
     },
     "poxiao_recon": {
       "description": "PoXiao 破晓 v3.1.0：域名被动信息收集（Whois/DNS/SSL/历史证书/子域名，quick 模式）",
       "parameters": {"domain": {"type": "string"}},
-      "command": ["python", "<WS>/poxiao/poxiao.py",
+      "command": ["python", "${PENTEST_WS}/poxiao/poxiao.py",
                   "recon", "{args}", "--quick"],
       "positional": true,
       "timeout": 600,
       "dangerous": false,
-      "workdir": "<WS>/poxiao"
+      "workdir": "${PENTEST_WS}/poxiao"
     },
     "ruoyi_scan": {
       "description": "ruoyi-scan 若依专项漏洞扫描器",
       "parameters": {"target": {"type": "string"}},
-      "command": ["python", "<WS>/ruoyi-scan/main.py", "{args}"],
+      "command": ["python", "${PENTEST_WS}/ruoyi-scan/main.py", "{args}"],
       "timeout": 1200,
       "dangerous": true
     },
     "httpx_probe": {
       "description": "httpx：HTTP 探活与技术栈识别（状态码/标题/Server/CMS 指纹，JSON 输出）",
       "parameters": {"target": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/httpx.exe", "-u",
+      "command": ["${PENTEST_TOOLS}/tools/httpx.exe", "-u",
                   "{args}", "-json", "-silent"],
       "positional": true,
       "timeout": 300,
@@ -40,7 +40,7 @@
     "fscan_scan": {
       "description": "fscan：端口扫描+服务识别+漏洞 POC（web 指纹/标题识别，爆破禁用）",
       "parameters": {"host": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/fscan.exe", "-h",
+      "command": ["${PENTEST_TOOLS}/tools/fscan.exe", "-h",
                   "{args}", "-nobr", "-np", "-p",
                   "21,22,80,443,8000,8080,18080"],
       "positional": true,
@@ -50,7 +50,7 @@
     "nuclei_scan": {
       "description": "nuclei：模板漏洞扫描（2.5w+ 模板，技术/漏洞/CVE 检测）",
       "parameters": {"target": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/nuclei.exe", "-u",
+      "command": ["${PENTEST_TOOLS}/tools/nuclei.exe", "-u",
                   "{args}", "-silent"],
       "positional": true,
       "timeout": 600,
@@ -59,7 +59,7 @@
     "subfinder_enum": {
       "description": "subfinder：子域名被动枚举（多源聚合，v2.14）",
       "parameters": {"domain": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/subfinder.exe", "-d",
+      "command": ["${PENTEST_TOOLS}/tools/subfinder.exe", "-d",
                   "{args}", "-silent"],
       "positional": true,
       "timeout": 300,
@@ -68,7 +68,7 @@
     "dnsx_lookup": {
       "description": "dnsx：DNS 解析查询（A/AAAA/CNAME 等，-silent 输出 IP）",
       "parameters": {"domain": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/dnsx.exe", "-d",
+      "command": ["${PENTEST_TOOLS}/tools/dnsx.exe", "-d",
                   "{args}", "-silent", "-a"],
       "positional": true,
       "timeout": 120,
@@ -77,7 +77,7 @@
     "katana_crawl": {
       "description": "katana：爬虫 URL 收集（JS 渲染/表单/API 端点发现）",
       "parameters": {"url": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/katana.exe", "-u",
+      "command": ["${PENTEST_TOOLS}/tools/katana.exe", "-u",
                   "{args}", "-silent"],
       "positional": true,
       "timeout": 300,
@@ -86,7 +86,7 @@
     "naabu_scan": {
       "description": "naabu：快速端口扫描（SYN 探测，top 端口）",
       "parameters": {"host": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/naabu.exe", "-host",
+      "command": ["${PENTEST_TOOLS}/tools/naabu.exe", "-host",
                   "{args}", "-silent", "-top-ports", "100"],
       "positional": true,
       "timeout": 300,
@@ -95,7 +95,7 @@
     "dalfox_xss": {
       "description": "dalfox：XSS 专项扫描（参数分析/DOM XSS 检测）",
       "parameters": {"target": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/dalfox.exe", "url",
+      "command": ["${PENTEST_TOOLS}/tools/dalfox.exe", "url",
                   "{args}", "--silence"],
       "positional": true,
       "timeout": 600,
@@ -113,9 +113,9 @@
     "gobuster_dir": {
       "description": "gobuster：目录/文件爆破（10k 通用字典，30 并发）",
       "parameters": {"url": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/gobuster.exe", "dir",
+      "command": ["${PENTEST_TOOLS}/tools/gobuster.exe", "dir",
                   "-u", "{args}", "-w",
-                  "<TOOLS_DIR>/config/dictionaries/10k-most-common.txt",
+                  "${PENTEST_TOOLS}/config/dictionaries/10k-most-common.txt",
                   "-t", "30", "-q"],
       "positional": true,
       "timeout": 600,
@@ -124,9 +124,9 @@
     "ffuf_fuzz": {
       "description": "ffuf：参数/路径 Fuzz（10k 字典，FUZZ 位置自动拼接）",
       "parameters": {"url": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/ffuf.exe", "-u",
+      "command": ["${PENTEST_TOOLS}/tools/ffuf.exe", "-u",
                   "{args}/FUZZ", "-w",
-                  "<TOOLS_DIR>/config/dictionaries/10k-most-common.txt",
+                  "${PENTEST_TOOLS}/config/dictionaries/10k-most-common.txt",
                   "-t", "30", "-s"],
       "positional": true,
       "timeout": 600,
@@ -135,7 +135,7 @@
     "ehole_finger": {
       "description": "ehole：红队重点系统指纹识别（fofa/资产指纹匹配）",
       "parameters": {"url": {"type": "string"}},
-      "command": ["<TOOLS_DIR>/tools/ehole/EHole_windows_amd64/EHole_windows_amd64.exe",
+      "command": ["${PENTEST_TOOLS}/tools/ehole/EHole_windows_amd64/EHole_windows_amd64.exe",
                   "finger", "-u", "{args}"],
       "positional": true,
       "timeout": 300,

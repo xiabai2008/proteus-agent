@@ -161,7 +161,7 @@
 <h1 id="agent">多模式渗透测试 Agent 调研报告</h1>
 <blockquote>
 <p><strong>调研主题</strong>：开发一款支持多模式切换（常规渗透测试模式 / CTF 比赛模式等）的渗透测试 Agent
-<strong>调研范围</strong>：GitHub 同类项目架构调研 · 本地 <code><WS></code> 资产复用评估 · 自研 vs 二次开发路线对比 · 多方案推荐
+<strong>调研范围</strong>：GitHub 同类项目架构调研 · 本地 <code>&lt;WS&gt;</code> 资产复用评估 · 自研 vs 二次开发路线对比 · 多方案推荐
 <strong>数据时点</strong>：2026-09-17（GitHub 星标、许可、语言均经 API 实时核验）
 <strong>配套文件</strong>：本报告替代 2026-08 版《网安 agent 渗透调研报告-团队版》（该版本侧重学术/商业全景，无本地代码复用评估与路线决策，本版为其升级与收敛）</p>
 </blockquote>
@@ -459,12 +459,12 @@
 </tr>
 <tr>
 <td><strong>DawnForge 多 Agent 渗透工作台</strong></td>
-<td><code>dawnforge-pentest/</code>（部署于 <code><TOOLS_DIR></code>）</td>
+<td><code>dawnforge-pentest/</code>（部署于 <code>&lt;TOOLS_DIR&gt;</code>）</td>
 <td>Agent 无关技能层，<strong>69 个技能包含 5 个 CTF 技能</strong>（ctf-web / ctf-crypto / ctf-pwn / ctf-reverse / ctf-misc），证据强制反幻觉，<strong>已有 <code>config/modes.yaml</code> 三档模式 + 关键词触发</strong></td>
 </tr>
 <tr>
 <td><strong>本地工具军火库（已部署）</strong></td>
-<td><code><TOOLS_DIR>\bin</code>（约 70 个）+ <code>tools/</code></td>
+<td><code>&lt;TOOLS_DIR&gt;\bin</code>（约 70 个）+ <code>tools/</code></td>
 <td>nuclei / fscan / sqlmap / httpx / subfinder / katana / naabu / dalfox / gobuster / ffuf / nmap / masscan / hydra / impacket / ysoserial / mimikatz / mitmproxy / jadx / x64dbg / rsactftool / stegoveritas / PEASS-ng 等，<strong>binary 级复用，零适配成本</strong></td>
 </tr>
 <tr>
@@ -631,7 +631,7 @@
 </tr>
 <tr>
 <td><strong>本地 Armory</strong></td>
-<td><code><TOOLS_DIR>\bin</code> + <code>tools/</code></td>
+<td><code>&lt;TOOLS_DIR&gt;\bin</code> + <code>tools/</code></td>
 <td>约 70 个已部署二进制工具</td>
 <td><strong>直接复用</strong></td>
 <td>配置化注册（无需复制代码）</td>
@@ -1156,7 +1156,7 @@ skills: [ctf-web]
 <h2 id="_8">第五部分 · 关键来源</h2>
 <p><strong>GitHub 实时核验（2026-09-17）</strong>：<code>usestrix/strix</code>（63,063 星 / Python / Apache-2.0）、<code>vxcontrol/pentagi</code>（24,592 / Go / MIT）、<code>GreyDGL/PentestGPT</code>（15,495 / Python / MIT）、<code>0x4m4/hexstrike-ai</code>（11,922 / Python / MIT）</p>
 <p><strong>其他参考</strong>：<code>PurpleAILAB/Decepticon</code>、<code>GH05TCREW/pentestagent</code>、<code>CyberStrikeus/CyberStrike</code>、<code>cdxiaodong/cain-agent</code>、<code>chainreactors/aiscan</code>、RapidPen（arXiv 2502.16730）、Cochise（arXiv 2605.11671）、HackSynth（arXiv 2412.01778）、VMS（arXiv 2507.21113）、AutoPenBench（arXiv 2410.03225）、PentestEval（arXiv 2512.14233）、CVE-Bench（arXiv 2503.17332）、CHECKMATE / PEP（arXiv 2512.11143）、Excalibur（arXiv 2602.17622）</p>
-<p><strong>本地资产</strong>：<code>网安项目开发规划/10-pentest-agent/</code>、<code>dawnforge-pentest/</code>（含 <code>config/modes.yaml</code>、<code>skills/pentest_skills/</code>）、<code>RayScan/</code>（<code>wvs/mcp_server.py</code>）、<code>Chameleon/</code>、<code>poxiao/</code>、<code>ruoyi-scan/</code>、<code>LogicHunt/</code>、<code>PacketForge/</code>、<code>redforge/</code>、<code>AI驱动的自动化攻防对抗训练平台/core/</code>、<code>deepseek-harness/</code>、<code>dsh-agent-teams/</code>、<code>dsh-web-ui/</code>、<code>网安工具自研/profiles/</code>、<code>红队平台设计/自建方案-SRC渗透流水线.md</code>、<code>网安项目开发规划/docs/个人渗透Agent产品设计.md</code>、<code><TOOLS_DIR>\{bin,tools,kb}</code></p>
+<p><strong>本地资产</strong>：<code>网安项目开发规划/10-pentest-agent/</code>、<code>dawnforge-pentest/</code>（含 <code>config/modes.yaml</code>、<code>skills/pentest_skills/</code>）、<code>RayScan/</code>（<code>wvs/mcp_server.py</code>）、<code>Chameleon/</code>、<code>poxiao/</code>、<code>ruoyi-scan/</code>、<code>LogicHunt/</code>、<code>PacketForge/</code>、<code>redforge/</code>、<code>AI驱动的自动化攻防对抗训练平台/core/</code>、<code>deepseek-harness/</code>、<code>dsh-agent-teams/</code>、<code>dsh-web-ui/</code>、<code>网安工具自研/profiles/</code>、<code>红队平台设计/自建方案-SRC渗透流水线.md</code>、<code>网安项目开发规划/docs/个人渗透Agent产品设计.md</code>、<code>&lt;TOOLS_DIR&gt;\{bin,tools,kb}</code></p>
 <blockquote>
 <p><strong>安全声明</strong>：本报告涉及的技术方案<strong>仅用于授权范围内的受控安全实验</strong>（自有靶机、CTF 靶场、隔离容器）。所有设计均以"目标白名单硬校验 + 高危操作审批 + 全动作证据链留痕"为前提。严禁在未授权系统上运行。</p>
 </blockquote>

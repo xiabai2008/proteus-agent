@@ -115,14 +115,23 @@ def test_evolution_llm_script_mock():
 
 def test_poxiao_recon_registered():
     """v3.1.0 联动：poxiao_recon 从默认配置注册（本地 poxiao 已合并 v3.1.0）。"""
+    import os
+    from pathlib import Path as _P
+
     from penagent.external_tools import load_external_tools
+
+    # 路径经 ${PENTEST_WS} 展开（见 penagent/envcfg.py）：WS 未配置的
+    # 环境（CI / 新机器）poxiao 不可达，属预期，跳过而非失败。
+    ws = os.environ.get("PENTEST_WS", "")
+    if not ws or not _P(ws, "poxiao", "poxiao.py").exists():
+        pytest.skip("PENTEST_WS 未配置或本地 poxiao 缺失，跳过外部工具断言")
 
     reg = ToolRegistry()
     info = load_external_tools(reg)
     spec = reg.get("poxiao_recon")
     assert spec is not None
     assert spec.dangerous is False          # 被动信息收集，非攻击性
-    assert spec.command[1] == "<WS>/poxiao/poxiao.py"
+    assert spec.command[1] == ws + "/poxiao/poxiao.py"
     assert spec.command[-1] == "--quick"    # 快速模式固定参数
     assert spec.workdir.endswith("poxiao")
     assert spec.positional is True
@@ -147,12 +156,16 @@ def test_skill_category_and_evidence(tmp_path):
 
 def test_workbench_tools_registered():
     """DawnForge 工作台工具矩阵接入：高价值工具从默认配置注册。"""
+    import os
+
     from penagent.external_tools import load_external_tools
 
     # 工具矩阵按运行时存在性注册（AGENTS.md 硬规则 1 的约定）：二进制未部署的
     # 环境（CI / 新机器）不注册属预期行为，本用例仅在工具库就位的机器上有意义。
-    if not Path("<TOOLS_DIR>/tools/httpx.exe").exists():
-        pytest.skip("本机未部署 <TOOLS_DIR> 工具库，跳过工具矩阵断言")
+    # 工具库根目录来自 .env 的 PENTEST_TOOLS（公开仓库零本机路径约定）。
+    tools_dir = os.environ.get("PENTEST_TOOLS", "")
+    if not tools_dir or not Path(tools_dir, "tools", "httpx.exe").exists():
+        pytest.skip("PENTEST_TOOLS 未配置或工具库未部署，跳过工具矩阵断言")
 
     reg = ToolRegistry()
     load_external_tools(reg)
@@ -163,4 +176,4 @@ def test_workbench_tools_registered():
         spec = reg.get(name)
         assert spec is not None, f"{name} 未注册"
         assert spec.dangerous is dangerous, f"{name} 危险标记错误"
-        assert "<TOOLS_DIR>/tools" in spec.command[0]
+        assert tools_dir in spec.command[0]

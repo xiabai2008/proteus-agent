@@ -19,7 +19,9 @@
 - id: persona
   name: './proteus-persona.mjs'
   config:
-    promptPath: <REPO>/prompts/dsh-persona.md
+    # 仓库根来自操作员环境变量 PENTEST_WS（公开仓库零本机路径约定，
+    # 见 README「环境变量」一节；!!js 在加载器作用域求值）。
+    promptPath: !!js (process.env.PENTEST_WS || '') + '/proteus-agent/prompts/dsh-persona.md'
     suffix: >-
       本会话通过 mcp__proteus__* 工具驱动 Proteus 内核；模式（pentest-standard /
       ctf-web / ctf-crypto）由内核侧 ModeProfile 决定，工具白名单与权限档位随之生效。
@@ -39,9 +41,10 @@
   config:
     transport: stdio
     serverName: proteus
-    command: <PY312>/python.exe
+    # Python 解释器路径来自 PENTEST_PY312（.env / 用户环境变量），缺省回退 PATH 上的 python。
+    command: !!js process.env.PENTEST_PY312 || 'python'
     args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1']
-    cwd: <REPO>
+    cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
     env:
       PENTEST_LLM_BASE_URL: !!js process.env.PENTEST_LLM_BASE_URL ?? ''
       PENTEST_LLM_API_KEY: !!js process.env.PENTEST_LLM_API_KEY ?? ''

@@ -16,11 +16,16 @@ from pathlib import Path
 
 import pytest
 
+from penagent.envcfg import load_env_file
+
+# 本机路径只来自不入库的 .env（公开仓库零本机路径约定，见 penagent/envcfg.py）
+load_env_file()
+
 ROOT = Path(__file__).resolve().parent
 
 CANDIDATES = [
     ROOT.parent / "07-agent-war-range",
-    Path(r"<WS>\网安项目开发规划\07-agent-war-range"),
+    ROOT.parent / "网安项目开发规划" / "07-agent-war-range",
 ]
 
 

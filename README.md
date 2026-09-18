@@ -99,6 +99,20 @@ proteus-agent/
 
 ## 五、当前状态（2026-09-18）
 
+**环境变量约定（可移植性）**：本仓库入库文件**不含任何本机绝对路径**。配置 JSON 里写 `${VAR}` 占位符，真实路径放在不入库的 `.env`（模板见 `.env.example`），由 `penagent/envcfg.py` 统一装载与展开：
+
+| 变量 | 含义 |
+|---|---|
+| `PENTEST_WS` | 工作区根（poxiao / RayScan / 本仓库等所在目录） |
+| `PENTEST_TOOLS` | 本地工具库根（httpx / nuclei 等二进制） |
+| `PENTEST_PY312` | Python 3.12 解释器路径（DSH preset 使用） |
+| `PENTEST_G07_ROOT` | 07 靶场（warfare 包）根，评测脚本依赖 |
+| `PENTEST_LLM_BASE_URL` / `PENTEST_LLM_API_KEY` / `PENTEST_LLM_MODEL` | OpenAI 兼容 LLM 端点 |
+
+未设置时对应工具自动"未注册/跳过"，不崩溃——CI（无本地工具与靶场）即按此降级运行。
+
+---
+
 三阶段已全部完成并通过真机验证：
 
 | 阶段 | 状态 | 验证证据 |

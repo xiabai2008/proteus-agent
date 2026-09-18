@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-PACKETFORGE_ROOT = Path("<WS>/PacketForge")
+from penagent.envcfg import expand
+
+PACKETFORGE_ROOT = Path(expand("${PENTEST_WS}/PacketForge"))
 
 
 def _load_packetforge():
@@ -35,7 +37,7 @@ def register_packetforge(registry) -> dict:
     if pf is None:
         return {"loaded": 0, "tools": [],
                 "note": "PacketForge 不可用（本地缺失或损坏），"
-                        "请 git pull <WS>/PacketForge 后重试"}
+                        "请 git pull ${PENTEST_WS}/PacketForge 后重试"}
     nmap = pf["nmap"]()
 
     def _nmap_scan(target: str, ports: str = "1-1000",

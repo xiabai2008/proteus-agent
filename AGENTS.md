@@ -19,8 +19,22 @@
 4. **内核不得依赖任何宿主**：不 import DSH / Claude Code 专属能力；宿主只通过 MCP 或子进程调用内核。
 5. **不引入重型新依赖**：先看 `requirements.txt`；能用 stdlib / dataclass 就不引 Pydantic / LangChain（确需引入先在回复中说明理由）。
 6. **每次任务收尾必须**：全量 `pytest` 绿 + 一次 git commit（新功能与测试同一提交）。
-7. **路径红线**：不移动 `<WS>` 下其他项目（poxiao / RayScan / deepseek-harness 等）；`external_tools.json` 里的绝对路径保持原样。
+7. **路径红线**：不移动 `<WS>` 下其他项目（poxiao / RayScan / deepseek-harness 等）；配置里的路径一律写 `${VAR}` 占位符，**禁止把本机绝对路径写进任何入库文件**。
 8. **合法授权前提**：默认目标白名单仅 127.0.0.1/localhost；`.env` 含密钥，不入库（用 `.env.example`）。
+
+## 2.1 环境变量约定（可移植性）
+
+本机真实路径只存在于不入库的 `.env`，由 `penagent/envcfg.py` 统一装载与展开：
+
+| 变量 | 含义 | 消费方 |
+|---|---|---|
+| `PENTEST_WS` | 工作区根（poxiao / RayScan / 本仓库等所在目录） | external_tools.json / mcp_servers.json / adapters / DSH preset |
+| `PENTEST_TOOLS` | 本地工具库根（httpx/nuclei 等 ~70 个二进制） | external_tools.json |
+| `PENTEST_PY312` | Python 3.12 解释器路径 | DSH preset（容器外 CLI） |
+| `PENTEST_G07_ROOT` | 07 靶场（warfare 包）根 | conftest.py / 评测脚本 |
+| `PENTEST_DOCKER_IMAGE` | 沙箱容器镜像（缺省 python:3.12-slim） | penagent/sandbox.py |
+
+规则：配置 JSON 与入库文件写 `${VAR}`；`envcfg.expand_deep()` 在装载时展开，未设置的变量保持原样（运行时存在性校验会给出"未注册/不可用"，不崩溃）。新增路径类配置一律走这个机制，禁止回退到硬编码。
 
 ## 3. 关键事实
 

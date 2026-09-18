@@ -9,7 +9,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-RAYSCAN_ROOT = Path("<WS>/RayScan")
+from penagent.envcfg import expand
+
+RAYSCAN_ROOT = Path(expand("${PENTEST_WS}/RayScan"))
 
 
 def _load_rayscan():
@@ -34,7 +36,7 @@ def register_rayscan(registry) -> dict:
     if wav is None:
         return {"loaded": 0, "tools": [],
                 "note": "RayScan wvs 库不可用（本地缺失或损坏），"
-                        "请 git pull <WS>/RayScan 后重试"}
+                        "请 git pull ${PENTEST_WS}/RayScan 后重试"}
 
     def _scan(url: str, timeout: int = 600) -> dict:
         try:

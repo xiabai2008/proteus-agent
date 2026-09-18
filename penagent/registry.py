@@ -175,7 +175,8 @@ class ToolCenter:
         if not p.exists():
             self._notes.append(f"MCP server 配置缺失: {p}")
             return {"servers": 0, "note": f"配置文件缺失: {p}"}
-        data = json.loads(p.read_text(encoding="utf-8"))
+        from penagent.envcfg import expand_deep
+        data = expand_deep(json.loads(p.read_text(encoding="utf-8")))
         count = 0
         for name, block in (data.get("servers") or {}).items():
             self._servers[name] = MCPServerSpec.from_dict(name, block)

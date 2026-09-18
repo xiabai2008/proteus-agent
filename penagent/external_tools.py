@@ -26,7 +26,8 @@ def load_external_tools(registry: ToolRegistry,
     p = Path(path) if path else DEFAULT_TOOLS_JSON
     if not p.exists():
         return {"loaded": 0, "note": f"配置文件缺失: {p}"}
-    data = json.loads(p.read_text(encoding="utf-8"))
+    from penagent.envcfg import expand_deep
+    data = expand_deep(json.loads(p.read_text(encoding="utf-8")))
     loaded = 0
     unavailable = []
     for name, spec in (data.get("tools") or {}).items():
