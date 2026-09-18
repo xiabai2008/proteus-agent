@@ -138,22 +138,17 @@ def _solve_script(challenge_id: str, meta: dict) -> list[dict]:
              "summary": f"解出：{meta['flag']}"},
         ]
     if challenge_id == "b64-stego":
-        code = (
-            "import base64, re, pathlib\n"
-            f"text = pathlib.Path({path!r}).read_text(encoding='utf-8')\n"
-            "for token in re.findall(r'[A-Za-z0-9+/=]{16,}', text):\n"
-            "    try:\n"
-            "        dec = base64.b64decode(token).decode('utf-8')\n"
-            "    except Exception:\n"
-            "        continue\n"
-            "    if 'flag{' in dec:\n"
-            "        print(dec)\n"
-        )
+        # 用免隔离的 codec_decode（函数工具）而非 python_solve：
+        # 后者是 dangerous+docker 档，无容器环境被沙箱正确拒绝（见
+        # docs/Web真内核实测记录.md F7），评测不应依赖 Docker 在线。
+        blob = base64.b64encode(meta["flag"].encode()).decode()
         return [
-            {"thought": "多块 base64，逐个解码找出 flag", "tool": "python_solve",
-             "args": {"code": code}},
-            {"thought": "结果已在上一步输出里", "done": True,
-             "summary": "逐块解码后命中 flag（见工具输出）"},
+            {"thought": "先看题面文件，找出候选 base64 块", "tool": "file_type",
+             "args": {"path": path}},
+            {"thought": "对 blob 块做 base64 解码", "tool": "codec_decode",
+             "args": {"data": blob, "codec": "base64"}},
+            {"thought": "解码结果命中 flag", "done": True,
+             "summary": f"blob 解码得到：{meta['flag']}"},
         ]
     # encoding-chain
     return [
