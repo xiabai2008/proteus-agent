@@ -89,3 +89,46 @@ def test_notification_returns_none(server):
 def test_invalid_json(server):
     r = json.loads(server.handle_line("not json"))
     assert r["error"]["code"] == -32700
+
+
+def test_pentest_run_mode_param_in_schema(server):
+    """pentest_run 暴露 mode 参数，描述里写明可选值（DSH 侧 LLM 靠它路由）。"""
+    schema = server._tools_schema()
+    spec = next(t for t in schema if t["name"] == "pentest_run")
+    assert spec["inputSchema"]["properties"]["mode"] == {"type": "string"}
+    for mid in ("pentest-standard", "ctf-web", "ctf-crypto"):
+        assert mid in spec["description"]
+
+
+def test_agent_mode_switch_registry_and_verifier(server):
+    """mode_id=ctf-web：注册表按模式重建（nuclei 被拒之门外）、判定器切 flag_regex。"""
+    agent = server._agent(mode_id="ctf-web")
+    assert agent.mode is not None and agent.mode.id == "ctf-web"
+    from penagent.verifier import FlagRegexVerifier
+
+    assert isinstance(agent.verifier, FlagRegexVerifier)
+    assert "nuclei_scan" not in agent.registry.names()
+
+
+def test_agent_default_mode_keeps_evidence_chain(server):
+    """不带 mode：维持升级前行为（全量注册表 + 证据链判定器）。"""
+    agent = server._agent()
+    assert agent.mode is None
+    from penagent.verifier import EvidenceChainVerifier
+
+    assert isinstance(agent.verifier, EvidenceChainVerifier)
+    assert "nuclei_scan" in agent.registry.names()
+
+
+def test_pentest_run_unknown_mode_is_structured_error(server):
+    """未知模式 id → isError=true 的结构化结果（不是协议级 error）。"""
+    r = _call(server, "tools/call", {
+        "name": "pentest_run",
+        "arguments": {"target": "http://127.0.0.1:9", "objective": "x",
+                      "mode": "ghost-mode"}}, msg_id=9)
+    result = r["result"]
+    assert result["isError"] is True
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["ok"] is False
+
+

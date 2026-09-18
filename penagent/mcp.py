@@ -29,10 +29,13 @@ MCP_VERSION = "2025-06-18"
 # 服务端高层能力：只暴露给 MCP 客户端，不进入内核 ReAct 循环
 SERVER_TOOLS = [
     ToolSpec(name="pentest_run",
-             description="执行完整渗透任务（LLM 决策循环：侦察/扫描/利用），"
-                         "返回总结与证据引用。危险动作需 authorize=true。",
+             description="执行完整渗透/CTF 任务（LLM 决策循环），返回总结与证据引用。"
+                         "mode 选择模式档案：pentest-standard（默认，常规渗透与侦察）/"
+                         "ctf-web / ctf-crypto（CTF 与解题任务选 ctf-*，判定器/预算/工具"
+                         "白名单随之切换）。危险动作需 authorize=true。",
              parameters={"target": {"type": "string"},
                          "objective": {"type": "string"},
+                         "mode": {"type": "string"},
                          "authorize": {"type": "boolean"}}),
     ToolSpec(name="pentest_skills",
              description="列出经验库技能（按成功率排序）",
@@ -77,19 +80,32 @@ class PentestMCPServer:
         self._agents: dict[str, PenAgent] = {}
 
     # ------------------------------------------------------------------
-    def _agent(self, authorize: bool = False) -> PenAgent:
-        """内层 ReAct Agent：复用服务端授权目标，按调用参数放大授权。
+    def _agent(self, authorize: bool = False,
+               mode_id: str = "") -> PenAgent:
+        """内层 ReAct Agent：复用服务端授权目标，按调用参数放大授权与选择模式。
 
         `--targets` 对 pentest_run 同样生效（此前被 `allowed_targets=None`
         丢掉，只剩默认回环）；`authorize` 是 pentest_run 的既有契约
         （工具描述里写明"危险动作需 authorize=true"），但只在这条路径上生效，
         且作用范围是**本次任务的注册表副本**——不改动服务端共享注册表。
+        `mode_id` 非空时按模式档案构建注册表（capability 白名单 / 沙箱档位 /
+        判定器 / 预算随之切换），未知 id 抛 ModeError 由调用方转 isError。
         """
+        mode = None
+        if mode_id:
+            from penagent.modes import load_mode
+
+            mode = load_mode(mode_id)
         policy = Policy(allowed_targets=self.allowed_targets or None,
-                        authorize=bool(authorize) or self.authorize)
-        registry = self.registry.copy(gate=PolicyGate(policy))
+                        authorize=bool(authorize) or self.authorize,
+                        mode=mode)
+        if mode is not None:
+            registry = self.center.build_registry(mode)
+        else:
+            registry = self.registry.copy(gate=PolicyGate(policy))
+        registry.gate = PolicyGate(policy)
         return PenAgent(registry, self.memory, self.evidence,
-                        self.llm, policy, max_steps=12)
+                        self.llm, policy, max_steps=None, mode=mode)
 
     # ------------------------------------------------------------------
     # MCP tools 定义
@@ -150,7 +166,8 @@ class PentestMCPServer:
         args = params.get("arguments") or {}
         try:
             if name == "pentest_run":
-                result = self._agent(authorize=bool(args.get("authorize")))\
+                result = self._agent(authorize=bool(args.get("authorize")),
+                                     mode_id=str(args.get("mode") or ""))\
                     .run(args.get("target", ""), args.get("objective", ""))
                 return self._result(msg_id, result.to_dict(),
                                     is_error=result.outcome != "success")
