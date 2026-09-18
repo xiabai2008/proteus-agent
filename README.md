@@ -1,8 +1,26 @@
 # Proteus · 千面 — 多模式渗透测试 Agent
 
+[![CI](https://github.com/xiabai2008/proteus-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/xiabai2008/proteus-agent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
+![Tests](https://img.shields.io/badge/tests-204%20passed-brightgreen)
+
 > **一个内核，千种面孔。**
 > Proteus（普罗透斯）：希腊神话中的海上老人，可随心变换任意形态——多模式切换的完美隐喻。
 > 千面：一个内核，适配千种作战场景。
+
+## 预览
+
+**架构总览**
+
+![架构总览](docs/assets/architecture.svg)
+
+**30 秒演示**（真实作战记录渲染：pentest-standard 侦察任务 + ctf-crypto 编码链解题，含权限闸门拦截与证据链收口）
+
+![演示动画](docs/assets/demo.gif)
+
+---
 
 **仓库命名**：`proteus-agent`（GitHub `xiabai2008/proteus-agent`，命名空间已核验可用，2026-09-17）
 
