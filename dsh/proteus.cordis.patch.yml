@@ -51,6 +51,6 @@
       # 自有靶机 / 隔离环境使用，常规渗透建议 proteus-standard。
       proteus-ctf:
         sandbox: danger-full-access
-        approval: never
+        approval: ask
     # 取消注释即把 proteus-standard 设为新会话默认档（会覆盖部署默认）。
     # defaultPreset: proteus-standard

@@ -46,7 +46,8 @@
     # 注意：!!js 裸写三元表达式里的 ": " 会被 YAML 解析成映射键（实测
     # "command: [object Object]"），故用 || 短路形式，整行不得出现 ": "。
     command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
-    args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1']
+    args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets',
+           '127.0.0.1,localhost', '--authorize']
     cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
     env:
       PENTEST_LLM_BASE_URL: !!js process.env.PENTEST_LLM_BASE_URL ?? ''
