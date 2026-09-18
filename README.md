@@ -26,6 +26,55 @@
 
 ---
 
+## 快速开始
+
+**0）环境准备**：复制 `.env.example` 为 `.env`，填入 LLM 端点三键（`PENTEST_LLM_BASE_URL / API_KEY / MODEL`，OpenAI 兼容）与本机路径（`PENTEST_WS / PENTEST_TOOLS / PENTEST_PY312 / PENTEST_G07_ROOT`，不填则对应外部工具自动降级跳过）。安装依赖：`pip install -r requirements.txt`。
+
+**入口一 · CLI（日常主用）**
+
+```bash
+# 起一个授权本地靶子
+python examples/target.py --port 8080
+
+# 渗透模式侦察任务（真 LLM 决策 + 证据链 + 反幻觉）
+python -m penagent run --mode pentest-standard --target http://127.0.0.1:8080 \
+    --objective "识别开放端口、Web 技术栈、敏感路径与信息泄漏"
+
+# CTF 模式解题
+python -m penagent run --mode ctf-crypto --target data/eval-ctf/encoding_chain.txt \
+    --objective "解出 flag"
+
+# 任务后复盘 → 技能沉淀（越用越准的关键一步）
+python -m penagent reflect <mission_id>
+
+# 查看经验库 / 作战记录 / 证据链校验 / 技能盲区
+python -m penagent skills && python -m penagent missions
+python -m penagent verify && python -m penagent gaps
+```
+
+**入口二 · Web 控制台**（模式选择 / 实时步骤流 / 证据链视图）
+
+```bash
+python web/server.py            # 默认 http://127.0.0.1:8770
+```
+
+**入口三 · 挂到 deepseek-harness**（复用沙箱 / 审批 / AgentTeams）
+
+```bash
+# preset 已在 dsh/.agent-presets/proteus，按 docs/DSH宿主接入指南.md 安装后：
+dsh  # 会话内直接用自然语言下任务，工具以 mcp__proteus__* 出现
+```
+
+**入口四 · 作为 MCP Server 被任意 LLM 客户端调用**（Claude Code / Codex / OpenCode…）
+
+```bash
+python -m penagent mcp --targets 127.0.0.1
+```
+
+模式清单见 `modes/`（pentest-standard / ctf-web / ctf-crypto），知识检索（seckb 知识库）与外部工具（RayScan / Chameleon）按 `penagent/mcp_servers.json` 声明自动接入。
+
+
+
 ## 一、项目定位
 
 支持多模式切换的渗透测试 Agent：同一套内核，通过 ModeProfile（模式档案）在**常规渗透测试模式**、**CTF 比赛模式**等场景之间机制性切换——工具白名单、参数冻结、权限档位、预算策略、成功判定器全部随模式生效。
