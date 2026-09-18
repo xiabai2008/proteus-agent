@@ -61,7 +61,7 @@ def test_center_registers_builtins_cli_and_servers(tmp_path):
     summary = center.summary()
     assert summary["by_source"][SOURCE_FUNCTION] >= 4
     assert summary["by_source"][SOURCE_CLI] == 1
-    assert summary["servers"] == ["chameleon", "rayscan"]
+    assert summary["servers"] == ["chameleon", "rayscan", "seckb"]
 
 
 # ----------------------------------------------------------------------
@@ -219,18 +219,22 @@ def test_mcp_server_surface_from_center(tmp_path):
 
 
 def test_shipped_mcp_servers_config():
-    """交付配置：RayScan（http）与 Chameleon（stdio）均已登记。"""
+    """交付配置：RayScan（http）、Chameleon（stdio）与 seckb 知识库（stdio）均已登记。"""
     center = ToolCenter()
     center.load_mcp_servers()
     servers = {s.name: s for s in center.servers()}
 
-    assert set(servers) == {"rayscan", "chameleon"}
+    assert set(servers) == {"rayscan", "chameleon", "seckb"}
     assert servers["rayscan"].transport == "http"
     assert servers["rayscan"].url.endswith("/mcp")
     assert servers["rayscan"].modes == ("pentest-standard",)
     assert servers["chameleon"].transport == "stdio"
     assert servers["chameleon"].command[1:] == ("-m", "chameleon.interfaces.mcp_server")
     assert servers["chameleon"].modes == ()       # 全模式可用
+    assert servers["seckb"].transport == "stdio"
+    assert servers["seckb"].modes == ()           # 知识检索全模式可用（只读）
+    assert servers["seckb"].command[-2:] == ("mcp",) or "seckb.cli" in " ".join(
+        servers["seckb"].command)
 
 
 def test_poxiao_ruoyi_stay_cli():

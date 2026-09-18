@@ -31,6 +31,8 @@ def probe(name: str) -> int:
 
     if name == "rayscan":
         out = reg.execute("rayscan_list_modules", {})
+    elif name == "seckb":
+        out = reg.execute("seckb_kb_search", {"query": "langflow CVE-2025-3248"})
     else:
         # Chameleon 自带 SSRF 防护，会拒绝 127.0.0.1 等内网地址（其组件安全策略，
         # 属预期行为）；改用公网只读地址验证完整采集链路。
@@ -44,7 +46,7 @@ def probe(name: str) -> int:
 
 if __name__ == "__main__":
     import json
-    if len(sys.argv) != 2 or sys.argv[1] not in ("rayscan", "chameleon"):
+    if len(sys.argv) != 2 or sys.argv[1] not in ("rayscan", "chameleon", "seckb"):
         print(__doc__)
         sys.exit(2)
     sys.exit(probe(sys.argv[1]))

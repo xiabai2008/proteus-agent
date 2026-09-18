@@ -28,6 +28,16 @@
         "crawl_site": {"dangerous": true},
         "map_site": {"dangerous": true}
       }
+    },
+    "seckb": {
+      "transport": "stdio",
+      "command": ["${PENTEST_WS}/seckb/.venv/Scripts/python.exe", "-c",
+                  "from seckb.cli import main; main()", "mcp"],
+      "workdir": "${PENTEST_WS}/seckb",
+      "description": "seckb 本地网安知识库（1175+ 篇：kb_search 混合检索 / kb_card 知识卡片 / kb_get 正文切片 / kb_snippets 可执行片段）",
+      "timeout": 60,
+      "dangerous": false,
+      "modes": []
     }
   }
 }
