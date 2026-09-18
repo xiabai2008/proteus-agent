@@ -41,8 +41,9 @@
   config:
     transport: stdio
     serverName: proteus
-    # Python 解释器路径来自 PENTEST_PY312（.env / 用户环境变量），缺省回退 PATH 上的 python。
-    command: !!js process.env.PENTEST_PY312 || 'python'
+    # Python 解释器：PENTEST_PY312 指向解释器**目录**（setx 持久化），此处拼 python.exe；
+    # 未设置时回退 PATH 上的 python。
+    command: !!js process.env.PENTEST_PY312 ? process.env.PENTEST_PY312 + '/python.exe' : 'python'
     args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1']
     cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
     env:

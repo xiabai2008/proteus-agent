@@ -44,11 +44,11 @@
       # CTF 解题：分钟级预算，工具密集调用，不再逐步打断
       # （沙箱放到最宽，仅用于自有靶机 / 隔离环境）
       #
-      # 警告：本档是"无人审批 + 最宽沙箱"，而内核 MCP 的底层工具入口目前
-      # 直连注册表、不过 Policy——实测 `mcp__proteus__port_scan` 传白名单外
-      # 目标（如 192.168.1.1 / 127.0.0.2）仍会执行（见 docs/DSH宿主实测记录.md
-      # 问题 F1）。也就是说本档下，越界目标既不弹审批、也不被内核拦。
-      # 仅在对目标范围有十足把握的比赛中使用；常规渗透请用 proteus-standard。
+      # 2026-09-18 更新：内核已完成 PolicyGate 全入口化——白名单与高危授权
+      # 在 MCP 底层工具路径同样生效（docs/DSH宿主实测记录.md 第九节复测：
+      # 越界目标被闸门拒绝），本档不再存在"越界不拦"的旧缺口；但
+      # danger-full-access + never 仍意味着无人值守最宽姿态，请仅在
+      # 自有靶机 / 隔离环境使用，常规渗透建议 proteus-standard。
       proteus-ctf:
         sandbox: danger-full-access
         approval: never

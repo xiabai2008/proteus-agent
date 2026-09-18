@@ -85,13 +85,24 @@ dsh --profile web --patch <仓库>/dsh/proteus.cordis.patch.yml
 
 ## 四、启动与选择 preset
 
+**一键启动（推荐）**：仓库提供了启动器，双击或命令行运行即可（前置：用户环境变量 `PENTEST_WS` / `PENTEST_PY312` 已 setx——本机 2026-09-18 已配置）：
+
+```bash
+<REPO>\dsh\start-proteus.cmd
+```
+
+启动器做三件事：校验环境变量 → 切到 harness 目录 → 带 host 补丁启动 web profile。启动后终端打印带 token 的地址，在会话的 preset 选择器里选 **「Proteus 千面」（order: 5）**，新会话即挂载本 preset。
+
+**手动启动（等价）**：
+
 ```bash
 cd <WS>/deepseek-harness
 node apps/cli/lib/bin.js --profile web --patch <REPO>/dsh/proteus.cordis.patch.yml
 ```
 
-启动后终端会打印带 token 的地址（本机实测为 `http://127.0.0.1:4080/?token=...`）。
-在会话的 preset 选择器里选 **「Proteus 千面」**（`order: 5`），新会话即挂载本 preset。
+> 环境变量说明：preset 的 `promptPath` / `command` / `cwd` 通过 `!!js` 读取 `PENTEST_WS` 与 `PENTEST_PY312`（`PENTEST_PY312` 指向解释器目录，自动拼 `/python.exe`）。改动 setx 后需**重启 DSH 进程**才生效。
+
+也可以把 `dsh/proteus.cordis.patch.yml` 的行并入 `$DSH_HOME/cordis.patch.yml` 固化为默认，之后任何 `dsh` 启动都带 Proteus（不再需要 --patch）。
 
 ---
 
