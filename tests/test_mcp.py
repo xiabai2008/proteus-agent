@@ -117,7 +117,7 @@ def test_agent_default_mode_keeps_evidence_chain(server):
     from penagent.verifier import EvidenceChainVerifier
 
     assert isinstance(agent.verifier, EvidenceChainVerifier)
-    assert "nuclei_scan" in agent.registry.names()
+    assert "http_probe" in agent.registry.names()   # 内置工具不依赖本机二进制
 
 
 def test_pentest_run_unknown_mode_is_structured_error(server):
