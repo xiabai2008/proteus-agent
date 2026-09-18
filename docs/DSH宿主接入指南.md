@@ -139,6 +139,17 @@ for (const p of found) console.log(p.id, 'broken=' + (p.broken ?? '否'))
 所以 `broken` 为空只说明「这份 preset 能装上」，不说明「装上了内核一定起得来」。
 后者要靠 5.2 / 5.3 或真机会话（5.4）验证。
 
+**改了 preset 目录里的 `.mjs` 插件后，必须完全退出 DSH 进程再启动。**
+composition 的 YAML 每次切换 preset 都会重新解析（改 `.yml` 立即生效），但
+loader 对插件模块的 `import` 走 Node ESM 缓存——**进程不重启，旧模块一直
+在**（实测：修掉 `.yml` 的 schema 错误后 mcp 行报错消失，而 `.mjs` 里的
+旧代码仍报 order 校验失败，同一进程内重试两次皆如此）。判断技巧：错误
+信息若与已修复内容不符，先重启 DSH 再说。
+
+另一个 `!!js` 的坑：表达式**整行禁止出现 `": "`（冒号+空格）**——会被
+YAML 当成映射键拆掉，得到 `[object Object]`。三元写法请改 `||` 短路形式
+（例见 `agent.cordis.yml` 的 `command` 行）。
+
 ### 5.2 MCP 行能否拉起内核（不需要起会话）
 
 preset 里那一行的命令，单独跑一次即可确认工具清单：
