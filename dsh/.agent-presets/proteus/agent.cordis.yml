@@ -43,7 +43,9 @@
     serverName: proteus
     # Python 解释器：PENTEST_PY312 指向解释器**目录**（setx 持久化），此处拼 python.exe；
     # 未设置时回退 PATH 上的 python。
-    command: !!js process.env.PENTEST_PY312 ? process.env.PENTEST_PY312 + '/python.exe' : 'python'
+    # 注意：!!js 裸写三元表达式里的 ": " 会被 YAML 解析成映射键（实测
+    # "command: [object Object]"），故用 || 短路形式，整行不得出现 ": "。
+    command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
     args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1']
     cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
     env:

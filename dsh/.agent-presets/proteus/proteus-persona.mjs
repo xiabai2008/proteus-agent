@@ -78,10 +78,25 @@ export function apply(ctx, config = {}) {
 
   const suffix = typeof config.suffix === 'string' ? config.suffix : ''
   if (suffix !== '') {
+    // section() 要求 order 必须是有限数字（实测 0.1.5-rc.2 校验，缺失即
+    // "order must be a finite number"）：先查部署默认的 suffix 位置，查不到
+    // 再退化为 prefix order + 1，仍拿不到就给一个稳定的有限数。
+    let suffixOrder
+    try {
+      suffixOrder = ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX')
+    } catch {
+      suffixOrder = undefined
+    }
+    if (typeof suffixOrder !== 'number' || !Number.isFinite(suffixOrder)) {
+      suffixOrder = typeof order === 'number' && Number.isFinite(order)
+        ? order + 1
+        : 100
+    }
     ctx.effect(
       () =>
         ctx.systemPrompt.section({
           name: PERSONA_SUFFIX_SECTION,
+          order: suffixOrder,
           text: suffix,
         }),
       'proteus-persona.suffix()',
