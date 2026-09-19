@@ -4,10 +4,34 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import socket
+import urllib.parse
 import urllib.request
 from pathlib import Path
+
+
+def _allow_http_url(url: str) -> str:
+    """工具体内的 URL 边界校验（PolicyGate 闸门之外的第二道防线）。
+
+    urlopen 原生支持 file:// 等危险 scheme，且不经过闸门的直接调用路径
+    仍然可达本函数——因此这里必须自带同一条边界：仅 http(s) 协议；域名
+    解析结果落在链路本地（云元数据 169.254.0.0/16）、组播或保留段一律拒绝。
+    环回/私网是本工具的合法目标（操作员显式授权，默认白名单
+    127.0.0.1/localhost，由 PolicyGate 在执行前机制性校验），不在此阻断。
+    """
+    parsed = urllib.parse.urlparse(str(url))
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"URL 协议不被允许: {parsed.scheme!r}（仅 http/https）")
+    host = (parsed.hostname or "").strip()
+    if not host:
+        raise ValueError("URL 缺少主机名")
+    for info in socket.getaddrinfo(host, None):
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            raise ValueError(f"目标解析到被禁止的地址: {ip}")
+    return str(url)
 
 
 def port_scan(host: str, ports: str = "80,443,8080,22,3306",
@@ -30,9 +54,10 @@ def port_scan(host: str, ports: str = "80,443,8080,22,3306",
 
 def http_probe(url: str, timeout: float = 8.0) -> dict:
     """HTTP 探测：状态码/头/标题。"""
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "XPentest/0.1 (authorized test)"})
     try:
+        req = urllib.request.Request(
+            _allow_http_url(url),
+            headers={"User-Agent": "XPentest/0.1 (authorized test)"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read(4096).decode("utf-8", errors="replace")
             headers = {k: v for k, v in resp.headers.items()}
@@ -70,7 +95,8 @@ def robots_fetch(base_url: str, timeout: float = 5.0) -> dict:
 
     url = base_url.rstrip("/") + "/robots.txt"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(
+                _allow_http_url(url), timeout=timeout) as resp:
             text = resp.read(2048).decode("utf-8", errors="replace")
         disallow = [ln.split(":", 1)[1].strip()
                     for ln in text.splitlines()
