@@ -178,7 +178,7 @@ def test_budget_exhausted_conclude_still_verified(monkeypatch, tmp_path):
     result = agent.run("http://127.0.0.1", "侦察")
 
     assert result.outcome == "failed"
-    assert "步数预算耗尽" in result.summary
+    assert "步数预算已用尽" in result.summary
 
 
 def test_budget_exhausted_in_ctf_mode_still_needs_flag(monkeypatch, tmp_path):

@@ -5,8 +5,10 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,11 +26,37 @@ ENV_FILE = PROJECT_ROOT / ".env"
 ALLOWED_SCHEMES = ("http", "https")
 
 
+def _allow_endpoint(base_url: str) -> str:
+    """LLM 端点边界校验（操作员 .env 配置，非模型/远端可控输入）。
+
+    urlopen 原生支持 file:// 等危险 scheme，校验必须内联在 Request 构造处：
+    仅 http(s) 协议；域名解析结果落在链路本地（云元数据 169.254.0.0/16）、
+    组播或保留段一律拒绝。环回/私网端点（ollama / vLLM 跑在 127.0.0.1 等）
+    是正当配置，不在此阻断。
+    """
+    parsed = urllib.parse.urlparse(str(base_url))
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
+        raise LLMError(
+            f"LLM 端点协议不被允许: {parsed.scheme!r}（仅 http/https）")
+    host = (parsed.hostname or "").strip()
+    if not host:
+        raise LLMError("LLM 端点缺少主机名")
+    for info in socket.getaddrinfo(host, None):
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            raise LLMError(f"LLM 端点解析到被禁止的地址: {ip}")
+    return str(base_url).rstrip("/")
+
+
 @dataclass
 class LLMConfig:
     base_url: str = "https://opencode.ai/zen/v1"
     api_key: str = ""
     model: str = "deepseek-v4-flash-free"
+    # 预算档位模型（budget.model_tier 的消费端）：档位名 -> 模型 id。
+    # 环境变量 PENTEST_LLM_MODEL_CHEAP / PENTEST_LLM_MODEL_STRONG；
+    # 未配置的档位回落主模型（model 字段），零配置行为不变。
+    tier_models: dict = field(default_factory=dict)
     timeout: int = 180
     temperature: float = 0.3
     # 会话 id：按 config 实例稳定（一次任务 = 一个会话），随每个请求发给网关。
@@ -51,6 +79,12 @@ class LLMConfig:
                     or env.get("PENTEST_LLM_API_KEY", ""),
             model=os.environ.get("PENTEST_LLM_MODEL")
                   or env.get("PENTEST_LLM_MODEL", cls.model),
+            tier_models={
+                tier: os.environ.get(env_key) or env.get(env_key, "")
+                for tier, env_key in (("cheap", "PENTEST_LLM_MODEL_CHEAP"),
+                                      ("strong", "PENTEST_LLM_MODEL_STRONG"))
+                if (os.environ.get(env_key) or env.get(env_key, "")).strip()
+            },
         )
 
     def ready(self) -> bool:
@@ -64,14 +98,15 @@ class LLMError(Exception):
 def chat(config: LLMConfig, messages: list[dict],
          temperature: Optional[float] = None,
          max_tokens: int = 4096,
-         retries: int = 3) -> str:
-    """调用 chat/completions，返回 assistant 文本（503/429 退避重试）。"""
+         retries: int = 3,
+         model: Optional[str] = None) -> str:
+    """调用 chat/completions，返回 assistant 文本（503/429 退避重试）。
+
+    model：本次请求的模型覆盖（budget.model_tier 档位路由用）；
+    None 或空串回落 config.model。
+    """
     if not config.ready():
         raise LLMError("未配置 PENTEST_LLM_API_KEY（.env 或环境变量）")
-    scheme = urllib.parse.urlparse(config.base_url).scheme.lower()
-    if scheme not in ALLOWED_SCHEMES:
-        raise LLMError(
-            f"LLM 端点协议不被允许: {scheme!r}（仅 http/https）")
     import time as _time
 
     last_err: Optional[LLMError] = None
@@ -79,14 +114,14 @@ def chat(config: LLMConfig, messages: list[dict],
         if attempt:
             _time.sleep(3 * attempt)
         body = json.dumps({
-            "model": config.model,
+            "model": (model or "").strip() or config.model,
             "messages": messages,
             "temperature": config.temperature if temperature is None
             else temperature,
             "max_tokens": max_tokens,
         }).encode("utf-8")
         req = urllib.request.Request(
-            config.base_url.rstrip("/") + "/chat/completions",
+            _allow_endpoint(config.base_url) + "/chat/completions",
             data=body,
             headers={
                 "Authorization": f"Bearer {config.api_key}",
@@ -168,9 +203,10 @@ def _extract_json_block(text: str) -> str:
 
 def chat_json(config: LLMConfig, messages: list[dict],
               temperature: Optional[float] = None,
-              max_tokens: int = 4096) -> dict:
+              max_tokens: int = 4096,
+              model: Optional[str] = None) -> dict:
     """要求模型输出 JSON 并解析（容忍包裹/前后说明/嵌套）。"""
-    raw = chat(config, messages, temperature, max_tokens)
+    raw = chat(config, messages, temperature, max_tokens, model=model)
     text = _extract_json_block(raw.strip())
     try:
         data = json.loads(text)

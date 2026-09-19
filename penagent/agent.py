@@ -152,6 +152,13 @@ class Policy:
             if level == "ask" and not self.authorize:
                 return False, (f"模式 {self.mode.id} 权限档位 ask："
                                f"{tool} 待人工确认（未执行）")
+            # 出网开关（scope.network_egress）：关闭时拒绝声明需要出网的
+            # 工具——机制性裁决，容器网络的 --network none 是第二道冗余
+            if not self.mode.scope.network_egress \
+                    and getattr(spec, "network", False):
+                return False, (f"模式 {self.mode.id} 关闭网络出口"
+                               f"（scope.network_egress=false）："
+                               f"{tool} 声明需要出网，拒绝执行")
         # 高危动作
         if getattr(spec, "dangerous", False) and not self.authorize:
             return False, (f"高危工具 {tool} 未授权（--authorize 才可执行）")
@@ -205,7 +212,8 @@ class PenAgent:
             # 注册表必须带沙箱策略：否则换一个构造路径就绕过了隔离档位
             from penagent.sandbox import build_sandbox
 
-            self.registry.sandbox = build_sandbox(mode.sandbox)
+            self.registry.sandbox = build_sandbox(
+                mode.sandbox, egress=mode.scope.network_egress)
         # 记忆按模式分区：读写只落 current namespace，模式间互不串库
         self.memory = (memory.for_namespace(mode.memory_namespace)
                        if mode is not None else memory)
@@ -226,6 +234,10 @@ class PenAgent:
         if max_steps is None:
             max_steps = mode.budget.max_steps if mode is not None else 12
         self.max_steps = max_steps
+        # 时长预算（budget.max_minutes）：超限走"换策略收口"而非硬退出；
+        # 不传模式时无时长上限（升级前行为）
+        self.max_minutes = (mode.budget.max_minutes
+                            if mode is not None else None)
         self.skill_policy = skill_policy   # RL 技能选择策略（可选）
         self._used_skills: list = []
 
@@ -307,6 +319,22 @@ class PenAgent:
             "{skills}", json.dumps([s.to_dict() for s in skills],
                                    ensure_ascii=False))
 
+    def _tier_model(self, phase: str) -> Optional[str]:
+        """按 budget.model_tier 解析本阶段决策用的模型 id。
+
+        两级映射：阶段（recon/reason）-> 档位（cheap/strong）-> 模型 id
+        （LLMConfig.tier_models，来自 PENTEST_LLM_MODEL_CHEAP/STRONG）。
+        任一环节未声明/未配置都回落 None（= 主模型），零配置行为不变。
+        常规决策步走 recon 档；预算耗尽后的强制收口走 reason 档
+        （"超限换策略"的一部分：收口推理升级到更强模型）。
+        """
+        if self.mode is None:
+            return None
+        tier = self.mode.budget.model_tier.get(phase)
+        if not tier:
+            return None
+        return self.llm.tier_models.get(tier) or None
+
     # ------------------------------------------------------------------
     def run(self, target: str, objective: str,
             fingerprint: str = "", stealth: bool = False) -> MissionResult:
@@ -329,11 +357,25 @@ class PenAgent:
                 f"任务: {objective}\n"
                 f"当前时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")},
         ]
+        run_started = time.time()
+        exhaust_reason = f"步数预算已用尽（max_steps={self.max_steps}）"
+        time_exhausted = False
 
         for step in range(1, self.max_steps + 1):
             mission.steps = step
+            # 时长预算：超限同样换策略而非硬退出——跳出循环进入强制收口
+            if (self.max_minutes is not None
+                    and (time.time() - run_started) / 60.0 >= self.max_minutes):
+                exhaust_reason = (f"时长预算已用尽"
+                                  f"（max_minutes={self.max_minutes} 分钟）")
+                time_exhausted = True
+                self.evidence.append("decision", {
+                    "step": step, "phase": "budget_exhausted",
+                    "thought": "时长预算耗尽，切换收口策略"})
+                break
             try:
-                decision = chat_json(self.llm, messages)
+                decision = chat_json(self.llm, messages,
+                                     model=self._tier_model("recon"))
             except LLMError as exc:
                 mission.outcome = "failed"
                 mission.summary = f"LLM 调用失败: {exc}"
@@ -415,17 +457,19 @@ class PenAgent:
                 "content": (f"工具 {tool} 执行结果:\n"
                             f"{json.dumps(tool_result.to_dict(), ensure_ascii=False)[:2500]}")})
 
-        # 步数预算耗尽：不硬退出，换策略——追加一轮"强制收口"，要求模型
-        # 停止工具调用、基于已有证据给出最终结论，再交判定器裁决
-        self.evidence.append("decision", {
-            "step": self.max_steps, "phase": "budget_exhausted",
-            "thought": "步数预算耗尽，切换收口策略"})
+        # 预算（步数/时长）耗尽：不硬退出，换策略——追加一轮"强制收口"，
+        # 要求模型停止工具调用、基于已有证据给出最终结论，再交判定器裁决
+        if not time_exhausted:
+            self.evidence.append("decision", {
+                "step": self.max_steps, "phase": "budget_exhausted",
+                "thought": "步数预算耗尽，切换收口策略"})
         messages.append({"role": "user", "content": (
-            f"步数预算已用尽（max_steps={self.max_steps}）。切换策略："
+            f"{exhaust_reason}。切换策略："
             "不要再调用任何工具，基于已获得的证据直接给出最终结论；"
             "若没有有效证据，如实说明任务未完成。")})
         try:
-            decision = chat_json(self.llm, messages)
+            decision = chat_json(self.llm, messages,
+                                 model=self._tier_model("reason"))
         except LLMError as exc:
             mission.outcome = "failed"
             mission.summary = f"步数预算耗尽且收口调用失败: {exc}"
@@ -449,7 +493,7 @@ class PenAgent:
             return mission
 
         mission.outcome = "failed"
-        mission.summary = (f"步数预算耗尽（max_steps={self.max_steps}），"
+        mission.summary = (f"{exhaust_reason}，"
                            f"切换收口策略后仍未通过判定: {verdict.reason}")
         self.memory.finish(mission_id, mission.outcome, mission.summary)
         self._record_skill_outcomes(False)

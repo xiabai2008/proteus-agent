@@ -275,7 +275,11 @@ class ToolCenter:
         mode_id = getattr(mode, "id", None)
         level = getattr(mode, "sandbox", None)
         if sandbox is None and level:
-            sandbox = build_sandbox(level)
+            # 出网开关随模式一起挂上沙箱策略：scope.network_egress=false
+            # 的模式在沙箱层拒绝声明出网的工具（机制性生效，硬规则 1）
+            egress = bool(getattr(getattr(mode, "scope", None),
+                                  "network_egress", False))
+            sandbox = build_sandbox(level, egress=egress)
         registry = ToolRegistry(sandbox=sandbox)
         for entry in self.discover(mode_id=mode_id):
             if kernel_only and not entry.kernel:

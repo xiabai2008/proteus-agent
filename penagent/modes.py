@@ -178,7 +178,12 @@ class Permission:
 
 @dataclass(frozen=True)
 class Budget:
-    """预算策略：超限应换策略而非硬退出（主循环计数，阶段一后续接入）。"""
+    """预算策略：超限应换策略而非硬退出（主循环计数）。
+
+    max_steps / max_minutes / model_tier 已生效（penagent/agent.py 主循环与
+    LLM 档位路由）；max_cost_usd 为预留字段——OpenAI 兼容网关普遍不回传
+    token 用量，可靠计量前不做硬约束，避免"看起来在算其实没生效"。
+    """
 
     max_steps: int = 40
     max_minutes: Optional[float] = None

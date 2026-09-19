@@ -94,15 +94,23 @@ class DockerRunner:
 
 
 class SandboxPolicy:
-    """按模式的 sandbox 档位裁决每次工具执行。"""
+    """按模式的 sandbox 档位裁决每次工具执行。
+
+    egress：模式 scope.network_egress 的消费端（False 为主）。关闭时，
+    任何声明 network=True 的工具在**沙箱层**即被拒绝——与 Policy 闸门的
+    出网裁决互为冗余（闸门覆盖无沙箱的构造路径，这里覆盖无闸门的路径），
+    两道都在工具体执行前生效（硬规则 1）。
+    """
 
     def __init__(self, level: str = "none",
-                 runner: Optional[DockerRunner] = None) -> None:
+                 runner: Optional[DockerRunner] = None,
+                 egress: bool = False) -> None:
         normalized = (level or "none").strip().lower()
         if normalized not in LEVELS:
             raise ValueError(f"未知沙箱档位 {level!r}（可用 {LEVELS}）")
         self.level = normalized
         self.runner = runner or DockerRunner()
+        self.egress = bool(egress)
 
     # ------------------------------------------------------------------
     def availability(self) -> tuple[bool, str]:
@@ -113,6 +121,12 @@ class SandboxPolicy:
 
     def decide(self, spec) -> SandboxDecision:
         """执行前裁决：返回是否放行、原因、是否进容器。"""
+        if getattr(spec, "network", False) and not self.egress:
+            return SandboxDecision(
+                False,
+                f"模式关闭网络出口（scope.network_egress=false）："
+                f"{spec.name} 声明需要出网，拒绝执行")
+
         needs_isolation = tool_needs_isolation(spec)
 
         if not needs_isolation:
@@ -143,6 +157,7 @@ class SandboxPolicy:
                                wrap=lambda cmd, _spec=spec: self.runner.wrap(cmd, _spec))
 
 
-def build_sandbox(level: str, runner: Optional[DockerRunner] = None) -> SandboxPolicy:
-    """按模式声明构造沙箱策略。"""
-    return SandboxPolicy(level=level, runner=runner)
+def build_sandbox(level: str, runner: Optional[DockerRunner] = None,
+                  egress: bool = False) -> SandboxPolicy:
+    """按模式声明构造沙箱策略（egress 来自 mode.scope.network_egress）。"""
+    return SandboxPolicy(level=level, runner=runner, egress=egress)
