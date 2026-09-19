@@ -1,59 +1,221 @@
 # The `proteus` agent preset — Proteus · 千面（多模式渗透测试 Agent）的 DSH 宿主接入。
 # 方案 D：只配置，不改 DSH 核心代码。
 #
-# 本文件是 AGENT 平面 composition：preset 只贡献"一个会话往注册表里放什么"
-# ——人格与工具。注册表本身、沙箱与审批栈、模型路由留在 host 平面
-# （见 packages/bundle/base/cordis.patch.yml）。preset 里若要发布服务，
-# 必须放进带 `isolate` realm 的 group，否则会与别的 preset 抢根 realm。
+# 组合 = 标准模式（standard preset）的全部能力行 + Proteus 专属两行
+# （proteus-persona 人格 + mcp-proteus 内核 MCP 客户端）。
+# 之所以整体并入 standard：本 preset 的会话需要文件编辑 / Shell / 检索 /
+# Skills / 计划 / 目标 / 子代理 / 工作流（解压、跑 exploit 脚本等都要），
+# 单挂 MCP 客户端的会话只有 mcp__proteus__* 工具，做不了本地操作。
 #
-# 发现机制（packages/preset/agent-presets/src/discovery.ts）：
-#   根目录 = $DSH_HOME/.agent-presets（用户可写） + 随包发布的只读 system 根；
-#   目录名即 preset id（须匹配 /^[a-z0-9][a-z0-9-]*$/）；
-#   `agent.cordis.yml` 顶层是插件行列表；行内 name 可写包名，也可写相对本
-#   目录的文件路径（discovery 按 preset 目录解析 file 行）。
+# 本文件是 AGENT 平面 composition：preset 只贡献"一个会话往注册表里放什么"。
+# 沙箱与审批栈、模型路由留在 host 平面（dsh/proteus.cordis.patch.yml）。
 
 # ── identity ────────────────────────────────────────────────────────────────
+
 # 人格由随 preset 的本地插件注册：挂载时读取 Proteus 仓库的 prompts/ 下人格
-# 文件，注册成 deployment:persona-prefix 分区，遮蔽部署默认人格。
-# 提示词以仓库文件为唯一来源，不在此复制。
+# 文件，注册成 deployment:persona-prefix/suffix 分区，遮蔽部署默认人格。
+# 提示词以仓库文件为唯一来源，不在此复制。路径经 !!js 读环境变量
+# （PENTEST_WS / PENTEST_PY312，setx 持久化；公开仓库零本机路径约定）。
 - id: persona
   name: './proteus-persona.mjs'
   config:
-    # 仓库根来自操作员环境变量 PENTEST_WS（公开仓库零本机路径约定，
-    # 见 README「环境变量」一节；!!js 在加载器作用域求值）。
     promptPath: !!js (process.env.PENTEST_WS || '') + '/proteus-agent/prompts/dsh-persona.md'
     suffix: >-
       本会话通过 mcp__proteus__* 工具驱动 Proteus 内核；模式（pentest-standard /
       ctf-web / ctf-crypto）由内核侧 ModeProfile 决定，工具白名单与权限档位随之生效。
 
-# ── tools：Proteus 内核（MCP over stdio）─────────────────────────────────────
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── goals ───────────────────────────────────────────────────────────────────
+
+- id: command-goal
+  name: '@deepseek-ai/dsh-command-goal'
+
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+
+# ── plan mode ───────────────────────────────────────────────────────────────
+
+- id: planning
+  name: cordis:group
+  group: true
+  isolate:
+    planMode: true
+  config:
+    - id: plan-mode
+      name: '@deepseek-ai/dsh-plan-mode'
+      config:
+        section: |
+              You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+              Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+              The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+              Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+              Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+              When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── delegation and workflows ────────────────────────────────────────────────
+
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        modelSelectionSettings: true
+        backgroundMode: continuable
+
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: fork
+        toolName: subagent_fork
+        backgroundMode: continuable
+
+    - id: tool-subagent-codex
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
+      config:
+        provider: codex
+        toolName: subagent_codex
+        backgroundMode: one-shot
+        maxDepth: provider-managed
+
+    - id: tool-subagent-claude-code
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
+      config:
+        provider: claude-code
+        toolName: subagent_claude_code
+        backgroundMode: one-shot
+        maxDepth: provider-managed
+
+    - id: workflow-worker-thread
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
+
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'
+
+    - id: tool-ralph
+      name: '@deepseek-ai/dsh-tool-ralph'
+      config:
+        subagentProvider: spawn
+        maxRounds: 64
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'
+
+# ── Proteus 内核（MCP over stdio）────────────────────────────────────────────
 # 一个 mcp-client 实例 = 一个外部 MCP server。工具在会话里以
 # `mcp__<serverName>__<rawName>` 出现，因此 serverName 取 `proteus`，
 # 模型侧看到的就是 mcp__proteus__pentest_run 这类名字。
 #
-# command 用绝对路径：DSH 会把子进程环境"洗"一遍，PATH 上不一定有 python。
-# cwd 指向内核仓库根，`-m penagent` 才能解析到包。
-# env 里的三个键是给内核侧 LLM 决策循环（pentest_run）用的；DSH 的
-# !!js 表达式在加载器作用域求值，这里直接透传宿主环境变量，缺省为空串
-# （内核按"未配置"处理，走默认端点）。
+# command/cwd 经 !!js 读环境变量（PENTEST_WS / PENTEST_PY312）。注意：!!js
+# 整行禁止出现 ": "（冒号+空格会被 YAML 拆成映射键）。
+# env 三个键透传宿主环境变量给内核侧 LLM 决策循环（内核自己也会读仓库 .env）。
+# 内核没起来时不让整个 preset 挂载失败（failOnStartupError: false）。
 - id: mcp-proteus
   name: '@deepseek-ai/dsh-mcp-client'
   config:
     transport: stdio
     serverName: proteus
-    # Python 解释器：PENTEST_PY312 指向解释器**目录**（setx 持久化），此处拼 python.exe；
-    # 未设置时回退 PATH 上的 python。
-    # 注意：!!js 裸写三元表达式里的 ": " 会被 YAML 解析成映射键（实测
-    # "command: [object Object]"），故用 || 短路形式，整行不得出现 ": "。
     command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
-    args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets',
-           '127.0.0.1,localhost', '--authorize']
+    args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize']
     cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
     env:
       PENTEST_LLM_BASE_URL: !!js process.env.PENTEST_LLM_BASE_URL ?? ''
       PENTEST_LLM_API_KEY: !!js process.env.PENTEST_LLM_API_KEY ?? ''
       PENTEST_LLM_MODEL: !!js process.env.PENTEST_LLM_MODEL ?? ''
     toolCallTimeoutMs: 600000
-    # 内核没起来时不让整个 preset 挂载失败：工具目录里少一组 proteus 工具，
-    # 但会话仍可用（配合 docs/DSH宿主接入指南.md 的排查步骤）。
     failOnStartupError: false
