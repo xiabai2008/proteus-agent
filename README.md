@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
-![Tests](https://img.shields.io/badge/tests-204%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-219%20passed-brightgreen)
 
 > **一个内核，千种面孔。**
 > Proteus（普罗透斯）：希腊神话中的海上老人，可随心变换任意形态——多模式切换的完美隐喻。
@@ -89,7 +89,7 @@ python -m penagent mcp --targets 127.0.0.1
 模式层 · ModeProfile（一等公民，本次新建的核心）
   persona / capability / permission / budget / scope / verifier / skills / sandbox
         │
-内核层 · XPentest（Python 7210 行 · 64 测试，已有）
+内核层 · XPentest（已 fork 入仓 `penagent/` 包 · 219 测试）
   ReAct 决策循环 · 证据链反幻觉 · 记忆与技能进化
         │
 工具层 · MCP 统一注册（新增能力不改内核）
@@ -135,36 +135,52 @@ python -m penagent mcp --targets 127.0.0.1
 
 ```
 proteus-agent/
+├── AGENTS.md                                  AI 会话唯一事实来源（硬规则/环境约定/模式规范）
 ├── README.md                                  本文件（项目主页）
-├── docs/                                      现行文档（调研与设计基线）
-│   ├── 渗透测试Agent调研报告-多模式切换.md       主报告：竞品/资产/路线/方案（2026-09-17）
-│   ├── 渗透测试Agent调研报告-多模式切换.html     同内容浅色阅读版
-│   ├── 个人渗透Agent产品设计.md                 XPentest 设计基线（LLM 决策第一原则/进化闭环）
-│   └── 红队平台自建方案-SRC渗透流水线.md         "手脚与大脑分层"架构原则出处
-├── archive/                                   2026-08 旧版调研（已被 09 版收敛取代）
-│   ├── 网安agent渗透调研报告-团队版.md
-│   ├── 网安agent渗透调研报告.md
-│   ├── _research_t1_output.md
-│   └── _research-pentest-agent.cjs
-└── tools/
-    └── md2html.py                             MD 转单文件 HTML（浅色主题），改文档后重新生成阅读版
+├── penagent/                                  内核包（fork 自 XPentest，独立成仓）
+│   ├── agent.py / modes.py / policy_gate.py   ReAct 循环 + ModeProfile + 执行前闸门
+│   ├── evidence.py / verifier.py              证据链反幻觉 + 可插拔判定器
+│   ├── memory.py / reflect.py / gaps.py / ppo.py / rl.py   记忆分区与进化链路
+│   ├── sandbox.py / registry.py / mcp.py / mcp_client.py   沙箱分档 + MCP 统一注册
+│   ├── builtin_tools.py / external_tools.* / cft_tools.*   内置/外部/CTF 工具链
+│   └── cli.py / envcfg.py                     CLI 入口 + ${VAR} 环境变量装载
+├── modes/                                     模式档案（base / pentest-standard / ctf-web / ctf-crypto）
+├── prompts/                                   模式人格提示词模板
+├── dsh/                                       DSH agent-preset（proteus 挂载包 + 一键启动器）
+├── web/                                       Web 控制台（真内核 / scripted 双驱动）
+├── examples/                                  评测与演示脚本（mode_switch / ctf_solve / RL 进化 / 靶场）
+├── tests/                                     pytest 全量（219 例）
+├── tools/                                     文档与维护脚本（md2html / GIF 生成器 / 路径脱敏）
+├── data/                                      运行时数据（作战记录 / 技能库 / 评测产物，gitignore）
+└── docs/                                      调研、设计与实测记录（见下）
 ```
 
-**代码资产（保持原位，不搬迁——路径被 opencode.json 与 external_tools.json 引用，动了会断）**：
+**docs/ 关键文档**：
+
+| 文档 | 内容 |
+|---|---|
+| 渗透测试Agent调研报告-多模式切换.md | 主报告：竞品/资产/路线/方案（2026-09-17） |
+| 个人渗透Agent产品设计.md | XPentest 设计基线（LLM 决策第一原则/进化闭环） |
+| 红队平台自建方案-SRC渗透流水线.md | "手脚与大脑分层"架构原则出处 |
+| 阶段一验收报告.md | 模式抽象验收（ModeProfile/Verifier/记忆分区逐条自检） |
+| 端到端实战演练.md | 渗透全流程 + CTF 三题真机实测与问题清单 |
+| DSH宿主接入指南.md / DSH宿主实测记录.md | 方案 D 宿主层的接入与验证 |
+| Web真内核实测记录.md / RL链路实测记录.md | Web 控制台与 RL 进化的实测证据 |
+| 沙箱降级评估.md | 隔离档位边界决策（拒绝而非降级，ADR） |
+
+**历史关联资产（保持原位，不搬迁）**：
 
 | 资产 | 位置 | 角色 |
 |---|---|---|
-| XPentest 内核 | `<WS>\网安项目开发规划\10-pentest-agent\` | 方案 C 的内核（`penagent/` 包） |
-| DawnForge 技能库 + modes.yaml | `<WS>\dawnforge-pentest\`（部署副本 `<TOOLS_DIR>\`） | 方案 C 的技能层 + 模式雏形 |
+| XPentest 内核上游 | `<WS>\网安项目开发规划\10-pentest-agent\` | fork 来源（本仓库已独立演进） |
+| DawnForge 技能库 + modes.yaml | `<WS>\dawnforge-pentest\`（部署副本 `<TOOLS_DIR>\`） | 模式雏形出处 |
 | 工具军火库（约 70 个二进制） | `<TOOLS_DIR>\{bin,tools}` | 工具层，配置化注册 |
 | deepseek-harness | `<WS>\deepseek-harness\` | 方案 D 宿主（只配不改） |
 | RayScan / Chameleon（已 MCP 化） | `<WS>\RayScan\` / `Chameleon\` | 工具层首批接入 |
 
-> 代码迁入本仓库的时机：等方案 C 阶段一动工（ModeProfile 落地）再把内核 fork 进来独立成仓；现在搬会断 `10-pentest-agent` 与工作区 git、opencode.json 的关联。
-
 ---
 
-## 五、当前状态（2026-09-18）
+## 五、当前状态（2026-09-19）
 
 **环境变量约定（可移植性）**：本仓库入库文件**不含任何本机绝对路径**。配置 JSON 里写 `${VAR}` 占位符，真实路径放在不入库的 `.env`（模板见 `.env.example`），由 `penagent/envcfg.py` 统一装载与展开：
 
@@ -188,13 +204,15 @@ proteus-agent/
 | 二 · 能力补齐 | 完成 | MCP 统一注册中心 + CTF Crypto/Misc 工具链 + 沙箱分级（无容器时拒绝而非裸跑） |
 | 三 · 宿主与界面 | 完成 | DSH agent-preset（24 工具挂载）+ Web 控制台三视图（真内核 / scripted 双驱动） |
 
-**测试**：带 torch 204 passed；无 torch 165 passed + 3 skipped（RL 进化链路为可选依赖）。双解释器独立复跑核实。
+**测试**：219 passed（本机 torch 2.8.0+cpu 就位；torch 保持可选依赖定位，屏蔽时 RL 链路用例按环境跳过）。
 
 **三链路真机实测**（记录见 docs/）：DSH 宿主（preset 发现 / stdio 拉起 / mcp-client 真实调用）· Web 真内核（LLM 决策 + SSE 步骤流 + 证据链 integrity）· RL 进化（步数 6.0→3.0，-50%；闭环评测 Q 层 -39% / PPO 层 -42%）。
 
-**安全姿态**：PolicyGate 由 ToolRegistry 持有，目标白名单 + 高危授权在 ReAct / MCP / Web 全入口机制性生效；MCP 失败语义修正（isError）；ctf-* 模式的脚本执行强制沙箱档位，无容器环境拒绝而非裸跑。
+**安全姿态**：PolicyGate 由 ToolRegistry 持有，目标白名单 + 高危授权在 ReAct / MCP / Web 全入口机制性生效；MCP 失败语义修正（isError）；ctf-* 模式的脚本执行强制沙箱档位，无容器环境拒绝而非裸跑。预算字段已全部机制性消费：`scope.network_egress=false` 闸门+沙箱双层拒绝出网工具、`budget.model_tier` 档位模型路由（recon/strong 分档）、`budget.max_minutes` 超时换策略收口（`max_cost_usd` 因网关不回 token 用量标注预留）。
 
-**下一步**：端到端实战演练（CTF 三题 + 授权靶场渗透流程）· RayScan / Chameleon MCP 联调 · 竞赛 / 毕设叙事材料。
+**安全评审**：F-E2E-3 已收口——`rsactf_attack` 维持宿主直跑（离线数学攻击、无网络出口、镜像内无 RsaCtfTool，提权为隔离档等于废掉该工具），人工把关由 require_confirm 档位承担；结论与依据登记于 `penagent/ctf_tools.json`，契约用例 `test_rsactf_attack_review_locks_host_direct_tier` 锁定防止静默改档。
+
+**下一步**：Web 控制台 ask 档人工确认通道实测（F-E2E-5）· Docker 稳定后 python_solve 容器真跑与 RsaCtfTool 镜像化（F-E2E-4 关联）· SQLi/暴力破解等 require_confirm 审批闭环的实战覆盖 · 记忆/技能进化长周期数据沉淀。
 
 ---
 
