@@ -114,6 +114,24 @@ def test_control_mode_denies_rsa_tool():
     assert not result.ok and "未知工具" in result.error
 
 
+def test_rsactf_attack_review_locks_host_direct_tier():
+    """F-E2E-3 定档契约：rsactf_attack 保持宿主直跑，人工把关由权限档位承担。
+
+    静默改档会同时破坏两条既有保证：
+    1) Docker-free 环境的 CTF 解题链路——沙箱镜像内没有 RsaCtfTool，
+       提权为隔离档即该工具不可用（评测将退回 Docker 依赖）；
+    2) 纯本地计算的定位——离线数学攻击、参数经 flag 渲染无注入面。
+    改档必须连同 docs/端到端实战演练.md 的 F-E2E-3 处置一起重新评审。
+    """
+    center = build_center()
+    specs = {e.name: e.spec for e in center.discover(mode_id="ctf-crypto")}
+    assert specs["rsactf_attack"].dangerous is False
+    assert specs["rsactf_attack"].sandbox == ""       # 无强制隔离声明
+    mode = load_mode("ctf-crypto")
+    assert mode.permission.level_for("rsactf_attack") == "ask"   # 人工确认
+    assert mode.sandbox == "docker"                   # python_solve 隔离档不变
+
+
 # ----------------------------------------------------------------------
 # 2. 样例题：题面不含明文 flag
 # ----------------------------------------------------------------------

@@ -13,7 +13,13 @@
       },
       "dangerous": false,
       "timeout": 300,
-      "modes": ["ctf-web", "ctf-crypto"]
+      "modes": ["ctf-web", "ctf-crypto"],
+      "review": {
+        "id": "F-E2E-3",
+        "date": "2026-09-19",
+        "verdict": "维持宿主直跑（dangerous=false，无强制隔离声明）",
+        "rationale": "RsaCtfTool 为离线数学攻击 CLI：参数经 flag 渲染进 subprocess 列表（无 shell 注入面）、无网络出口；沙箱镜像内无 RsaCtfTool，提权为隔离档等于废掉该工具。人工把关由 ctf-* 模式 permission.require_confirm 承担（ask 档）。若要改档，必须连同 tests/test_ctf_solve.py 的契约用例与 docs/端到端实战演练.md 一起重新评审。"
+      }
     },
     "python_solve": {
       "description": "运行一次性解题脚本（等价 python -c）：解码/爆破/数学计算/读写题目文件。每次调用独立进程，无网络依赖",
