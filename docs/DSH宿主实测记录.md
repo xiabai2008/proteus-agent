@@ -536,3 +536,69 @@ CLI 的 `run` 子命令同样把字符串喂给 `Policy`，属同一根因，故
 无 torch：196 passed, 3 skipped（3 处 importorskip，与原行为一致）
 ```
 
+---
+
+## 十、真机会话实测（2026-09-21 晚，DSH 0.1.6-alpha.2）
+
+**场景**：从 DSH Web UI 起一个新会话，选「Proteus 千面」，对本地受控靶场
+（OWASP Juice Shop，http://127.0.0.1:3000）下达一轮被动信息收集任务，
+用浏览器驱动全程观察。**结论：preset 现已真机可用，但模型会绕开内核。**
+
+### 10.1 两个阻断项（都已修）
+
+**F3 · preset 静默消失（DSH 升级所致）**
+
+- 现象：选择器里只有官方四档，没有「Proteus 千面」，**界面上没有任何报错**。
+- 根因：本 preset 的 composition 是**旧版 standard preset 的 fork**（0.1.5-rc.2 时代）。
+  harness 更新到 0.1.6 后，旧基座引用的 `@deepseek-ai/dsh-workflow-worker-thread`
+  等 7 个包已被移除/改名（现为 `dsh-workflow-ptc`），profile 的 node_modules 里
+  只剩**断链符号链接**。发现机制据此把 preset 判为 `broken`，而 broken 的 preset
+  **不进选择器**。
+- 诊断：跑 `discoverPresets`（指南 5.1）——
+  `proteus | broken=row "workflow-worker-thread" names a plugin that cannot be resolved`。
+- 修复：以当前
+  `packages/preset/agent-presets/presets/standard/agent.cordis.yml` 为基座重新合成
+  （替换 persona 行、追加 mcp-proteus 行，其余逐字保留），并补上 profile 缺失的
+  `dsh-workflow-ptc` 链接。修后 `broken=否`。**基座版本已写进文件头**，并要求
+  DSH 升级后先跑 roster。
+- 附注：用户另一套 preset `liangshen` 同样 broken（同因），本次未动。
+
+**F4 · 修好后仍需重启 DSH 进程**
+
+- 指南 5.1 写"发现是每次调用重新扫盘的，新写的 preset 不需要重启进程就能被看到"——
+  **0.1.6 实测不成立**：roster 在进程启动时挂载（`mounts ONCE under a standing scope`），
+  修好的 preset 要在重启 `dsh --profile web` 之后才出现在选择器里。
+
+### 10.2 内核接线（真机验证通过）
+
+- 会话 runtime context 显示 `file policy: workspace-write` + `Approval policy: ask`
+  ——host 补丁的 `proteus-standard` 档生效。
+- 启动日志：`XPentest MCP Server 就绪（… default_mode=pentest-standard，工具数=40）`
+  （带 `--discover-mcp`，含 seckb / chameleon）。
+- 用 DSH 自己的 mcp-client 独立挂载（指南 5.3）实测：**注册 `mcp__proteus__*` 28 个**
+  （样例：`dalfox_xss` / `dnsx_lookup` / `ffuf_fuzz` / `fscan_scan` / `gobuster_dir` …）。
+
+### 10.3 关键发现：工具装上了，但模型不用（本次最值得处理的一条）
+
+任务执行全程 **12 步、零次 `mcp__proteus__*` 调用**——模型用 DSH 自带的
+PowerShell `Invoke-WebRequest` 把整轮侦察做完，最后用宿主的 `write` 工具
+在会话工作区落了报告 `recon-report-juiceshop.md`（6KB）。
+
+- **报告质量并不差**：每条发现都有可重放 GET、自行识别了 SPA 兜底页
+  （"sitemap.xml 返回 SPA 回退 HTML，不计为发现"——与内核侧第三批技能同源）、
+  如实写明"配置转储中无明文密钥"。发现包括 `/ftp` 目录列出、`acquisitions.md`
+  机密文档、`incident-support.kdbx` 可下载、`/rest/admin/application-configuration`
+  未鉴权返回 23.5KB 全量配置、`/rest/captcha` 直接把 `answer` 一起返回等。
+- **但内核全程旁路**：证据链没记、记忆没落、技能没注入、ModeProfile 闸门没起作用
+  ——报告是自然语言，不可机验。**这正是内核要解决的问题，却被宿主工具的便利绕过了。**
+- 成本：346K tokens、59 tok/s、缓存命中 85%（UI 显示 1 轮 12 步）。
+
+**已做的处置（软约束）**：`prompts/dsh-persona.md` 的"工具使用"段补了硬规则——
+对目标的一切网络动作必须走 `mcp__proteus__*`，宿主 shell/文件工具只用于本地操作；
+并写入本次实测教训与"若确需宿主工具，须先说明理由并标注该步不经内核校验"。
+
+**仍未机制化（留给决策）**：软约束违背项目硬规则 1（约束要机制性生效，不靠模型自觉）。
+可选机制化路径：① 在 preset 里 `disabled: true` 掉 DSH 的 pwsh/bash 行（代价：本地
+解压/脚本能力也没了，而 preset 的设计初衷正需要它们）；② 宿主侧对 shell 加网络出口
+策略（DSH 是否支持待查）；③ 接受"DSH 会话存在旁路"并写进文档，把内核价值限定在
+显式使用 `mcp__proteus__*` 或 `pentest_run` 的路径上。
