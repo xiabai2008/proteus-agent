@@ -49,8 +49,13 @@
       # 越界目标被闸门拒绝），本档不再存在"越界不拦"的旧缺口；但
       # danger-full-access + never 仍意味着无人值守最宽姿态，请仅在
       # 自有靶机 / 隔离环境使用，常规渗透建议 proteus-standard。
+      #
+      # 2026-09-21 定档：approval 由 ask 改为 never（用户决策）。CTF 解题是
+      # 工具密集、分钟级预算的场景，逐步审批会打断解题流；改为 never 后与
+      # 本档"不再逐步打断"的设计意图一致（此前注释与文档均写 never，代码
+      # 却是 ask，属三者不一致，见 docs/修复待办清单.md R-6）。
       proteus-ctf:
         sandbox: danger-full-access
-        approval: ask
+        approval: never
     # 取消注释即把 proteus-standard 设为新会话默认档（会覆盖部署默认）。
     # defaultPreset: proteus-standard
