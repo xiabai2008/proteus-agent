@@ -331,9 +331,120 @@ def _probe_target(host: str, port: int) -> str:
     return "\n".join(chunks)
 
 
+# ----------------------------------------------------------------------
+# 07 靶场套件（进化收益 / 闭环策略对比）
+#
+# 这两条能力此前只有直跑脚本（eval_evolution / eval_closed_loop），指标不进
+# 评分卡、无法跨版本比对。这里**复用它们的既有核心函数**（已实测验证过），
+# 只把指标包成统一的 CaseResult——不重写内部逻辑。
+# ----------------------------------------------------------------------
+def _g07_evolution_case() -> CaseResult:
+    """进化收益：技能注入后决策步数应低于探索型（`eval_evolution` 的指标）。"""
+    started = time.time()
+    cid, category = "evolution-steps-reduced", "evolution"
+    try:
+        from eval_evolution import (NAIVE_SEQUENCE, SKILL_SEQUENCE,
+                                    make_sim_host, register_sim_tools,
+                                    run_sequence)
+
+        from penagent.tools import ToolRegistry
+
+        def _avg_steps(sequence) -> Optional[float]:
+            steps = []
+            for _ in range(5):
+                host = make_sim_host()
+                reg = ToolRegistry()
+                register_sim_tools(reg, host)
+                s, ok = run_sequence(reg, host, list(sequence), authorize=True)
+                steps.append(s if ok else None)
+            won = [s for s in steps if s is not None]
+            return sum(won) / len(won) if won else None
+
+        naive = _avg_steps(NAIVE_SEQUENCE)
+        evolved = _avg_steps(SKILL_SEQUENCE)
+        passed = bool(naive and evolved and evolved < naive)
+        return CaseResult(
+            suite="g07", case_id=cid, category=category,
+            outcome="success" if passed else "failed", passed=passed,
+            steps=int(evolved or 0), elapsed_s=round(time.time() - started, 2),
+            expected=f"技能型步数 < 探索型（探索型 {naive}）",
+            got=f"技能型 {evolved}",
+            detail="" if passed else f"技能型 {evolved} 未低于探索型 {naive}")
+    except Exception as exc:                              # noqa: BLE001
+        return CaseResult(
+            suite="g07", case_id=cid, category=category, outcome="failed",
+            passed=False, elapsed_s=round(time.time() - started, 2),
+            detail=f"{type(exc).__name__}: {exc}")
+
+
+def _g07_closed_loop_cases() -> list[CaseResult]:
+    """闭环策略对比：Q 学习 / PPO 相对基线的步数收益。
+
+    `eval_closed_loop.train_and_evaluate()` 的 PPO 层需 torch（可选依赖，
+    不进 requirements）——缺 torch 时本组标记 skipped，而不是判失败。
+    """
+    try:
+        import torch  # noqa: F401
+    except ModuleNotFoundError:
+        return [CaseResult(
+            suite="g07", case_id="closed-loop-policy", category="evolution",
+            outcome="skipped", passed=False,
+            detail="闭环套件含 PPO 层，需 torch（可选依赖，不入 requirements）")]
+
+    started = time.time()
+    try:
+        from eval_closed_loop import train_and_evaluate
+
+        rows = {r["name"]: r for r in train_and_evaluate()}
+        out = []
+        for key, label in (("+Q学习", "qlearning"), ("+PPO", "ppo")):
+            r = rows.get(key)
+            gain = float(r["gain_vs_baseline"]) if r else 0.0
+            passed = bool(r and gain > 0)
+            out.append(CaseResult(
+                suite="g07", case_id=f"closed-loop-{label}",
+                category="evolution",
+                outcome="success" if passed else "failed", passed=passed,
+                steps=int(r["avg_steps"] or 0) if r else 0,
+                elapsed_s=round(time.time() - started, 2),
+                expected="相对基线的决策步数收益 > 0",
+                got=f"{gain:+.0%}",
+                detail="" if passed else f"{key} 相对基线收益 {gain:+.0%}，未为正"))
+        return out
+    except Exception as exc:                              # noqa: BLE001
+        return [CaseResult(
+            suite="g07", case_id="closed-loop-policy", category="evolution",
+            outcome="failed", passed=False,
+            elapsed_s=round(time.time() - started, 2),
+            detail=f"{type(exc).__name__}: {exc}")]
+
+
+def run_g07_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
+    """07 靶场套件：进化收益 + 闭环策略对比。
+
+    07 靶场缺失时整组标记 skipped——环境缺失不等于能力不足（同渗透套件的口径）。
+    """
+    from penagent.envcfg import ensure_g07_on_path
+
+    if ensure_g07_on_path() is None:
+        return [CaseResult(
+            suite="g07", case_id="__env__", category="env", outcome="skipped",
+            passed=False,
+            detail="未找到 07 靶场（把 PENTEST_G07_ROOT 指向 07-agent-war-range 后可用）")]
+
+    examples = str(ROOT / "examples")
+    if examples not in sys.path:
+        sys.path.insert(0, examples)
+
+    results = [_g07_evolution_case()]
+    results.extend(_g07_closed_loop_cases())
+    return results
+
+
 SUITES: dict[str, Callable[..., list[CaseResult]]] = {
     "ctf": run_ctf_suite,
     "pentest": run_pentest_suite,
+    "g07": run_g07_suite,
 }
 
 

@@ -59,19 +59,18 @@ def evaluate(hosts, choose_seq, fallback: bool = False) -> dict:
             "avg_steps": (sum(win) / len(win)) if win else None}
 
 
-def main() -> int:
-    try:
-        import torch
-    except ModuleNotFoundError:
-        print("闭环评测含 PPO 层，需要 torch（可选依赖）。"
-              "安装：pip install torch --index-url https://download.pytorch.org/whl/cpu")
-        return 2
+def train_and_evaluate(*, seed: int = 42) -> list[dict]:
+    """训练 Q 学习与 PPO，在固定目标集上评估全部策略。
 
-    torch.manual_seed(42)
-    rng = random.Random(42)
-    print("=" * 64)
-    print("闭环回归评测：进化各层叠加收益（07 仿真，30 目标）")
-    print("=" * 64)
+    返回每策略一条结构化记录（供 main() 打印与评测骨架消费）：
+      [{"name", "success_rate", "avg_steps", "gain_vs_baseline"}, ...]
+    第一条是基线，其余相对它计算收益。需 torch（PPO 层）——调用方负责
+    处理 ModuleNotFoundError。
+    """
+    import torch
+
+    torch.manual_seed(seed)
+    rng = random.Random(seed)
 
     # 训练 Q-learning（状态均衡采样）
     ql = SkillPolicy(epsilon=0.3)
@@ -86,7 +85,7 @@ def main() -> int:
 
     # 训练 PPO（状态均衡采样：400 rollouts，10 批 × 40 轮）
     ppo = PPOSkillPolicy(SKILL_IDS, lr=3e-3)
-    for batch in range(10):
+    for _batch in range(10):
         rollouts = []
         for state in TRAIN_STATES:
             for _ in range(10):
@@ -99,44 +98,58 @@ def main() -> int:
                                  "done": True})
         ppo.update(rollouts, epochs=4)
 
-    # 同一目标集评估：原始策略 + 带回退兜底的稳健版
     hosts = target_set()
-    baseline = evaluate(hosts, lambda h: EXPLORE_SEQ[:])
-    skills = evaluate(hosts, lambda h: SKILLS["full-recon"][1])
-    q_res = evaluate(hosts, lambda h: (
-        SKILLS[ql.best_skill(" ".join(s.name for s in h.services))][1]
-        if ql.best_skill(" ".join(s.name for s in h.services))
-        else EXPLORE_SEQ[:]))
-    ppo_res = evaluate(hosts, lambda h: (
-        SKILLS[ppo.best_skill(" ".join(s.name for s in h.services))][1]
-        if ppo.best_skill(" ".join(s.name for s in h.services))
-        else EXPLORE_SEQ[:]))
-    q_fb = evaluate(hosts, lambda h: (
-        SKILLS[ql.best_skill(" ".join(s.name for s in h.services))][1]
-        if ql.best_skill(" ".join(s.name for s in h.services))
-        else EXPLORE_SEQ[:]), fallback=True)
-    ppo_fb = evaluate(hosts, lambda h: (
-        SKILLS[ppo.best_skill(" ".join(s.name for s in h.services))][1]
-        if ppo.best_skill(" ".join(s.name for s in h.services))
-        else EXPLORE_SEQ[:]), fallback=True)
 
-    rows = [("基线(无技能)", baseline), ("+技能(直接)", skills),
-            ("+Q学习", q_res), ("+PPO", ppo_res),
-            ("+Q学习(兜底)", q_fb), ("+PPO(兜底)", ppo_fb)]
-    print(f"\n{'策略':<16}{'成功率':>8}{'平均步数':>10}{'收益(步数)':>10}")
+    def _by_policy(policy, fallback: bool = False) -> dict:
+        """按策略选择技能序列评估（best_skill 只查一次）。"""
+        def choose(h):
+            fp = " ".join(s.name for s in h.services)
+            best = policy.best_skill(fp)
+            return SKILLS[best][1] if best else EXPLORE_SEQ[:]
+        return evaluate(hosts, choose, fallback=fallback)
+
+    baseline = evaluate(hosts, lambda h: EXPLORE_SEQ[:])
+    rows = [
+        ("基线(无技能)", baseline),
+        ("+技能(直接)", evaluate(hosts, lambda h: SKILLS["full-recon"][1])),
+        ("+Q学习", _by_policy(ql)),
+        ("+PPO", _by_policy(ppo)),
+        ("+Q学习(兜底)", _by_policy(ql, fallback=True)),
+        ("+PPO(兜底)", _by_policy(ppo, fallback=True)),
+    ]
     b_steps = baseline["avg_steps"]
+    out = []
     for name, r in rows:
         gain = ((b_steps - r["avg_steps"]) / b_steps
-                if r["avg_steps"] and b_steps else 0)
-        print(f"{name:<16}{r['success_rate']:>7.0%}"
+                if r["avg_steps"] and b_steps else 0.0)
+        out.append({"name": name, "success_rate": r["success_rate"],
+                    "avg_steps": r["avg_steps"], "gain_vs_baseline": gain})
+    return out
+
+
+def main() -> int:
+    try:
+        import torch  # noqa: F401
+    except ModuleNotFoundError:
+        print("闭环评测含 PPO 层，需要 torch（可选依赖）。"
+              "安装：pip install torch --index-url https://download.pytorch.org/whl/cpu")
+        return 2
+
+    print("=" * 64)
+    print("闭环回归评测：进化各层叠加收益（07 仿真，30 目标）")
+    print("=" * 64)
+    rows = train_and_evaluate()
+
+    print(f"\n{'策略':<16}{'成功率':>8}{'平均步数':>10}{'收益(步数)':>10}")
+    for r in rows:
+        gain = r["gain_vs_baseline"]
+        print(f"{r['name']:<16}{r['success_rate']:>7.0%}"
               f"{r['avg_steps']:>10.2f}"
               f"{(f'-{gain:.0%}' if gain >= 0 else f'+{-gain:.0%}'):>10}")
 
     print("\n进化收益链：每层相对基线")
-    for name, r in rows[1:]:
-        gain = ((b_steps - r["avg_steps"]) / b_steps
-                if r["avg_steps"] and b_steps else 0)
-        print(f"  {name:<16}步数下降 {gain:.0%}"
+    for r in rows[1:]:
+        print(f"  {r['name']:<16}步数下降 {r['gain_vs_baseline']:.0%}"
               f"（成功率 {r['success_rate']:.0%}）")
     shutil.rmtree(ROOT / "data" / "closedloop", ignore_errors=True)
     return 0
