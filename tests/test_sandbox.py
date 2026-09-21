@@ -418,6 +418,68 @@ def test_sandbox_image_runs_sqlmap_through_command_rewrite():
         f"未取到 sqlmap 版本: {str(result.output)[:120]}"
 
 
+def _juiceshop_reachable() -> bool:
+    """探测宿主侧 Juice Shop 是否存活。
+
+    目标被约束为硬编码的 `http://127.0.0.1:3000`（协议 + 主机白名单 +
+    解析 IP 必须为环回），满足 Mimosa 对 SSRF 的边界要求——测试靶场
+    只允许打本机环回，任何其他目标一律拒绝。
+    """
+    import ipaddress
+    import socket
+    import urllib.request
+
+    if not all(ipaddress.ip_address(i[4][0]).is_loopback
+               for i in socket.getaddrinfo("127.0.0.1", 3000,
+                                           type=socket.SOCK_STREAM)):
+        return False
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:3000", timeout=5) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def test_sandbox_sqlmap_real_scan_against_juiceshop():
+    """容器内 sqlmap **真扫**宿主靶场（R-15 真实证据的回归固化）。
+
+    与上一条只验 `--version` 不同，本条要求容器内的 sqlmap 对宿主上的
+    Juice Shop 发起真实注入探测。三个前置，任一不满足即跳过而非失败：
+    - 专用镜像就绪（`_sandbox_image_or_skip`）；
+    - 宿主 Juice Shop 在 3000 端口存活；
+    - 出网已放开（容器内 `127.0.0.1` 是容器自己，必须走
+      `host.docker.internal`，见 docs/修复待办清单.md R-15 第二轮）。
+
+    断言取 sqlmap 探测过程中的两个稳定标记（连接测试 + 参数动态判定），
+    不依赖注入是否成功——靶场的响应随版本演进，注入结论不稳，但
+    "真的在扫"这个行为是稳的。
+    """
+    runner = _sandbox_image_or_skip()
+    if not _juiceshop_reachable():
+        pytest.skip("Juice Shop 靶场未运行（docker run --name rx-juiceshop "
+                    "-p 3000:3000 bkimminich/juice-shop）")
+
+    spec = ToolSpec(name="sqlmap_scan", kind="cli", dangerous=True,
+                    network=True, timeout=300, workdir=".",
+                    command=["sqlmap",
+                             "-u",
+                             "http://host.docker.internal:3000/rest/products/"
+                             "search?q=test",
+                             "--batch", "--level", "1", "--risk", "1",
+                             "--threads", "4"])
+    registry = ToolRegistry(
+        sandbox=build_sandbox("docker", runner=runner, egress=True))
+    registry.register(spec)
+
+    result = registry.execute("sqlmap_scan", {})
+    assert result.ok, f"容器内 sqlmap 执行失败: {str(result.error)[:200]}"
+    out = str(result.output)
+    assert "testing connection to the target URL" in out, \
+        f"sqlmap 未对目标发起连接测试: {out[:200]}"
+    assert "appears to be dynamic" in out or "could be injectable" in out, \
+        f"sqlmap 未完成参数动态判定: {out[:200]}"
+
+
 def test_egress_off_blocks_networked_tool_before_container():
     """`network_egress=false` 时出网工具被**沙箱层**拒绝（R-16 的机制）。
 
