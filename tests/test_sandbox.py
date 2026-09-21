@@ -124,6 +124,25 @@ def test_docker_unavailable_refuses_and_never_runs_bare(tmp_path):
     assert not marker.exists(), "容器不可用时绝不能降级为宿主直跑"
 
 
+def test_docker_unavailable_message_carries_remediation():
+    """容器不可用的错误必须**含修复指引**（R-11）。
+
+    ADR（`docs/沙箱降级评估.md` 第二节备选 C 的配套约定 1）要求 docker 档在
+    容器不可用时报明确错误**含修复指引**。本用例钉住这一点，防止退化成
+    只报"坏了"却不说怎么修。指引必须指向**显式降档**（`sandbox: local`），
+    不能暗示运行期静默回退——静默降级是被否决的备选 A。
+    """
+    runner = StubRunner(available=False)
+    policy = build_sandbox("docker", runner=runner)
+    decision = policy.decide(_cli_tool(dangerous=True))
+
+    assert decision.allowed is False
+    reason = decision.reason
+    assert "拒绝裸跑" in reason            # 既有语义保持不变
+    assert "sandbox: local" in reason      # 指向唯一的显式降档路径
+    assert "沙箱降级评估" in reason        # 给出 ADR 依据，便于查证
+
+
 def test_local_level_actually_executes_the_same_tool(tmp_path):
     """对照组：同一工具在 local 档确实会执行（证明上一条不是"命令本身跑不起来"）。"""
     marker = tmp_path / "ran.txt"

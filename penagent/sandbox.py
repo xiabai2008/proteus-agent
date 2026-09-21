@@ -150,9 +150,18 @@ class SandboxPolicy:
                 f"请改用 CLI 工具或调整模式 sandbox 档位")
         ok, reason = self.runner.available()
         if not ok:
+            # 错误消息含可操作的修复指引（R-11 / ADR 配套约定 1）：
+            # 只报"容器不可用"会让人卡住，而 ADR 明确要求"报明确错误
+            # （含修复指引）"。指引只指向**显式降档**（sandbox: local）——
+            # 静默降级是被否决的备选 A，运行期绝不自动回退。
             return SandboxDecision(
                 False,
-                f"sandbox=docker 但容器不可用（{reason}），拒绝裸跑 {spec.name}")
+                f"sandbox=docker 但容器不可用（{reason}），拒绝裸跑 {spec.name}。"
+                f"修复：启动 Docker 守护进程后重试（Windows 可启动 Docker "
+                f"Desktop，或用 wsl --status 检查 WSL 后端）；确需在无容器"
+                f"环境运行，请按 docs/沙箱降级评估.md 在模式文件中显式改为 "
+                f"sandbox: local（宿主直跑，仍过白名单与权限档位）。"
+                f"运行期不做静默降级")
         return SandboxDecision(True, "sandbox=docker：容器内执行", isolated=True,
                                wrap=lambda cmd, _spec=spec: self.runner.wrap(cmd, _spec))
 
