@@ -51,7 +51,7 @@ RUN python -c "import RsaCtfTool; print('RsaCtfTool ready')"
 #   - nuclei：需要 templates 仓库（容器内无，且首次运行要联网下载）
 #   - ffuf / gobuster：需要字典（宿主 ${PENTEST_TOOLS}/config/dictionaries/）
 #   - pocsuite3：需要 PoC 文件
-#   - fscan / naabu / dalfox：Go 二进制，可装（经代理下载 release），本次未纳入
+#   - fscan / naabu / dalfox：**已于 R-15 第三轮纳入**（见下方 Go 工具段）
 #
 # **网络语义（重要）**：容器内的 `127.0.0.1` 是**容器自己**，不是宿主。要访问
 # 宿主上的靶场/服务须用 `host.docker.internal`（且工具要在 external_tools.json
@@ -59,4 +59,86 @@ RUN python -c "import RsaCtfTool; print('RsaCtfTool ready')"
 # `--network none` 下两个地址都不可达；`--network bridge` 下只有
 # host.docker.internal 可达。
 RUN pip install --no-cache-dir sqlmap
+
+# ----------------------------------------------------------------------
+# 渗透工具 · Go 二进制（R-15 第三轮扩容）
+#
+# 纳入 fscan / naabu / dalfox，选择依据与上同理：**零配置依赖**——功能内建，
+# 不需要模板仓库或字典文件，装进容器即可真扫（nuclei / ffuf / gobuster 仍不
+# 纳入，原因见上）。
+#
+# **代理选择（实测证据）**：github.com 直连不可达（code=000）。两个公共代理
+# 实测：ghproxy.net 吞吐约 43KB/s 且 11.8MB 的 naabu 资产**被截断**（只取到
+# 5.2MB）；gh-proxy.com 约 5.8MB/s、三个资产完整。故本段默认走 gh-proxy.com；
+# rsactftool 段的 ghproxy.net 保持原样（其资产小，已验证可用）。
+# 直连可用时覆盖：--build-arg GO_TOOLS_BASE=https://github.com
+ARG GO_TOOLS_BASE=https://gh-proxy.com/https://github.com
+# 多架构映射：amd64 -> fscan x64 / naabu amd64 / dalfox x86_64；
+# arm64 -> fscan arm64 / naabu arm64 / dalfox aarch64（TARGETARCH 由
+# BuildKit 注入，缺省 amd64）。
+ARG TARGETARCH=amd64
+# **版本 + 官方 sha256 双钉**：这三个二进制会在隔离容器里以 root 执行，
+# 下载内容被篡改或被代理换成别的构建，等于让沙箱执行来路不明的代码——
+# 故校验不过直接让构建失败（不是警告）。
+ARG FSCAN_VERSION=2.2.0
+ARG FSCAN_SHA256=0ed5b96fd3637fbce3e2e990761e8445352e0ba10e8914c98b0dfa993c1357c3
+ARG NAABU_VERSION=2.6.1
+ARG NAABU_SHA256=018c4c9884dea971eda860435ede3021d1150732f34cfd245498c6726d8cab90
+ARG DALFOX_VERSION=3.2.0
+ARG DALFOX_SHA256=1c0539081951ce5f847bd7b62a360fbd4080248502d09a83ce25c5b234f61b8c
+
+# 用镜像自带的 python 下载/校验/解包（不引入 curl / unzip，少一层 apt）。
+RUN python - <<'PY'
+import hashlib, os, tarfile, urllib.request, zipfile
+from io import BytesIO
+
+base = os.environ["GO_TOOLS_BASE"]
+suffix = {"amd64": ("x64", "amd64", "x86_64"),
+          "arm64": ("arm64", "arm64", "aarch64")}.get(
+              os.environ.get("TARGETARCH", "amd64"))
+if suffix is None:
+    raise SystemExit(f"未映射的架构: {os.environ.get('TARGETARCH')}")
+f_arch, n_arch, d_arch = suffix
+
+fv = os.environ["FSCAN_VERSION"]
+nv = os.environ["NAABU_VERSION"]
+dv = os.environ["DALFOX_VERSION"]
+assets = {
+    "fscan": (f"shadow1ng/fscan/releases/download/v{fv}/fscan_{fv}_linux_{f_arch}",
+              os.environ["FSCAN_SHA256"]),
+    "naabu": (f"projectdiscovery/naabu/releases/download/v{nv}/"
+              f"naabu_{nv}_linux_{n_arch}.zip", os.environ["NAABU_SHA256"]),
+    "dalfox": (f"hahwul/dalfox/releases/download/v{dv}/"
+               f"dalfox-v{dv}-linux-{d_arch}.tar.gz", os.environ["DALFOX_SHA256"]),
+}
+
+for name, (path, want) in assets.items():
+    url = f"{base}/{path}"
+    blob = urllib.request.urlopen(url, timeout=300).read()
+    got = hashlib.sha256(blob).hexdigest()
+    if got != want:
+        raise SystemExit(f"{name}: sha256 不匹配\n  期望 {want}\n"
+                         f"  实得 {got}\n  来源 {url}")
+    if path.endswith(".zip"):
+        with zipfile.ZipFile(BytesIO(blob)) as z:
+            data = z.read(name)
+    elif path.endswith(".tar.gz"):
+        with tarfile.open(fileobj=BytesIO(blob), mode="r:gz") as t:
+            member = next(m for m in t.getmembers()
+                          if m.name.endswith("/" + name))
+            data = t.extractfile(member).read()
+    else:
+        data = blob
+    dest = os.path.join("/usr/local/bin", name)
+    with open(dest, "wb") as fh:
+        fh.write(data)
+    os.chmod(dest, 0o755)
+    print(f"{name} ready ({len(data)} bytes, sha256 {got[:12]}...)")
+PY
+
+# 构建期自检：三个二进制能跑起来、报出自己的版本（管道取 grep 的退出码，
+# 故工具自身的退出码不影响判定）。真正"能扫"的证据在 tests/test_sandbox.py。
+RUN naabu -version 2>&1 | grep -q "Current Version" \
+ && dalfox version 2>&1 | grep -qi "Dalfox" \
+ && fscan 2>&1 | grep -q "Fscan ${FSCAN_VERSION}"
 

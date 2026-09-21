@@ -182,7 +182,8 @@
         "{args}",
         "-silent",
         "-top-ports",
-        "100"
+        "100",
+        "-sr"
       ],
       "positional": true,
       "timeout": 300,
@@ -192,7 +193,7 @@
     "dalfox_xss": {
       "description": "dalfox：XSS 专项扫描（参数分析/DOM XSS 检测）",
       "parameters": {
-        "target": {
+        "url": {
           "type": "string"
         }
       },
@@ -202,7 +203,6 @@
         "{args}",
         "--silence"
       ],
-      "positional": true,
       "timeout": 600,
       "dangerous": true,
       "network": true

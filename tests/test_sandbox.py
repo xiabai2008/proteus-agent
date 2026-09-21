@@ -481,6 +481,197 @@ def test_sandbox_sqlmap_real_scan_against_juiceshop():
         f"sqlmap 未完成参数动态判定: {out[:200]}"
 
 
+# ----------------------------------------------------------------------
+# Go 工具（R-15 第三轮：镜像纳入 fscan / naabu / dalfox）
+# ----------------------------------------------------------------------
+@pytest.fixture
+def reflector_target():
+    """宿主侧"反射型靶页"服务（Go 工具容器内真扫的自带靶标）。
+
+    容器里的 `127.0.0.1` 是容器自己，只能经 `host.docker.internal` 回宿主，
+    故这里在宿主上起一个临时端口的回显页（把查询串原样写进 HTML）。
+
+    返回 `(ip, port)`：IP 由容器内解析一次后**显式传给工具**，不把
+    hostname 丢给工具自己解析——实测容器内 `/etc/hosts` 并无
+    `host.docker.internal` 条目（只有 localhost 与本机名），该名字靠 Docker
+    的 DNS（192.168.65.7）解析，naabu 自带解析器对它约一半的运行直接报
+    `no valid ipv4 or ipv6 targets were found`（实测抖动）。解析一次、
+    传 IP，用例才是确定性的。不可达时 skip——环境差异不该表现为失败。
+    """
+    import http.server
+    import threading
+    import urllib.parse
+
+    runner = _sandbox_image_or_skip()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            q = urllib.parse.urlparse(self.path).query
+            body = ("<html><body><h1>search</h1>"
+                    f"<div id='r'>{q}</div></body></html>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def _in_container(code: str, *extra: str):
+        import subprocess
+
+        return subprocess.run(
+            ["docker", "run", "--rm", "--network", "bridge", runner.image,
+             "python", "-c", code, *extra],
+            capture_output=True, text=True, timeout=60)
+
+    try:
+        probe = _in_container(
+            "import socket,sys;"
+            "ip = socket.gethostbyname('host.docker.internal');"
+            "socket.create_connection((ip, int(sys.argv[1])), 5);"
+            "print('reachable', ip)", str(port))
+        if "reachable" not in probe.stdout:
+            pytest.skip(f"容器无法访问宿主靶页（{probe.stdout.strip()} "
+                        f"{probe.stderr.strip()[:120]}）")
+        yield probe.stdout.split()[-1], port
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_sandbox_image_has_go_tools():
+    """镜像内三个 Go 工具就位（各自报版本）。
+
+    这条防的是"镜像重建时漏装/装错架构"；"真的能扫"的证据在下面三条真扫
+    用例里，不在版本号上。
+    """
+    runner = _sandbox_image_or_skip()
+    spec = ToolSpec(name="go_tools_probe", kind="cli", dangerous=True,
+                    timeout=120, workdir=".",
+                    command=["sh", "-c",
+                             "naabu -version 2>&1; "
+                             "dalfox version 2>&1 | grep -m1 -i dalfox; "
+                             "fscan 2>&1 | head -20"])
+    registry = ToolRegistry(sandbox=build_sandbox("docker", runner=runner))
+    registry.register(spec)
+
+    result = registry.execute("go_tools_probe", {})
+    assert result.ok, f"容器内执行失败: {str(result.error)[:200]}"
+    out = str(result.output).lower()
+    # naabu 的版本行是 "Current Version: x.y.z"（banner 在 stderr，无工具名）
+    assert "current version" in out, f"naabu 未就位于镜像: {str(result.output)[:200]}"
+    for name in ("dalfox", "fscan"):
+        assert name in out, f"{name} 未就位于镜像: {str(result.output)[:200]}"
+
+
+def test_sandbox_fscan_real_scan_uses_registry_spec(tmp_path):
+    """fscan 按**注册表真实配置**在容器内真扫宿主。
+
+    直接取 external_tools.json 的 `fscan_scan` spec 执行，故一条用例同时
+    覆盖：① 宿主 `.exe` 路径 → 容器内工具名的重写；② 镜像内确有 fscan；
+    ③ 容器经 host.docker.internal 打到宿主端口。
+
+    靶标取宿主 8080（DVWA）——它恰在 spec 的 `-p` 端口列表内。靶场未运行时
+    跳过，不把环境缺失算作失败。
+
+    `workdir` 换成 tmp_path：fscan 默认在**工作目录**写 `result.txt`
+    （实测），不换就把测试产物落进仓库根了。
+    """
+    import socket
+    from dataclasses import replace
+
+    runner = _sandbox_image_or_skip()
+    try:
+        with socket.create_connection(("127.0.0.1", 8080), timeout=3):
+            pass
+    except OSError:
+        pytest.skip("宿主 8080（DVWA）未运行，跳过 fscan 真扫用例")
+
+    from penagent.external_tools import load_external_tools
+
+    base = ToolRegistry()
+    load_external_tools(base)
+    spec = base.get("fscan_scan")
+    if spec is None:
+        pytest.skip("fscan 未在本地注册（${PENTEST_TOOLS}/tools/fscan.exe 缺失）")
+    spec = replace(spec, workdir=str(tmp_path))
+
+    registry = ToolRegistry(
+        sandbox=build_sandbox("docker", runner=runner, egress=True))
+    registry.register(spec)
+
+    result = registry.execute("fscan_scan", {"host": "host.docker.internal"})
+    assert result.ok, f"容器内 fscan 执行失败: {str(result.error)[:200]}"
+    out = str(result.output)
+    assert "8080" in out and "扫描任务完成" in out, \
+        f"fscan 未在容器内真扫: {out[:200]}"
+
+
+def test_sandbox_naabu_real_scan_finds_open_port(reflector_target):
+    """naabu 在容器内经生产路径真扫宿主端口（扫描结果自证）。
+
+    参数形态与 external_tools.json 的 `naabu_scan` 一致（含 `-sr` 系统解析
+    兜底）；靶标用 fixture 解析出的 IP 而非 hostname——原因见 fixture
+    docstring（naabu 自带解析器解析 Docker 特殊名不稳）。
+    """
+    ip, port = reflector_target
+    runner = _sandbox_image_or_skip()
+    spec = ToolSpec(name="naabu_probe", kind="cli", dangerous=True,
+                    network=True, timeout=120, workdir=".",
+                    command=["naabu", "-host", ip, "-p", str(port),
+                             "-sr", "-silent"])
+    registry = ToolRegistry(
+        sandbox=build_sandbox("docker", runner=runner, egress=True))
+    registry.register(spec)
+
+    result = registry.execute("naabu_probe", {})
+    assert result.ok, f"容器内 naabu 执行失败: {str(result.error)[:200]}"
+    assert f":{port}" in str(result.output), \
+        f"naabu 未扫到靶页端口: {str(result.output)[:200]}"
+
+
+def test_sandbox_dalfox_real_scan_finds_reflection(reflector_target):
+    """dalfox 在容器内真扫：识别反射点并产出 POC。
+
+    用注册表 spec 的**真实命令形态**（`dalfox url --url <target>`——v3.2.0
+    的必需写法；修正前的 `dalfox url <target>` 在 v3.2.0 上直接报
+    `--url <URL> not provided`）。只去掉 `--silence`：它是生产形态的降噪
+    选择，不改调用语义，但会把输出全部抑制导致无法断言。
+
+    **不看 `result.ok`**：dalfox 的退出码语义是"有发现则非 0"（实测：找到
+    POC 时 exit=1，无发现时 exit=0），故这里的成败只能由输出判定。
+    """
+    from dataclasses import replace
+
+    ip, port = reflector_target
+    runner = _sandbox_image_or_skip()
+    from penagent.external_tools import load_external_tools
+
+    base = ToolRegistry()
+    load_external_tools(base)
+    spec = base.get("dalfox_xss")
+    if spec is None:
+        pytest.skip("dalfox 未在本地注册（${PENTEST_TOOLS}/tools/dalfox.exe 缺失）")
+
+    probe = replace(spec, name="dalfox_probe",
+                    command=[c for c in spec.command if c != "--silence"])
+    registry = ToolRegistry(
+        sandbox=build_sandbox("docker", runner=runner, egress=True))
+    registry.register(probe)
+
+    result = registry.execute(
+        "dalfox_probe", {"url": f"http://{ip}:{port}/search?q=test"})
+    out = str(result.output)
+    assert "found reflected" in out, f"dalfox 未完成反射分析: {out[:200]}"
+    assert "Payload:" in out, f"dalfox 未产出 POC: {out[:200]}"
+
+
 def test_egress_off_blocks_networked_tool_before_container():
     """`network_egress=false` 时出网工具被**沙箱层**拒绝（R-16 的机制）。
 
