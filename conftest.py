@@ -10,43 +10,21 @@
 
 解析结果同时注入 PYTHONPATH，供 tests 以 subprocess 拉起的评测脚本继承。
 """
-import os
 import sys
 from pathlib import Path
 
 import pytest
 
-from penagent.envcfg import load_env_file
+from penagent.envcfg import ensure_g07_on_path, load_env_file
 
 # 本机路径只来自不入库的 .env（公开仓库零本机路径约定，见 penagent/envcfg.py）
 load_env_file()
 
 ROOT = Path(__file__).resolve().parent
 
-CANDIDATES = [
-    ROOT.parent / "07-agent-war-range",
-    ROOT.parent / "网安项目开发规划" / "07-agent-war-range",
-]
-
-
-def _resolve_g07() -> "Path | None":
-    env = os.environ.get("PENTEST_G07_ROOT")
-    if env and (Path(env) / "warfare").is_dir():
-        return Path(env)
-    for candidate in CANDIDATES:
-        if (candidate / "warfare").is_dir():
-            return candidate
-    return None
-
-
-G07 = _resolve_g07()
-
-if G07 is not None:
-    if str(G07) not in sys.path:
-        sys.path.insert(0, str(G07))
-    _existing = os.environ.get("PYTHONPATH", "")
-    _parts = [str(G07)] + ([_existing] if _existing else [])
-    os.environ["PYTHONPATH"] = os.pathsep.join(_parts)
+# 07 靶场解析与 sys.path / PYTHONPATH 注入：逻辑在 penagent/envcfg.py，
+# 与直跑脚本（examples/benchmark.py）共用同一份，避免两处实现漂移。
+G07 = ensure_g07_on_path()
 
 # 本机找不到 07 靶场时（CI / 新机器），依赖 warfare 包的直跑评测用例自动跳过，
 # 其余用例照常执行。设 PENTEST_G07_ROOT 指向 07-agent-war-range 即可恢复。

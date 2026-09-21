@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -61,3 +62,55 @@ def expand_deep(obj):
     if isinstance(obj, list):
         return [expand_deep(v) for v in obj]
     return obj
+
+
+# ----------------------------------------------------------------------
+# 外部依赖：07 靶场（warfare 仿真包）
+#
+# 内核的回归评测脚本（examples/eval_evolution*.py / eval_closed_loop.py）与
+# 评测骨架（examples/benchmark.py）都需要它。解析逻辑放这里，让 pytest
+# （conftest.py）与直跑脚本（benchmark.py）**共用同一份**，而不是各写一遍
+# ——重复实现必然漂移。
+# ----------------------------------------------------------------------
+def g07_candidates() -> tuple[Path, ...]:
+    """07 靶场的候选位置（按优先级）。"""
+    return (
+        PROJECT_ROOT.parent / "07-agent-war-range",
+        PROJECT_ROOT.parent / "网安项目开发规划" / "07-agent-war-range",
+    )
+
+
+def resolve_g07() -> Optional[Path]:
+    """解析 07 靶场根目录（须含 warfare 包）。
+
+    优先级：`PENTEST_G07_ROOT` 环境变量（含 `.env` 里的）→ 相邻项目布局。
+    外部项目按绝对路径引用、不 vendoring（AGENTS.md 第 7 条）。
+    找不到返回 None——调用方应据此标记 skip，而不是崩溃。
+    """
+    load_env_file()
+    env = os.environ.get("PENTEST_G07_ROOT")
+    if env and (Path(env) / "warfare").is_dir():
+        return Path(env)
+    for candidate in g07_candidates():
+        if (candidate / "warfare").is_dir():
+            return candidate
+    return None
+
+
+def ensure_g07_on_path() -> Optional[Path]:
+    """解析 07 靶场并注入 import 路径（本进程 sys.path + 子进程 PYTHONPATH）。
+
+    PYTHONPATH 那一份是给 test 用 subprocess 拉起的评测脚本继承的。
+    返回解析到的路径；未找到返回 None。
+    """
+    import sys
+
+    g07 = resolve_g07()
+    if g07 is None:
+        return None
+    if str(g07) not in sys.path:
+        sys.path.insert(0, str(g07))
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [str(g07)] + ([existing] if existing else [])
+    os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+    return g07
