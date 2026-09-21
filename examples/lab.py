@@ -15,6 +15,16 @@
 这符合"基线"的定位——先定义"哪些东西是应该被发现的"，为后续 agent 能力
 评测提供 ground truth，而不是自己去打。
 
+**预期发现的收录口径（2026-09-21 扩容后）**：每一条都必须①来自对靶的**实际
+探测**（不是猜的），②**能把"真的发现了"与"看着像"分开**——所以标记只取
+探测输出里能看到的（状态行/标题/响应头），响应体文本不做标记（`http_probe`
+不返回正文，靠正文的标记永远命中不了）。据此排除过两类假发现：
+
+- `/phpinfo.php`、`/security.php`（DVWA）：返回 200 但标题是登录页——那是
+  DVWA 的鉴权门把未登录请求渲染成登录页，**不是**真的泄漏；
+- `/config/config.inc.php`（DVWA）：200 但响应体为空（PHP 已执行），
+  拿不出可用证据。
+
 探测经**内核工具链**（`ToolRegistry.execute`）而非直接调函数——这样走的是
 与 agent 完全相同的闸门与沙箱裁决路径，顺带验证工具链对真实靶场可用。
 
@@ -75,6 +85,17 @@ LABS: tuple[LabTarget, ...] = (
                     note="robots.txt 可读（被动信息收集面）"),
             Finding("dir-listing", "/docs", 200, "Index of",
                     note="目录列表未关闭，暴露文件结构（真实信息泄漏发现）"),
+            Finding("installer", "/setup.php", 200, "Setup ::",
+                    note="安装页未下线（可重置数据库的敏感入口）"),
+            Finding("dir-listing-vulns", "/vulnerabilities/", 200, "Index of",
+                    note="漏洞模块目录可列（攻击面清单直接给出）"),
+            Finding("readme-file", "/README.md", 200, "",
+                    note="仓库说明文件被当静态资源暴露"),
+            # 实测排除（勿加，会变成假发现）：
+            #   /phpinfo.php、/security.php 返回 200 但标题是登录页——DVWA 的
+            #   鉴权门把未登录请求重定向成登录页，**不是**真的泄漏；
+            #   /config/config.inc.php 返回 200 但响应体为空（PHP 已执行），
+            #   拿不出可用证据。
         ),
     ),
     LabTarget(
@@ -94,6 +115,16 @@ LABS: tuple[LabTarget, ...] = (
                     note="版本信息接口未鉴权可达（信息泄漏）"),
             Finding("challenges-api", "/api/Challenges", 200, "",
                     note="挑战清单接口可达（靶场自描述，暴露可攻击面）"),
+            Finding("dir-listing-ftp", "/ftp", 200, "listing directory",
+                    note="FTP 目录可列（robots.txt 的 Disallow 指向它）"),
+            Finding("confidential-doc", "/ftp/acquisitions.md", 200, "",
+                    note="机密文档可直读（Juice Shop 的 confidential 挑战）"),
+            Finding("backup-file", "/ftp/package.json.bak", 403, "",
+                    note="备份文件存在（403 拒绝访问，仍是可枚举的敏感产物）"),
+            Finding("whoami", "/rest/user/whoami", 200, "",
+                    note="身份接口未鉴权可达（返回匿名身份）"),
+            Finding("users-api", "/api/Users", 401, "",
+                    note="用户接口存在且要求鉴权（攻击面：认证后可达）"),
         ),
     ),
     LabTarget(
@@ -104,6 +135,12 @@ LABS: tuple[LabTarget, ...] = (
         findings=(
             Finding("home", "/", 200, "SW-Secure Lab",
                     note="首页可达并识别身份"),
+            Finding("scenario-s02", "/scenarios/malicious-traffic-intercept/",
+                    200, "S02", note="流量窃听场景页可达"),
+            Finding("scenario-s05", "/scenarios/malicious-credential-theft/",
+                    200, "S05", note="凭据窃取场景页可达"),
+            Finding("scenario-s04", "/scenarios/malicious-cache-poison/",
+                    200, "S04", note="缓存投毒场景页可达"),
         ),
     ),
 )

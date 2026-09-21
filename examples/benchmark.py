@@ -516,19 +516,22 @@ def run_g07_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
 
 
 def run_agent_lab_suite(root: Path, driver: str = "agent",
-                        max_steps: int = 12) -> list[CaseResult]:
+                        max_steps: int = 12,
+                        labs: Optional[list[str]] = None) -> list[CaseResult]:
     """agent 驱动的真实靶场评测：让 agent 自己决定探什么。
 
     与上面的 `lab` 套件互补——那个是脚本直探工具链（不经 agent 决策），
     这个把决策交给 agent，判定回到证据链核对预期发现。实现在
     `examples/lab_agent.py`（判分逻辑是纯函数，可单测、可复算）。
+
+    `labs` 只跑指定靶（如 `["dvwa"]`）——单靶迭代时不必付三靶的时间与花费。
     """
     examples = str(ROOT / "examples")
     if examples not in sys.path:
         sys.path.insert(0, examples)
     from lab_agent import run_agent_lab_suite as _run  # noqa: E402
 
-    return _run(root, driver=driver, max_steps=max_steps)
+    return _run(root, driver=driver, max_steps=max_steps, labs=labs)
 
 
 SUITES: dict[str, Callable[..., list[CaseResult]]] = {
@@ -551,7 +554,8 @@ def run(suites: list[str], driver: str = "scripted",
         workdir: Optional[Path] = None,
         pentest_target: str = "127.0.0.1",
         pentest_port: int = 8090,
-        agent_max_steps: int = 12) -> Scorecard:
+        agent_max_steps: int = 12,
+        agent_labs: Optional[list[str]] = None) -> Scorecard:
     """跑指定套件，汇总为一张评分卡。
 
     渗透套件的靶地址可传（`--target` / `--port`），否则本机 8080 被别的服务
@@ -573,7 +577,8 @@ def run(suites: list[str], driver: str = "scripted",
                                        port=pentest_port))
         elif name == "agent-lab":
             card.results.extend(runner(base / name, driver=driver,
-                                       max_steps=agent_max_steps))
+                                       max_steps=agent_max_steps,
+                                       labs=agent_labs))
         else:
             card.results.extend(runner(base / name, driver=driver))
     return card
@@ -613,13 +618,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="渗透套件的靶端口（默认 8090；8080 常被真实靶场占用）")
     parser.add_argument("--max-steps", type=int, default=12,
                         help="agent-lab 套件的单靶决策步数上限（默认 12）")
+    parser.add_argument("--labs", default="",
+                        help="agent-lab 只跑指定靶（逗号分隔，如 dvwa；缺省全跑）")
     args = parser.parse_args(argv)
 
     suites = (sorted(set(SUITES) - ALL_SUITES_EXCLUDE)
               if args.suite == "all"
               else [s.strip() for s in args.suite.split(",") if s.strip()])
+    labs = [s.strip() for s in args.labs.split(",") if s.strip()] or None
     card = run(suites, driver=args.driver, pentest_target=args.target,
-               pentest_port=args.port, agent_max_steps=args.max_steps)
+               pentest_port=args.port, agent_max_steps=args.max_steps,
+               agent_labs=labs)
     print(card.render())
 
     out = Path(args.out) if args.out else DEFAULT_OUT / "run.json"

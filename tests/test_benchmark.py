@@ -453,6 +453,56 @@ def test_agent_lab_workdir_is_root_not_nested(monkeypatch, tmp_path):
     assert seen["workdir"] == str(root), "工作目录不该再套一层"
 
 
+def test_agent_lab_labs_filter_passes_through(monkeypatch, tmp_path):
+    """`--labs` 只跑指定靶（单靶迭代时不必付三靶的时间与花费）。"""
+    import benchmark
+    from penagent.llm import LLMConfig
+
+    monkeypatch.setattr(LLMConfig, "ready", lambda self: False)
+    card = benchmark.run(["agent-lab"], workdir=tmp_path,
+                         agent_labs=["dvwa"])
+    assert [r.case_id for r in card.results] == ["dvwa"]
+
+
+def test_lab_ground_truth_expansion_pinned():
+    """扩容后的预期发现要留着——清单被误删会让分数虚高。"""
+    from lab import get_lab
+
+    names = {lab_id: {f.name for f in get_lab(lab_id).findings}
+             for lab_id in ("dvwa", "juice-shop", "sw-secure-lab")}
+    assert {"installer", "dir-listing-vulns"} <= names["dvwa"]
+    assert {"dir-listing-ftp", "confidential-doc", "backup-file",
+            "whoami", "users-api"} <= names["juice-shop"]
+    assert {"scenario-s02", "scenario-s05", "scenario-s04"} <= \
+        names["sw-secure-lab"]
+
+
+def test_lab_ground_truth_markers_are_observable():
+    """有标记的发现，标记必须来自**探测输出里看得见的**字段。
+
+    `http_probe` 只返回状态/头/标题，不返回正文——标记若取自正文
+    （如 /ftp/acquisitions.md 的 "confidential"），判定永远命中不了。
+    这条把"标记可用"钉住：每条带标记的路径，探一次必须能看到该标记。
+    """
+    from lab import DEFAULT_URLS, LABS, _kernel_registry, reachable
+
+    registry = None
+    for lab in LABS:
+        base = DEFAULT_URLS.get(lab.id, "")
+        if not base or not reachable(base):
+            continue          # 靶不在时跳过（环境缺失不等于失败）
+        if registry is None:
+            registry = _kernel_registry()
+        for f in lab.findings:
+            if not f.expect_contains:
+                continue
+            result = registry.execute("http_probe", {"url": base + f.path})
+            blob = str(result.output)
+            assert f.expect_contains in blob, (
+                f"{lab.id}{f.path} 的标记 {f.expect_contains!r} "
+                f"在探测输出里看不到: {blob[:160]}")
+
+
 def test_agent_lab_registered_and_excluded_from_all():
     """套件已注册；`--suite all` 不含它（真 LLM 有花费，需显式点名）。"""
     from benchmark import ALL_SUITES_EXCLUDE, SUITES
