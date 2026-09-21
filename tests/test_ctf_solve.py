@@ -124,10 +124,16 @@ def test_rsactf_attack_review_locks_host_direct_tier():
     """F-E2E-3 定档契约：rsactf_attack 保持宿主直跑，人工把关由权限档位承担。
 
     静默改档会同时破坏两条既有保证：
-    1) Docker-free 环境的 CTF 解题链路——沙箱镜像内没有 RsaCtfTool，
-       提权为隔离档即该工具不可用（评测将退回 Docker 依赖）；
+    1) Docker-free 环境的 CTF 解题链路——**默认镜像 python:3.12-slim 内不含
+       RsaCtfTool**（专用镜像 proteus-sandbox 才有，且需显式配置
+       PENTEST_DOCKER_IMAGE），提权为隔离档即该工具在未配置环境下不可用
+       （评测将退回 Docker 依赖）；
     2) 纯本地计算的定位——离线数学攻击、参数经 flag 渲染无注入面。
     改档必须连同 docs/端到端实战演练.md 的 F-E2E-3 处置一起重新评审。
+
+    注：原措辞为"沙箱镜像内没有 RsaCtfTool"。R-15 建了专用镜像后该表述不再
+    准确（镜像里有了），但**结论不变**——约束从"镜像内没有"变成"需专用镜像
+    且需显式配置"，Docker-free 环境仍跑不了。
     """
     center = build_center()
     specs = {e.name: e.spec for e in center.discover(mode_id="ctf-crypto")}

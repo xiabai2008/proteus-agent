@@ -311,12 +311,29 @@ def test_containerize_command_rewrites_host_python():
     assert cmd[1:] == ["-m", "RsaCtfTool", "-n", "1"]
 
 
-def test_containerize_command_leaves_other_paths_alone():
-    """只重写解释器路径——其它宿主路径无脑替换会把错误藏起来。"""
+def test_containerize_command_maps_host_tool_path_to_name():
+    """宿主工具二进制路径（`.../nuclei.exe`）→ 容器内工具名。
+
+    这是 R-15 渗透侧的核心：external_tools.json 写的是宿主绝对路径
+    （`${PENTEST_TOOLS}/tools/nuclei.exe`），容器里不存在；镜像把 Linux 版
+    装到 PATH，所以映射成工具名即可解析。
+    """
     from penagent.sandbox import containerize_command
 
-    other = [r"C:\Tools\bin\nuclei.exe", "-u", "http://x"]
-    assert containerize_command(other) == other
+    cmd = containerize_command([r"C:\Tools\bin\nuclei.exe", "-u", "http://x"])
+    assert cmd == ["nuclei", "-u", "http://x"]
+
+
+def test_containerize_command_keeps_bare_names_and_args():
+    """裸工具名与普通参数原样保留（不做通用路径替换——那会藏起错误）。"""
+    from penagent.sandbox import containerize_command
+
+    cmd = containerize_command(["sqlmap", "-u", "http://x", "--batch"])
+    assert cmd == ["sqlmap", "-u", "http://x", "--batch"]
+    # 非可执行参数（目标 URL、字典路径）不得被改写
+    cmd2 = containerize_command(["ffuf", "-u", "http://a/FUZZ",
+                                 "-w", r"C:\dicts\10k.txt"])
+    assert cmd2 == ["ffuf", "-u", "http://a/FUZZ", "-w", r"C:\dicts\10k.txt"]
 
 
 def test_wrap_contains_no_host_python_path():
@@ -337,12 +354,8 @@ def _image_exists(name: str) -> bool:
     return proc.returncode == 0
 
 
-def test_sandbox_image_runs_rsactftool():
-    """沙箱专用镜像内能跑 RsaCtfTool（R-15 的目标能力）。
-
-    镜像未构建 / 容器不可用时跳过——那是环境缺失，不是缺陷。
-    构建方式见 docker/Dockerfile.sandbox。
-    """
+def _sandbox_image_or_skip():
+    """取专用镜像的 runner（容器/镜像不可用时跳过）。"""
     image = "proteus-sandbox:latest"
     runner = DockerRunner(image=image, probe_timeout=8.0)
     ok, reason = runner.available()
@@ -351,14 +364,71 @@ def test_sandbox_image_runs_rsactftool():
     if not _image_exists(image):
         pytest.skip(f"沙箱专用镜像未构建（docker build -f "
                     f"docker/Dockerfile.sandbox -t {image} docker/）")
+    return runner
 
+
+def test_sandbox_image_runs_rsactftool():
+    """沙箱专用镜像内能跑 RsaCtfTool，且**用生产调用形态**。
+
+    生产形态是 `{python} -m RsaCtfTool ...`（见 penagent/ctf_tools.json 的
+    command）。此处显式用同一形态，而不是 `python -c "import RsaCtfTool"`
+    ——后者只证明包可导入，对真实调用路径零覆盖。
+    """
+    runner = _sandbox_image_or_skip()
     spec = ToolSpec(name="rsa_probe", kind="cli", dangerous=True, timeout=120,
-                    command=[sys.executable, "-c",
-                             "import RsaCtfTool; print('rsactf-ready')"],
+                    command=[sys.executable, "-m", "RsaCtfTool", "--help"],
                     workdir=".")
     registry = ToolRegistry(sandbox=build_sandbox("docker", runner=runner))
     registry.register(spec)
 
     result = registry.execute("rsa_probe", {})
     assert result.ok, f"容器内执行失败: {str(result.error)[:200]}"
-    assert "rsactf-ready" in str(result.output)
+    out = str(result.output).lower()
+    assert "--publickey" in out and "help" in out, \
+        f"RsaCtfTool 未按生产形态运行: {str(result.output)[:120]}"
+
+
+def test_sandbox_image_runs_sqlmap_through_command_rewrite():
+    """渗透工具的完整容器化链路（R-15 渗透侧）。
+
+    覆盖三件事同时生效：
+    1. `containerize_command` 把宿主 `.exe` 路径重写为容器内工具名；
+    2. 镜像内确实装了这个工具（docker/Dockerfile.sandbox）；
+    3. 执行走的是**生产路径** `ToolRegistry.execute` → 沙箱裁决 → 容器。
+
+    路径写成宿主形态（含目录 + `.exe`）——那正是 external_tools.json 里的
+    实际写法，不能简化成裸名否则测不到重写逻辑。
+
+    `egress=True`：出网工具在 `network_egress=false` 的模式下会被沙箱拒绝
+    （本用例实测到该拒绝，即 docs/修复待办清单.md R-16 记录的那个矛盾）。
+    这里测的是**容器化链路本身**，故显式放开出网。
+    """
+    runner = _sandbox_image_or_skip()
+    spec = ToolSpec(name="sqlmap_probe", kind="cli", dangerous=True,
+                    network=True, timeout=120, workdir=".",
+                    command=[r"C:\Tools\reasonix_sentou\tools\sqlmap.exe",
+                             "--version"])
+    registry = ToolRegistry(
+        sandbox=build_sandbox("docker", runner=runner, egress=True))
+    registry.register(spec)
+
+    result = registry.execute("sqlmap_probe", {})
+    assert result.ok, f"容器内执行失败: {str(result.error)[:200]}"
+    assert "#pip" in str(result.output), \
+        f"未取到 sqlmap 版本: {str(result.output)[:120]}"
+
+
+def test_egress_off_blocks_networked_tool_before_container():
+    """`network_egress=false` 时出网工具被**沙箱层**拒绝（R-16 的机制）。
+
+    这条钉住当前行为：不是缺陷，是一个需要决策的配置矛盾——渗透工具本质
+    需要出网，而 pentest-standard 声明 `network_egress: false`。
+    """
+    spec = ToolSpec(name="net_tool", kind="cli", dangerous=True,
+                    network=True, command=["echo", "x"])
+    registry = ToolRegistry(sandbox=build_sandbox("docker", egress=False))
+    registry.register(spec)
+
+    result = registry.execute("net_tool", {})
+    assert not result.ok
+    assert "网络出口" in result.error

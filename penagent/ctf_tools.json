@@ -18,7 +18,7 @@
         "id": "F-E2E-3",
         "date": "2026-09-19",
         "verdict": "维持宿主直跑（dangerous=false，无强制隔离声明）",
-        "rationale": "RsaCtfTool 为离线数学攻击 CLI：参数经 flag 渲染进 subprocess 列表（无 shell 注入面）、无网络出口；沙箱镜像内无 RsaCtfTool，提权为隔离档等于废掉该工具。人工把关由 ctf-* 模式 permission.require_confirm 承担（ask 档）。若要改档，必须连同 tests/test_ctf_solve.py 的契约用例与 docs/端到端实战演练.md 一起重新评审。"
+        "rationale": "RsaCtfTool 为离线数学攻击 CLI：参数经 flag 渲染进 subprocess 列表（无 shell 注入面）、无网络出口。原依据之一'沙箱镜像内无 RsaCtfTool，提权等于废掉该工具'已被 R-15 部分推翻——专用镜像 proteus-sandbox 内已装 RsaCtfTool；但约束仍在：默认镜像 python:3.12-slim 不含它，且需显式配置 PENTEST_DOCKER_IMAGE，故 Docker-free 环境提权后仍不可用，结论维持宿主直跑。人工把关由 ctf-* 模式 permission.require_confirm 承担（ask 档）。若要改档，必须连同 tests/test_ctf_solve.py 的契约用例与 docs/端到端实战演练.md 一起重新评审。"
       }
     },
     "python_solve": {

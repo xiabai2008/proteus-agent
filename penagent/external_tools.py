@@ -46,6 +46,15 @@ def load_external_tools(registry: ToolRegistry,
             timeout=int(spec.get("timeout", 600)),
             dangerous=spec.get("dangerous", False),
             positional=spec.get("positional", False),
+            # 参数级 flag 与隔离/出网声明——与 registry.load_cli_config 的
+            # schema 对齐。此前这里漏了这三个字段，导致 external_tools.json
+            # 即使写了 network/sandbox 也不生效：需要出网的渗透工具在容器内
+            # 一律被 `--network none` 断网（见 docs/修复待办清单.md R-16）。
+            arg_flags={k: str(v.get("flag")) for k, v in
+                       (spec.get("parameters") or {}).items()
+                       if isinstance(v, dict) and "flag" in v},
+            sandbox=str(spec.get("sandbox", "") or ""),
+            network=bool(spec.get("network", False)),
         ))
         loaded += 1
     note = data.get("note", "")

@@ -47,24 +47,42 @@ class SandboxDecision:
     wrap: Optional[Callable[[list], list]] = None  # 命令包装器（容器执行用）
 
 
+def _basename_no_exe(text: str) -> str:
+    """从宿主可执行文件路径取容器内可解析的工具名。
+
+    只对 `.exe` 路径生效（Windows 宿主的工具二进制），且要求确实带目录
+    （`base != text`）——否则裸名字（如 `sqlmap`）本身就该原样保留。
+    """
+    base = os.path.basename(text)
+    if base == text or not base.lower().endswith(".exe"):
+        return ""
+    return base[:-4]
+
+
 def containerize_command(command: list[str]) -> list[str]:
-    """把命令里的**宿主解释器路径**重写为容器内的 `python`（R-15）。
+    """把命令里的**宿主路径**重写为容器内可解析的形式（R-15）。
 
-    `ctf_tools.json` 的 `{python}` 在配置装载时被展开为 `sys.executable`
-    ——宿主绝对路径（如 `D:\\tools\\Python 3.12.9\\python.exe`）。宿主直跑
-    时这是对的；容器里那个路径不存在，而镜像自带 python，直接叫 `python`。
+    两类需要重写：
 
-    只重写**解释器路径**，不做通用路径替换：其它宿主路径（工具二进制等）
-    本就需要在镜像内单独安装（见 `docker/Dockerfile.sandbox`），无脑替换
-    会把错误藏起来而不是暴露——那正是 R-15 想避免的。
+    1. **宿主解释器路径**——`ctf_tools.json` 的 `{python}` 在配置装载时展开为
+       `sys.executable`（如 `D:\\tools\\Python 3.12.9\\python.exe`）。容器里
+       那个路径不存在，镜像自带 python，用 `python`。
+    2. **宿主工具二进制路径**——`external_tools.json` 写的
+       `${PENTEST_TOOLS}/tools/nuclei.exe` 之类。镜像把这些工具的 Linux 版装到
+       `/usr/local/bin`，容器内直接用**工具名**（靠 PATH 解析）。
+
+    其它参数（目标、选项）原样保留——不做通用路径替换，那会把"镜像里没装
+    这个工具"的错误藏起来，而它本该以 `command not found` 的形式暴露。
     """
     host_python = os.path.normcase(os.path.normpath(sys.executable))
     out = []
     for part in command:
-        if os.path.normcase(os.path.normpath(str(part))) == host_python:
+        text = str(part)
+        if os.path.normcase(os.path.normpath(text)) == host_python:
             out.append("python")
-        else:
-            out.append(str(part))
+            continue
+        tool = _basename_no_exe(text)
+        out.append(tool or text)
     return out
 
 

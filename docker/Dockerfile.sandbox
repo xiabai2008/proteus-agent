@@ -38,7 +38,25 @@ RUN pip install --no-cache-dir \
 # 构建期自检：装不上就让构建失败，而不是等到运行时才发现
 RUN python -c "import RsaCtfTool; print('RsaCtfTool ready')"
 
-# 说明：python_solve 只需容器自带的 python（`python -c`），无需额外安装；
-# 宿主的外置 CLI 工具（sqlmap / nuclei / fscan 等）是平台相关的宿主二进制，
-# 无法直接搬进 Linux 容器——若要它们也进容器，需在本文件里按需安装对应
-# 的 Linux 版本（目前单列，见 docs/修复待办清单.md R-15 的说明）。
+# 说明：python_solve 只需容器自带的 python（`python -c`），无需额外安装。
+
+# ----------------------------------------------------------------------
+# 渗透工具（R-15 扩展）
+#
+# 选择标准：**零配置依赖**——装上就能用，不需要额外的模板 / 字典 / PoC 文件
+# （那些在容器里没有，装了工具也跑不起来）。
+#   - sqlmap：SQL 注入检测，内置检测逻辑，无需外部数据文件
+#
+# 未装及原因（诚实记录，不是遗漏）：
+#   - nuclei：需要 templates 仓库（容器内无，且首次运行要联网下载）
+#   - ffuf / gobuster：需要字典（宿主 ${PENTEST_TOOLS}/config/dictionaries/）
+#   - pocsuite3：需要 PoC 文件
+#   - fscan / naabu / dalfox：Go 二进制，可装（经代理下载 release），本次未纳入
+#
+# **网络语义（重要）**：容器内的 `127.0.0.1` 是**容器自己**，不是宿主。要访问
+# 宿主上的靶场/服务须用 `host.docker.internal`（且工具要在 external_tools.json
+# 里声明 `network=true` 才会走 bridge 而非 `--network none`）。实测：
+# `--network none` 下两个地址都不可达；`--network bridge` 下只有
+# host.docker.internal 可达。
+RUN pip install --no-cache-dir sqlmap
+

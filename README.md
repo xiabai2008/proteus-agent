@@ -218,9 +218,9 @@ proteus-agent/
 
 **安全姿态**：PolicyGate 由 ToolRegistry 持有，目标白名单 + 高危授权在 ReAct / MCP / Web 全入口机制性生效；MCP 失败语义修正（isError）；ctf-* 模式的脚本执行强制沙箱档位，无容器环境拒绝而非裸跑。预算字段已全部机制性消费：`scope.network_egress=false` 闸门+沙箱双层拒绝出网工具、`budget.model_tier` 档位模型路由（recon/strong 分档）、`budget.max_minutes` 超时换策略收口（`max_cost_usd` 因网关不回 token 用量标注预留）。
 
-**安全评审**：F-E2E-3 已收口——`rsactf_attack` 维持宿主直跑（离线数学攻击、无网络出口、镜像内无 RsaCtfTool，提权为隔离档等于废掉该工具），人工把关由 require_confirm 档位承担；结论与依据登记于 `penagent/ctf_tools.json`，契约用例 `test_rsactf_attack_review_locks_host_direct_tier` 锁定防止静默改档。
+**安全评审**：F-E2E-3 已收口——`rsactf_attack` 维持宿主直跑（离线数学攻击、无网络出口；专用镜像 proteus-sandbox 虽已内置 RsaCtfTool（R-15），但默认镜像不含它且需显式配置 `PENTEST_DOCKER_IMAGE`，Docker-free 环境提权后仍不可用），人工把关由 require_confirm 档位承担；结论与依据登记于 `penagent/ctf_tools.json`，契约用例 `test_rsactf_attack_review_locks_host_direct_tier` 锁定防止静默改档。
 
-**下一步**：Web 控制台 ask 档人工确认通道实测（F-E2E-5）· Docker 稳定后 python_solve 容器真跑与 RsaCtfTool 镜像化（F-E2E-4 关联）· SQLi/暴力破解等 require_confirm 审批闭环的实战覆盖 · 记忆/技能进化长周期数据沉淀。
+**下一步**：Web 控制台 ask 档人工确认通道实测（F-E2E-5）· `pentest-standard` 的 `scope.network_egress: false` 与渗透工具出网需求的矛盾（R-16）· SQLi/暴力破解等 require_confirm 审批闭环的实战覆盖 · 镜像内渗透工具扩到 nuclei/ffuf 等（需先解决模板/字典依赖）· 记忆/技能进化长周期数据沉淀。
 
 ---
 
