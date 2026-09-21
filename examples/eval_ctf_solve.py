@@ -1,23 +1,31 @@
 """阶段二验收：CTF Crypto/Misc 工具链端到端解题（离线构造样例题）。
 
-三道题：
-  1. simple-rsa     ：相近素数 RSA（n/e/c 已知，需分解后解密）
-  2. b64-stego      ：base64 隐写（多个 base64 块，只有一块解出 flag）
-  3. encoding-chain ：编码链（hex(base64(rot13(flag)))）
+题集用**声明式规格**描述（编码链 / 隐写块 / RSA 参数），生成器与解题决策
+序列都从规格派生——加题只需在下面的 `*_CASES` 表里加一行。
+
+题目分三类：
+  1. 编码题（ENC_*）  ：flag 经若干层编码变成密文，用 codec_chain 逆序解开
+  2. 隐写题（STEGO_*）：多块候选里只有一块解出 flag（其余是诱饵）
+  3. RSA 题（RSA_*）  ：相近素数，用 rsactf_attack 的 fermat 攻击分解解密
+
+约束（题集必须满足）：
+- **题面文件不含明文 flag**（真解出来的，不是抄出来的；测试钉住）
+- 只使用本机可用的工具链——不含 `python_solve`（它声明 sandbox: docker，
+  依赖容器，见 docs/沙箱降级评估.md）。这也是为什么编码题不用一次性脚本。
+- 每道题都确定性可解（无 flaky 题）。
 
 离线说明：仓库不带 .env / API key，LLM 决策用**脚本化序列**替代（扮演模型
-选工具的角色）；工具执行（RsaCtfTool / python 沙箱 / 解码链）与 flag 判定
+选工具的角色）；工具执行（RsaCtfTool / 解码链 / 文件识别）与 flag 判定
 （FlagRegexVerifier）都是真实路径。
 
 运行：python examples/eval_ctf_solve.py
 """
 import base64
 import codecs
-import hashlib
 import random
 import shutil
-import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,12 +41,120 @@ from penagent.registry import build_center  # noqa: E402
 
 DATA = ROOT / "data" / "eval-ctf"
 
+# 解码工具支持的编码（与 penagent/ctf_tools.py 的 _CODECS 保持一致）
+CODECS = ("base64", "base64url", "hex", "url", "rot13", "reverse", "binary")
+
 
 # ----------------------------------------------------------------------
-# 题目构造（离线、确定性）
+# 编码器：题库构造用，与内核的解码工具互逆
+# ----------------------------------------------------------------------
+def _encode_once(text: str, codec: str) -> str:
+    """与 ctf_tools._decode_once 互逆的单步编码（生成密文用）。"""
+    name = codec.strip().lower()
+    if name == "base64":
+        return base64.b64encode(text.encode()).decode()
+    if name == "base64url":
+        return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+    if name == "hex":
+        return text.encode().hex()
+    if name == "url":
+        return urllib.parse.quote(text, safe="")
+    if name == "rot13":
+        return codecs.encode(text, "rot_13")
+    if name == "reverse":
+        return text[::-1]
+    if name == "binary":
+        return "".join(f"{b:08b}" for b in text.encode())
+    raise ValueError(f"不支持的编码: {codec!r}（可用 {CODECS}）")
+
+
+def encode_chain(flag: str, chain: list[str]) -> str:
+    """按顺序施加编码链，得到密文。解法是逆序解码。"""
+    data = flag
+    for codec in chain:
+        data = _encode_once(data, codec)
+    return data
+
+
+# ----------------------------------------------------------------------
+# 题集规格（加题只改这里）
+# ----------------------------------------------------------------------
+# 编码题：(id, 编码链（flag → 密文）, flag)
+# 每道题的解法 = 逆序解码链。链里不得出现"对纯字母数字输出再 url 编码"
+# 这类空操作组合（会让本题退化成另一道题）。
+ENCODING_CASES = [
+    # 原有题目（id 沿用，向后兼容既有测试与文档引用）
+    ("encoding-chain", ["rot13", "base64", "hex"],
+     "flag{layered_encodings_ok}"),
+    ("enc-b64", ["base64"], "flag{base64_is_not_encryption}"),
+    ("enc-b64url", ["base64url"], "flag{url_safe_alphabet_works}"),
+    ("enc-hex", ["hex"], "flag{hexdump_basics}"),
+    ("enc-url", ["url"], "flag{percent_encoding_101}"),
+    ("enc-rot13", ["rot13"], "flag{caesar_shifts_by_thirteen}"),
+    ("enc-reverse", ["reverse"], "flag{read_it_backwards}"),
+    ("enc-binary", ["binary"], "flag{bits_and_bytes}"),
+    ("enc-hex-b64", ["hex", "base64"], "flag{order_matters}"),
+    ("enc-b64-hex", ["base64", "hex"], "flag{nested_encodings}"),
+    ("enc-url-b64", ["url", "base64"], "flag{url_then_base64}"),
+    ("enc-b64-rot13", ["base64", "rot13"], "flag{rotate_after_encode}"),
+    ("enc-rot13-b64", ["rot13", "base64"], "flag{encode_after_rotate}"),
+    ("enc-rev-b64", ["reverse", "base64"], "flag{flip_then_encode}"),
+    ("enc-b64-rev", ["base64", "reverse"], "flag{encode_then_flip}"),
+    ("enc-bin-b64", ["binary", "base64"], "flag{binary_is_verbose}"),
+    ("enc-b64-bin", ["base64", "binary"], "flag{bytes_to_bits}"),
+    ("enc-hex-rot13", ["hex", "rot13"], "flag{hex_then_rotate}"),
+    ("enc-rot13-hex", ["rot13", "hex"], "flag{rotate_then_hex}"),
+    ("enc-url-hex", ["url", "hex"], "flag{percent_then_hex}"),
+    ("enc-b64-b64", ["base64", "base64"], "flag{double_base64}"),
+    ("enc-b64-url", ["base64", "url"], "flag{plus_and_slash_escaped}"),
+    ("enc-hex-b64-rot13", ["hex", "base64", "rot13"],
+     "flag{three_layers_no_sweat}"),
+    ("enc-b64-hex-reverse", ["base64", "hex", "reverse"],
+     "flag{three_layers_flipped}"),
+    ("enc-reverse-rot13-b64", ["reverse", "rot13", "base64"],
+     "flag{three_layers_rotated}"),
+    ("enc-hex-b64-rot13-reverse", ["hex", "base64", "rot13", "reverse"],
+     "flag{four_layers_deep}"),
+]
+
+# 隐写题：(id, 诱饵块编码, 真块编码, flag)
+# 判定必须来自工具输出（收口结论不含 flag）——钉住 FlagRegexVerifier 的
+# "扫任务上下文"能力，而不是只看结论。
+STEGO_CASES = [
+    # 原有题目（id 沿用）
+    ("b64-stego", "base64", "base64", "flag{b64_stego_found}"),
+    ("stego-hex", "hex", "hex", "flag{hex_dump_hides_it}"),
+    ("stego-b64url", "base64url", "base64url", "flag{urlsafe_blob_stego}"),
+    ("stego-mixed", "base64", "hex", "flag{mixed_encodings_in_log}"),
+]
+
+# RSA 题：(id, 素数位数, 相近素数的随机位数差, flag)
+RSA_CASES = [
+    # 原有题目（id 沿用）
+    ("simple-rsa", 512, 20, "flag{rsa_close_primes_pwned}"),
+    ("rsa-fermat-768", 768, 24, "flag{fermat_strikes_again}"),
+    ("rsa-fermat-1024", 1024, 28, "flag{big_keys_need_close_primes}"),
+]
+
+_DECOY_LINES = [
+    "the quick brown fox jumps over the lazy dog",
+    "nothing to see here, move along",
+    "decoy: admin panel at /admin",
+    "rotation schedule updated at 03:00 UTC",
+]
+
+
+def challenge_ids() -> list[str]:
+    """全部题目 id（不生成文件）——测试 parametrize 用。"""
+    return [c[0] for c in ENCODING_CASES] + [c[0] for c in STEGO_CASES] \
+        + [c[0] for c in RSA_CASES]
+
+
+# ----------------------------------------------------------------------
+# 素数工具（stdlib，避免测试引入 sympy 依赖）
 # ----------------------------------------------------------------------
 def _is_prime(n: int, rounds: int = 24) -> bool:
-    """Miller-Rabin 素性测试（stdlib 实现，避免测试引入 sympy 依赖）。"""
+    """Miller-Rabin 素性测试。"""
     if n < 2:
         return False
     for p in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
@@ -69,63 +185,72 @@ def _next_prime(n: int) -> int:
     return candidate
 
 
+# ----------------------------------------------------------------------
+# 题目生成（离线、确定性）
+# ----------------------------------------------------------------------
 def build_challenges(root: Path) -> dict:
-    """在 root 下生成三道离线样例题，返回题目元数据（含答案 flag）。"""
+    """在 root 下按规格生成全部题目，返回 {id: 元数据}。
+
+    元数据含 file（题面路径）、flag（答案）、以及解该题所需的额外字段。
+    """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
+    out: dict = {}
 
-    # 1) 简单 RSA：相近素数 -> fermat 攻击可解
-    rng = random.Random(20260917)
-    p = _next_prime(rng.getrandbits(512))
-    q = _next_prime(p + rng.getrandbits(20))
-    n, e = p * q, 65537
-    flag_rsa = b"flag{rsa_close_primes_pwned}"
-    c = pow(int.from_bytes(flag_rsa, "big"), e, n)
-    (root / "simple_rsa.txt").write_text(
-        "# RSA challenge (offline)\n"
-        f"n = {n}\n"
-        f"e = {e}\n"
-        f"c = {c}\n"
-        "# 提示：两个素数是相近的\n", encoding="utf-8")
+    # ---- 编码题 ----
+    for cid, chain, flag in ENCODING_CASES:
+        cipher = encode_chain(flag, chain)
+        path = root / f"{cid}.txt"
+        path.write_text(
+            f"# encoded challenge ({', '.join(chain)})\n{cipher}\n",
+            encoding="utf-8")
+        out[cid] = {"file": path, "flag": flag, "category": "encoding",
+                    "chain": chain, "cipher": cipher}
 
-    # 2) base64 隐写：多块 base64，只有一块解出 flag（其余是诱饵）
-    flag_b64 = "flag{b64_stego_found}"
-    decoys = ["the quick brown fox jumps over the lazy dog",
-              "nothing to see here, move along",
-              "decoylead: admin panel at /admin"]
-    blob_flag = base64.b64encode(flag_b64.encode()).decode()
-    blob_decoys = [base64.b64encode(d.encode()).decode() for d in decoys]
-    lines = ["# captured log fragments",
-             f"note_a={blob_decoys[0]}",
-             f"blob={blob_flag}",
-             f"note_b={blob_decoys[1]}",
-             f"meta={blob_decoys[2]}"]
-    (root / "b64_stego.txt").write_text("\n".join(lines) + "\n",
-                                        encoding="utf-8")
+    # ---- 隐写题：多块候选，只有一块解出 flag ----
+    for cid, decoy_codec, real_codec, flag in STEGO_CASES:
+        rng = random.Random(f"stego-{cid}")
+        decoys = [_encode_once(d, decoy_codec)
+                  for d in rng.sample(_DECOY_LINES, 3)]
+        real = _encode_once(flag, real_codec)
+        keys = ["note_a", "blob", "note_b", "meta"]
+        blocks = dict(zip(keys, [decoys[0], real, decoys[1], decoys[2]]))
+        lines = ["# captured log fragments"] + \
+            [f"{k}={v}" for k, v in blocks.items()]
+        path = root / f"{cid}.txt"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out[cid] = {"file": path, "flag": flag, "category": "stego",
+                    "real_codec": real_codec, "blob": real}
 
-    # 3) 编码链：hex(base64(rot13(flag)))
-    flag_chain = "flag{layered_encodings_ok}"
-    step1 = codecs.encode(flag_chain, "rot_13")
-    step2 = base64.b64encode(step1.encode()).decode()
-    step3 = step2.encode().hex()
-    (root / "encoding_chain.txt").write_text(step3 + "\n", encoding="utf-8")
+    # ---- RSA 题：相近素数（fermat 可解）----
+    for cid, bits, gap_bits, flag in RSA_CASES:
+        rng = random.Random(f"rsa-{cid}")
+        p = _next_prime(rng.getrandbits(bits))
+        q = _next_prime(p + rng.getrandbits(gap_bits))
+        n, e = p * q, 65537
+        c = pow(int.from_bytes(flag.encode(), "big"), e, n)
+        path = root / f"{cid}.txt"
+        path.write_text(
+            "# RSA challenge (offline)\n"
+            f"n = {n}\n"
+            f"e = {e}\n"
+            f"c = {c}\n"
+            "# 提示：两个素数是相近的\n", encoding="utf-8")
+        out[cid] = {"file": path, "flag": flag, "category": "crypto",
+                    "n": n, "e": e, "c": c}
 
-    return {
-        "simple-rsa": {"file": root / "simple_rsa.txt", "flag": flag_rsa.decode(),
-                       "n": n, "e": e, "c": c},
-        "b64-stego": {"file": root / "b64_stego.txt", "flag": flag_b64},
-        "encoding-chain": {"file": root / "encoding_chain.txt",
-                           "flag": flag_chain, "chain": step3},
-    }
+    return out
 
 
 # ----------------------------------------------------------------------
-# 解题：三个题目各跑一次内核（脚本化决策 + 真实工具 + 真实判定）
+# 解题：每题跑一次内核（脚本化决策 + 真实工具 + 真实判定）
 # ----------------------------------------------------------------------
-def _solve_script(challenge_id: str, meta: dict) -> list[dict]:
+def _solve_script(cid: str, meta: dict) -> list[dict]:
     """扮演"模型选工具"的脚本化决策序列（离线替代 LLM）。"""
     path = str(meta["file"])
-    if challenge_id == "simple-rsa":
+    category = meta.get("category", "")
+
+    if category == "crypto":                       # RSA
         return [
             {"thought": "先看题面文件", "tool": "file_type",
              "args": {"path": path}},
@@ -137,35 +262,36 @@ def _solve_script(challenge_id: str, meta: dict) -> list[dict]:
             {"thought": "工具输出里已给出明文", "done": True,
              "summary": f"解出：{meta['flag']}"},
         ]
-    if challenge_id == "b64-stego":
-        # 用免隔离的 codec_decode（函数工具）而非 python_solve：
-        # 后者是 dangerous+docker 档，无容器环境被沙箱正确拒绝（见
-        # docs/Web真内核实测记录.md F7），评测不应依赖 Docker 在线。
-        blob = base64.b64encode(meta["flag"].encode()).decode()
+
+    if category == "stego":
+        # 收口结论**不含 flag**：判定必须来自工具输出（FlagRegexVerifier
+        # 扫描任务上下文），这是隐写题的既有契约
+        # （tests/test_ctf_solve.py::test_stego_verdict_comes_from_tool_output）
         return [
-            {"thought": "先看题面文件，找出候选 base64 块", "tool": "file_type",
+            {"thought": "先看题面文件，找出候选块", "tool": "file_type",
              "args": {"path": path}},
-            {"thought": "对 blob 块做 base64 解码", "tool": "codec_decode",
-             "args": {"data": blob, "codec": "base64"}},
-            # 收口结论不得包含 flag（tests/test_ctf_solve.py 契约：判定必须
-            # 来自工具输出——FlagRegexVerifier 扫描任务上下文中的工具输出）
+            {"thought": f"对 blob 块做 {meta['real_codec']} 解码",
+             "tool": "codec_decode",
+             "args": {"data": meta["blob"], "codec": meta["real_codec"]}},
             {"thought": "解码结果命中 flag", "done": True,
              "summary": "blob 块解码命中目标串（见工具输出）"},
         ]
-    # encoding-chain
+
+    # 编码题：逆序解码链
+    codecs_rev = ",".join(reversed(meta["chain"]))
     return [
-        {"thought": "先读编码链原文", "tool": "file_type",
+        {"thought": "先读题面原文", "tool": "file_type",
          "args": {"path": path}},
-        {"thought": "hex -> base64 -> rot13 依次解开",
+        {"thought": f"按 {codecs_rev} 依次解开",
          "tool": "codec_chain",
-         "args": {"data": meta["chain"], "codecs": "hex,base64,rot13"}},
+         "args": {"data": meta["cipher"], "codecs": codecs_rev}},
         {"thought": "拿到明文", "done": True,
          "summary": f"解出：{meta['flag']}"},
     ]
 
 
-def solve(root: Path, challenge_id: str, meta: dict, *, mode_id: str = "ctf-crypto",
-          max_steps: int = 6):
+def solve(root: Path, challenge_id: str, meta: dict, *,
+          mode_id: str = "ctf-crypto", max_steps: int = 6):
     """对一道题跑一次内核，返回 (结果, agent)。"""
     def fake_chat_json(config, messages, **kw):
         return decisions.pop(0)
@@ -186,7 +312,7 @@ def solve(root: Path, challenge_id: str, meta: dict, *, mode_id: str = "ctf-cryp
 
 
 def solve_all(root: Path, *, verbose: bool = True) -> list[dict]:
-    """三道题全跑一遍，返回每题结果摘要。"""
+    """全部题目跑一遍，返回每题结果摘要。"""
     challenges = build_challenges(root)
     outcomes = []
     for cid, meta in challenges.items():
@@ -196,15 +322,13 @@ def solve_all(root: Path, *, verbose: bool = True) -> list[dict]:
         solved = meta["flag"] in str(result.summary) or result.outcome == "success"
         record = {"id": cid, "outcome": result.outcome, "steps": result.steps,
                   "summary": result.summary, "expected": meta["flag"],
+                  "category": meta.get("category", ""),
                   "solved": solved,
-                  "verifier": type(agent.verifier).__name__,
-                  "tools": agent.registry.names()}
+                  "verifier": type(agent.verifier).__name__}
         outcomes.append(record)
         if verbose:
-            print(f"  模式: ctf-crypto | 判定器: {record['verifier']}")
-            print(f"  可用工具: {record['tools']}")
-            print(f"  判定: {record['outcome']} | 步数: {record['steps']}")
-            print(f"  收口: {result.summary[:90]}")
+            print(f"  判定: {record['outcome']} | 步数: {record['steps']}"
+                  f" | 类别: {record['category']}")
     return outcomes
 
 
@@ -213,13 +337,18 @@ def main() -> int:
     print("=" * 68)
     print("阶段二验收：CTF Crypto/Misc 工具链端到端解题（离线）")
     print("=" * 68)
-    outcomes = solve_all(DATA)
+    outcomes = solve_all(DATA, verbose=False)
     ok = sum(1 for r in outcomes if r["solved"])
+    by_cat: dict[str, list] = {}
+    for r in outcomes:
+        by_cat.setdefault(r["category"], []).append(r)
     print("\n" + "=" * 68)
-    for record in outcomes:
-        mark = "解出" if record["solved"] else "未解出"
-        print(f"  {record['id']:16s} {record['outcome']:8s} {mark}  "
-              f"flag={record['expected']}")
+    for cat, items in sorted(by_cat.items()):
+        passed = sum(1 for i in items if i["solved"])
+        print(f"  {cat:<10} {passed}/{len(items)} 解出")
+    failed = [r for r in outcomes if not r["solved"]]
+    for r in failed:
+        print(f"  [未解出] {r['id']}: {r['summary'][:80]}")
     print(f"合计: {ok}/{len(outcomes)} 解出")
     print("=" * 68)
     return 0 if ok == len(outcomes) else 1

@@ -235,13 +235,15 @@ def run_ctf_suite(root: Path, driver: str = "scripted",
     for cid, meta in challenges.items():
         if cases and cid not in cases:
             continue
+        # 类别由题集自带（encoding / stego / crypto），不从 id 前缀猜
+        category = str(meta.get("category", "") or "")
         started = time.time()
         try:
             result, _agent = solve(root, cid, meta, mode_id="ctf-crypto")
             elapsed = time.time() - started
             got = meta["flag"] if meta["flag"] in str(result.summary) else ""
             results.append(CaseResult(
-                suite="ctf", case_id=cid, category=cid.split("-")[0],
+                suite="ctf", case_id=cid, category=category,
                 outcome=result.outcome,
                 passed=(result.outcome == "success"),
                 steps=result.steps, elapsed_s=round(elapsed, 2),
@@ -250,7 +252,7 @@ def run_ctf_suite(root: Path, driver: str = "scripted",
             ))
         except Exception as exc:                          # noqa: BLE001
             results.append(CaseResult(
-                suite="ctf", case_id=cid, category=cid.split("-")[0],
+                suite="ctf", case_id=cid, category=category,
                 outcome="failed", passed=False,
                 elapsed_s=round(time.time() - started, 2),
                 expected=meta["flag"], detail=f"{type(exc).__name__}: {exc}"))

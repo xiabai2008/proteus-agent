@@ -1,13 +1,18 @@
-"""CTF 解题工具链测试（阶段二验收：3 道离线样例题端到端解出 flag）。
+"""CTF 解题工具链测试（阶段二验收：离线题集端到端解出 flag）。
 
 覆盖：
 - 工具登记：RsaCtfTool / python 沙箱为 CLI，解码与文件识别为 function；
   每个工具都有 dangerous 标记与超时；模式可用性限定在 ctf-*
 - CLI 参数渲染：自定义 flag（RsaCtfTool 的 -n/-e）与位置参数（python -c）
-- 端到端：简单 RSA / base64 隐写 / 编码链，在 ctf-crypto 与 ctf-web 模式下解出
+- 题集结构：id 唯一、类别齐全（encoding/stego/crypto）、规模下限
+- 端到端：全部题目在 ctf-crypto 与 ctf-web 模式下解出
 - 题面文件不含明文 flag（确保是真解出来的）
+
+题集规模由 `eval_ctf_solve` 的声明式规格决定——加题只需改那边的 `*_CASES`
+表，本文件的 parametrize 从 `challenge_ids()` 派生，自动覆盖新题。
 """
 import sys
+import urllib.parse
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -16,7 +21,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 import pytest
 
-from eval_ctf_solve import build_challenges, solve  # noqa: E402
+from eval_ctf_solve import (build_challenges, challenge_ids,  # noqa: E402
+                            solve)
 from penagent.modes import load_mode  # noqa: E402
 from penagent.registry import (SOURCE_CLI, SOURCE_FUNCTION,  # noqa: E402
                                build_center)
@@ -142,12 +148,53 @@ def test_challenge_files_hide_plaintext_flag(challenges):
 
 
 # ----------------------------------------------------------------------
+# 2b. 题集结构（防止加题时写重 id / 漏类别 / 规模退化）
+# ----------------------------------------------------------------------
+def test_challenge_ids_unique_and_complete(challenges):
+    ids = challenge_ids()
+    assert len(ids) == len(set(ids)), "题集存在重复 id"
+    assert set(ids) == set(challenges.keys()), "challenge_ids 与实际题集不一致"
+
+
+def test_challenge_set_covers_all_categories(challenges):
+    cats = {meta.get("category") for meta in challenges.values()}
+    assert {"encoding", "stego", "crypto"} <= cats
+
+
+def test_challenge_set_meets_scale_floor(challenges):
+    """规模下限：3 道题不足以判断强弱（见 docs/评测骨架.md 第七节）。"""
+    assert len(challenges) >= 30
+    by_cat: dict[str, int] = {}
+    for meta in challenges.values():
+        by_cat[meta["category"]] = by_cat.get(meta["category"], 0) + 1
+    assert by_cat["encoding"] >= 20, f"编码题仅 {by_cat.get('encoding', 0)} 道"
+    assert by_cat["crypto"] >= 3, f"RSA 题仅 {by_cat.get('crypto', 0)} 道"
+
+
+def test_encoding_cases_are_not_degenerate():
+    """编码链不得含"对纯字母数字输出再 url 编码"这类空操作组合。
+
+    空操作会让本题的实际难度退化成链中另一道题，白白占一个题位。
+    """
+    from eval_ctf_solve import ENCODING_CASES, _encode_once
+
+    for cid, chain, _flag in ENCODING_CASES:
+        for i in range(len(chain) - 1):
+            step_in = chain[i + 1]
+            probe = _encode_once("flag{abcdef0123456789}", chain[i])
+            if step_in == "url":
+                # url 编码只对含保留字符的输入有效（hex 输出全是 [0-9a-f]）
+                assert probe != urllib.parse.quote(probe, safe=""), \
+                    f"{cid}: {chain[i]} -> url 是空操作"
+
+
+# ----------------------------------------------------------------------
 # 3. 端到端解题（真实工具 + 真实 flag 判定）
 # ----------------------------------------------------------------------
-@pytest.mark.parametrize("challenge_id", ["simple-rsa", "b64-stego",
-                                          "encoding-chain"])
+@pytest.mark.parametrize("challenge_id", challenge_ids())
 def test_solve_challenge_in_ctf_crypto(tmp_path, challenges, challenge_id,
                                        host_direct_sandbox):
+    """全部题集在 ctf-crypto 模式下可解（列表从题集规格派生，加题自动覆盖）。"""
     meta = challenges[challenge_id]
     result, agent = solve(tmp_path, challenge_id, meta, mode_id="ctf-crypto")
 
