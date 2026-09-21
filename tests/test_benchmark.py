@@ -100,6 +100,15 @@ def test_unknown_suite_marked_skipped_not_crash():
     assert "未知套件" in card.results[0].detail
 
 
+def test_pentest_target_and_port_are_passed_through():
+    """渗透套件的靶地址可传——否则本机 8080 被占用时既没法指定靶、
+    也没法触发 skipped 路径。"""
+    card = run(["pentest"], pentest_port=59999)
+    assert card.total == 1
+    assert card.results[0].outcome == "skipped"
+    assert "59999" in card.results[0].detail
+
+
 def test_render_includes_summary_line():
     card = Scorecard(driver="scripted", started_at="t",
                      results=[_case(cid="a"), _case(cid="b", passed=False,

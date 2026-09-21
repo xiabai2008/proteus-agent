@@ -339,8 +339,14 @@ SUITES: dict[str, Callable[..., list[CaseResult]]] = {
 # 编排
 # ----------------------------------------------------------------------
 def run(suites: list[str], driver: str = "scripted",
-        workdir: Optional[Path] = None) -> Scorecard:
-    """跑指定套件，汇总为一张评分卡。"""
+        workdir: Optional[Path] = None,
+        pentest_target: str = "127.0.0.1",
+        pentest_port: int = 8080) -> Scorecard:
+    """跑指定套件，汇总为一张评分卡。
+
+    渗透套件的靶地址可传（`--target` / `--port`），否则本机 8080 被别的服务
+    占用时既没法指定靶、也没法触发 skipped 路径。
+    """
     card = Scorecard(driver=driver,
                      started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
     base = Path(workdir) if workdir else DEFAULT_OUT
@@ -351,7 +357,12 @@ def run(suites: list[str], driver: str = "scripted",
                 suite=name, case_id="__suite__", outcome="skipped",
                 passed=False, detail=f"未知套件 {name}（可用 {sorted(SUITES)}）"))
             continue
-        card.results.extend(runner(base / name, driver=driver))
+        if name == "pentest":
+            card.results.extend(runner(base / name, driver=driver,
+                                       target=pentest_target,
+                                       port=pentest_port))
+        else:
+            card.results.extend(runner(base / name, driver=driver))
     return card
 
 
@@ -381,11 +392,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help=f"结果落盘路径（缺省 {DEFAULT_OUT}/run.json）")
     parser.add_argument("--compare", default="",
                         help="与基线结果 JSON 对比（逐例给出改进/回归）")
+    parser.add_argument("--target", default="127.0.0.1",
+                        help="渗透套件的靶主机（默认 127.0.0.1）")
+    parser.add_argument("--port", type=int, default=8080,
+                        help="渗透套件的靶端口（默认 8080）")
     args = parser.parse_args(argv)
 
     suites = (sorted(SUITES) if args.suite == "all"
               else [s.strip() for s in args.suite.split(",") if s.strip()])
-    card = run(suites, driver=args.driver)
+    card = run(suites, driver=args.driver, pentest_target=args.target,
+               pentest_port=args.port)
     print(card.render())
 
     out = Path(args.out) if args.out else DEFAULT_OUT / "run.json"
