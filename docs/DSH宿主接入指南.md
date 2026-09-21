@@ -269,49 +269,61 @@ node verify-proteus.mjs && rm verify-proteus.mjs
    决策协议——那是给内核 ReAct 循环用的，直接挂进 DSH 会话会带着未替换的占位符、
    并要求模型输出 JSON 而不是调用工具。两者同源，取向不同；
    要用原始文件可改 preset 里的 `promptPath`。
-3. **模式与 DSH 审批是两套闸**：DSH 侧审批（host 平面）管"这次调用要不要批准"，
-   内核侧 ModeProfile 管"这个工具在该模式下是否可见/可执行、参数冻结、预算与判定器"。
-   **但内核的 MCP 底层工具入口目前直连注册表、未过 Policy**（阶段一验收报告已列为遗留项），
-   因此通过 `mcp__proteus__<底层工具>` 直接调用时，只受 DSH 审批约束；
-   走 `mcp__proteus__pentest_run` 才完整经过内核的模式与护栏。
+3. **模式与 DSH 审批是两套闸（各司其职，都已生效）**：DSH 侧审批（host 平面）
+   管"这次调用要不要批准"，内核侧 ModeProfile 管"这个工具在该模式下是否可见/
+   可执行、参数冻结、预算与判定器"。`mcp__proteus__<底层工具>` 与
+   `mcp__proteus__pentest_run` **两条路径都经过内核闸门**。
 
-   **2026-09-17 实测补充（比上面这段更严重，务必看）**：被绕过的**不只是模式约束**，
-   运行期 `--targets` 目标白名单同样不生效——白名单只存在于 `PentestMCPServer.policy`
-   （`penagent/mcp.py:63`），而底层分支调的是 `self.registry.execute(name, args)`
-   （`penagent/mcp.py:147`），从不调用 `Policy.check`，所以那份 policy 是死代码。
-   实测：`--targets 127.0.0.1` 起服务后，`mcp__proteus__port_scan` 传 `127.0.0.2`
-   （loopback 但不在精确匹配的白名单里）与 `192.168.1.1`（内网）都**照常执行**并返回
-   `ok: true`，后者真实发起了 TCP 连接尝试。同一分支也不校验 `dangerous` /
-   `authorize` / permission 档位。
+   > **历史修正（2026-09-21）**：本条此前写"内核的 MCP 底层工具入口**目前直连
+   > 注册表、未过 Policy**……`--targets` 目标白名单同样不生效……那份 policy 是死
+   > 代码"，描述的是 commit `02557bd` 修复**之前**的状态。现已修复：
+   >
+   > - 闸门（目标白名单 + 高危授权 + 协议白名单）由 `ToolRegistry` 持有，裁决在
+   >   `execute()` 内部、工具体之前——ReAct 循环 / MCP 底层工具 / Web 子进程都
+   >   绕不过去；
+   > - `PentestMCPServer` 把 `--targets` 接进闸门，并新增操作员级 `--authorize`
+   >   （**调用参数里的 `authorize` 一律不生效**，避免模型自我授权）。
+   >
+   > 复测见 `docs/DSH宿主实测记录.md` 第九节：`port_scan` 打 `127.0.0.2` 返回
+   > `isError=true` + `duration_ms: 0`（拒绝发生在工具体之前）；同节还记录了复测
+   > 过程中揪出的白名单解析缺陷及修复（`Policy.normalize_targets`）。
 
-   影响面：档位的选择要按"内核不设防"来定——`proteus-ctf`（`approval: never` +
-   `danger-full-access`）下，越界目标既不弹审批、也不被内核拦。详见
-   `docs/DSH宿主实测记录.md` 的 F1；根治要改内核 `penagent/mcp.py`，超出"只改
-   `dsh/` 与 `docs/`"的范围，本次仅记录。
-4. **失败一律报成成功：`isError` 恒为 `false`**（2026-09-17 实测修正，比原描述更严重）。
-   内核 MCP server 的 `_result()` 把 `is_error` 默认成 `False`，而所有调用点都不传它
-   （`penagent/mcp.py` 的 `:134` `:137` `:139` `:144` `:148`），`ToolResult.ok` 也从未映射
-   到 `isError`。实测两种失败形态都逃逸：
+   档位选择因此不必再按"内核不设防"来定——内核侧始终有闸；`proteus-ctf` 的
+   `danger-full-access` 放宽的是**沙箱**，不是内核白名单。
+4. **失败语义已正确映射到 `isError`**：内核 MCP server 的 `_result()` 现按
+   `ToolResult.ok` / `outcome` 映射 `isError`，工具异常也走 `isError=true` 的结构化
+   结果（不占用协议级 `error`）。客户端可直接用 `isError` 判断成败。
 
-   | 调用 | 载荷 | `isError` |
-   |---|---|---|
-   | `robots_fetch` 缺参（传 `url`，schema 要 `base_url`） | `{"ok": false, "error": "missing 1 required positional argument: 'base_url'"}` | `false` |
-   | `pentest_run` 无 LLM 配置 | `{"outcome": "failed", "summary": "LLM 调用失败: 未配置 PENTEST_LLM_API_KEY", ...}` | `false` |
+   > **历史修正（2026-09-21）**：本条此前写"失败一律报成成功：`isError` **恒为
+   > `false`**"，并附两种逃逸形态的实测表——那描述的是 `02557bd` 修复前的状态，
+   > 现已修复。回归用例见 `tests/test_mcp.py::test_pentest_run_unknown_mode_is_structured_error`
+   > （断言 `isError=True`）。
+5. **安全前提（全路径一致）**：默认目标白名单仅 127.0.0.1/localhost。
+   该前提对 `pentest_run` 与 `mcp__proteus__<底层工具>` **两条路径都成立**——
+   闸门由 `ToolRegistry` 持有、裁决在 `execute()` 内部，两者都绕不过去。
 
-   注意第二种连 `ok` 字段都没有（高层能力用 `outcome` 表达结果），所以"客户端读
-   `{"ok": false}` 就能判断失败"这个说法**不成立**——严格客户端只能拿到 `isError=false`。
-   另外 `unknown tool` 那类错误是 DSH 侧拒的（`isError=true`），不是内核报的。
+   > **历史修正（2026-09-21）**：本条此前写"该前提**只在 `pentest_run` 路径成立**，
+   > `mcp__proteus__<底层工具>` 路径不成立"——那描述的是修复前的状态，现已全路径
+   > 生效。复测见 `docs/DSH宿主实测记录.md` 第九节。
 
-   修它要改 `penagent/mcp.py` 的 `_result()` 与各调用点（把 `ToolResult.ok` 映射进
-   `is_error`），属内核范围，超出"只改 `dsh/` 与 `docs/`"，本次仅记录。不影响工具
-   可见与成功调用。
-5. **安全前提（按路径区分，别一概而论）**：默认目标白名单仅 127.0.0.1/localhost。
-   该前提**只在 `pentest_run` 路径成立**（它在内核里跑，过 Policy）；
-   `mcp__proteus__<底层工具>` 路径不成立（见上面第 3 条实测）。因此"本接入默认只在
-   回环上活动"这句话**不能当作底层工具路径的保证**。仅用于授权范围内的受控安全实验。
+   另注意 DSH 路径下有两套**独立的松紧旋钮**：内核 `ask` 档（被 preset 的
+   `--authorize` 放开，不再拦内层工具）与 **DSH 的 `approval` 档位**（实际把关者，
+   见 `dsh/proteus.cordis.patch.yml`）。用哪道闸、开多松，由 preset 档位决定。
 
 6. **函数型工具静默丢弃未知参数**：`ToolRegistry.execute` 先按 `spec.parameters`
    过滤实参再调用（`penagent/tools.py:100`），所以传错参数名不会得到"未知参数"提示，
    而是参数被丢掉、再由 Python 抛缺参 TypeError（实测 `robots_fetch` 传 `url` 得
    `missing 1 required positional argument: 'base_url'`）。客户端只要照着
    `inputSchema` 传参就不受影响，但报错信息对模型不友好。属内核范围，本次仅记录。
+
+7. **MCP 行现在带两个关键参数（2026-09-21 起）**：`--default-mode pentest-standard`
+   与 `--discover-mcp`。
+
+   - `--default-mode`：`pentest_run` 的 `mode` 是**可选**参数，模型省略时此前会走
+     无模式路径——沙箱裁决缺失（危险 CLI 工具直跑宿主）、记忆落 `default` 分区、
+     步数退回 12。现在省略即回落到 `pentest-standard`，模式约束始终在线
+     （见 `docs/修复待办清单.md` R-1）。
+   - `--discover-mcp`：真正连接 `mcp_servers.json` 声明的外部 server。默认不连接是
+     为避免启动被不可达的外部服务拖住，代价是这些能力悬空（R-14）。实测开启后
+     工具数 **20 → 41**（seckb 知识库 4 工具 + chameleon 12 工具），不可达的
+     server（如未启动的 RayScan）**优雅跳过**并记入 `summary().notes`，不抛异常。

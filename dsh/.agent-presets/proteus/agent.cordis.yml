@@ -211,7 +211,7 @@
     transport: stdio
     serverName: proteus
     command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
-    args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'pentest-standard']
+    args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'pentest-standard', '--discover-mcp']
     cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
     env:
       PENTEST_LLM_BASE_URL: !!js process.env.PENTEST_LLM_BASE_URL ?? ''
