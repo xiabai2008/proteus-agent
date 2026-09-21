@@ -1,0 +1,44 @@
+# 沙箱专用镜像：在 python:3.12-slim 基础上预装隔离执行所需的工具。
+#
+# 为什么需要它（见 docs/修复待办清单.md R-15）：
+# 默认的 python:3.12-slim 内**没有**宿主的外置工具（RsaCtfTool 等），而
+# penagent/ctf_tools.json 的 `{python}` 会被展开为**宿主**解释器路径——
+# 容器内既找不到那个路径，也没有对应工具。结果是：sandbox=docker 模式下
+# 外部 CLI 工具的隔离执行实际不可用（只有内置 function 工具能跑）。
+#
+# 本镜像把工具装进容器，配合 DockerRunner 的命令容器化
+# （penagent/sandbox.py），隔离执行才真正闭环。
+#
+# 构建：
+#   docker build -f docker/Dockerfile.sandbox -t proteus-sandbox:latest docker/
+#
+# 启用（写进不入库的 .env）：
+#   PENTEST_DOCKER_IMAGE=proteus-sandbox:latest
+#
+# 未配置该变量时仍用缺省 python:3.12-slim——隔离执行的路径适配仍然正确
+# （见 CONTAINER_WORKDIR），只是没有外置工具可用。
+FROM python:3.12-slim
+
+# CTF 模式 rsactf_attack 的依赖：RsaCtfTool 及其密码学后端。
+#
+# **RsaCtfTool 不在 PyPI**（发行名 rsactftool 查询无结果），只能从 GitHub 装。
+# 而当前网络下 github.com **直连不可达**（宿主与容器实测均超时），故默认走
+# GitHub 代理；代理从两侧都可达（实测 200），且能直连时用 --build-arg 覆盖：
+#   docker build --build-arg RSACTFTOOL_BASE=https://github.com \
+#                -f docker/Dockerfile.sandbox -t proteus-sandbox:latest docker/
+#
+# 钉住 commit（与本机安装的 direct_url.json 一致）保证可复现。
+ARG RSACTFTOOL_BASE=https://ghproxy.net/https://github.com
+ARG RSACTFTOOL_COMMIT=7c98848f1945de3e67a420871e8672f5ad9aa5d5
+# 不显式列 pycryptodome：RsaCtfTool 自带该依赖（钉的是 3.10.4），再显式装最新版
+# 会引入版本冲突（实测 build 失败，而单独装 tarball 成功）。
+RUN pip install --no-cache-dir \
+      "${RSACTFTOOL_BASE}/RsaCtfTool/RsaCtfTool/archive/${RSACTFTOOL_COMMIT}.tar.gz"
+
+# 构建期自检：装不上就让构建失败，而不是等到运行时才发现
+RUN python -c "import RsaCtfTool; print('RsaCtfTool ready')"
+
+# 说明：python_solve 只需容器自带的 python（`python -c`），无需额外安装；
+# 宿主的外置 CLI 工具（sqlmap / nuclei / fscan 等）是平台相关的宿主二进制，
+# 无法直接搬进 Linux 容器——若要它们也进容器，需在本文件里按需安装对应
+# 的 Linux 版本（目前单列，见 docs/修复待办清单.md R-15 的说明）。

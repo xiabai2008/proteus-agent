@@ -295,3 +295,70 @@ def test_docker_container_execution_actually_works(tmp_path):
     result = registry.execute("probe", {})
     assert result.ok, f"容器内执行失败: {result.error[:200]}"
     assert "container-ok" in str(result.output)
+
+
+# ----------------------------------------------------------------------
+# 2c. 命令容器化：{python} 展开为宿主路径，容器内必须改成 python（R-15）
+#
+# ctf_tools.json 的 {python} 在配置装载时展开为 sys.executable（宿主绝对
+# 路径）。宿主直跑没问题；容器里那个路径不存在——镜像自带 python。
+# ----------------------------------------------------------------------
+def test_containerize_command_rewrites_host_python():
+    from penagent.sandbox import containerize_command
+
+    cmd = containerize_command([sys.executable, "-m", "RsaCtfTool", "-n", "1"])
+    assert cmd[0] == "python"
+    assert cmd[1:] == ["-m", "RsaCtfTool", "-n", "1"]
+
+
+def test_containerize_command_leaves_other_paths_alone():
+    """只重写解释器路径——其它宿主路径无脑替换会把错误藏起来。"""
+    from penagent.sandbox import containerize_command
+
+    other = [r"C:\Tools\bin\nuclei.exe", "-u", "http://x"]
+    assert containerize_command(other) == other
+
+
+def test_wrap_contains_no_host_python_path():
+    """wrap 产出的命令里不得残留宿主解释器路径。"""
+    from penagent.sandbox import DockerRunner
+
+    spec = ToolSpec(name="t", kind="cli", dangerous=True)
+    cmd = DockerRunner().wrap([sys.executable, "-c", "print(1)"], spec)
+    assert sys.executable not in cmd
+    assert "python" in cmd
+
+
+def _image_exists(name: str) -> bool:
+    import subprocess
+
+    proc = subprocess.run(["docker", "image", "inspect", name],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
+
+
+def test_sandbox_image_runs_rsactftool():
+    """沙箱专用镜像内能跑 RsaCtfTool（R-15 的目标能力）。
+
+    镜像未构建 / 容器不可用时跳过——那是环境缺失，不是缺陷。
+    构建方式见 docker/Dockerfile.sandbox。
+    """
+    image = "proteus-sandbox:latest"
+    runner = DockerRunner(image=image, probe_timeout=8.0)
+    ok, reason = runner.available()
+    if not ok:
+        pytest.skip(f"容器不可用: {reason}")
+    if not _image_exists(image):
+        pytest.skip(f"沙箱专用镜像未构建（docker build -f "
+                    f"docker/Dockerfile.sandbox -t {image} docker/）")
+
+    spec = ToolSpec(name="rsa_probe", kind="cli", dangerous=True, timeout=120,
+                    command=[sys.executable, "-c",
+                             "import RsaCtfTool; print('rsactf-ready')"],
+                    workdir=".")
+    registry = ToolRegistry(sandbox=build_sandbox("docker", runner=runner))
+    registry.register(spec)
+
+    result = registry.execute("rsa_probe", {})
+    assert result.ok, f"容器内执行失败: {str(result.error)[:200]}"
+    assert "rsactf-ready" in str(result.output)

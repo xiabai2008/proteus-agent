@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -44,6 +45,27 @@ class SandboxDecision:
     reason: str = ""
     isolated: bool = False                       # 是否进容器
     wrap: Optional[Callable[[list], list]] = None  # 命令包装器（容器执行用）
+
+
+def containerize_command(command: list[str]) -> list[str]:
+    """把命令里的**宿主解释器路径**重写为容器内的 `python`（R-15）。
+
+    `ctf_tools.json` 的 `{python}` 在配置装载时被展开为 `sys.executable`
+    ——宿主绝对路径（如 `D:\\tools\\Python 3.12.9\\python.exe`）。宿主直跑
+    时这是对的；容器里那个路径不存在，而镜像自带 python，直接叫 `python`。
+
+    只重写**解释器路径**，不做通用路径替换：其它宿主路径（工具二进制等）
+    本就需要在镜像内单独安装（见 `docker/Dockerfile.sandbox`），无脑替换
+    会把错误藏起来而不是暴露——那正是 R-15 想避免的。
+    """
+    host_python = os.path.normcase(os.path.normpath(sys.executable))
+    out = []
+    for part in command:
+        if os.path.normcase(os.path.normpath(str(part))) == host_python:
+            out.append("python")
+        else:
+            out.append(str(part))
+    return out
 
 
 class DockerRunner:
@@ -96,7 +118,7 @@ class DockerRunner:
                 "--network", self.network_mode(spec),
                 "-v", f"{host_dir}:{CONTAINER_WORKDIR}",
                 "-w", CONTAINER_WORKDIR,
-                self.image, *command]
+                self.image, *containerize_command(command)]
 
     def network_mode(self, spec) -> str:
         """默认断网；工具显式声明需要出网时才给 bridge。"""
