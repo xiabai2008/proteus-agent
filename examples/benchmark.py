@@ -518,7 +518,8 @@ def run_g07_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
 def run_agent_lab_suite(root: Path, driver: str = "agent",
                         max_steps: int = 12,
                         labs: Optional[list[str]] = None,
-                        seed: bool = False) -> list[CaseResult]:
+                        seed: bool = False, reset: bool = False,
+                        repeat: int = 1, raw_tag: str = "") -> list[CaseResult]:
     """agent 驱动的真实靶场评测：让 agent 自己决定探什么。
 
     与上面的 `lab` 套件互补——那个是脚本直探工具链（不经 agent 决策），
@@ -535,7 +536,7 @@ def run_agent_lab_suite(root: Path, driver: str = "agent",
     from lab_agent import run_agent_lab_suite as _run  # noqa: E402
 
     return _run(root, driver=driver, max_steps=max_steps, labs=labs,
-                seed=seed)
+                seed=seed, reset=reset, repeat=repeat, raw_tag=raw_tag)
 
 
 SUITES: dict[str, Callable[..., list[CaseResult]]] = {
@@ -560,7 +561,10 @@ def run(suites: list[str], driver: str = "scripted",
         pentest_port: int = 8090,
         agent_max_steps: int = 12,
         agent_labs: Optional[list[str]] = None,
-        agent_seed: bool = False) -> Scorecard:
+        agent_seed: bool = False,
+        agent_reset: bool = False,
+        agent_repeat: int = 1,
+        agent_raw_tag: str = "") -> Scorecard:
     """跑指定套件，汇总为一张评分卡。
 
     渗透套件的靶地址可传（`--target` / `--port`），否则本机 8080 被别的服务
@@ -583,7 +587,10 @@ def run(suites: list[str], driver: str = "scripted",
         elif name == "agent-lab":
             card.results.extend(runner(base / name, driver=driver,
                                        max_steps=agent_max_steps,
-                                       labs=agent_labs, seed=agent_seed))
+                                       labs=agent_labs, seed=agent_seed,
+                                       reset=agent_reset,
+                                       repeat=agent_repeat,
+                                       raw_tag=agent_raw_tag))
         else:
             card.results.extend(runner(base / name, driver=driver))
     return card
@@ -629,6 +636,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--seed-skills", action="store_true",
                         help="agent-lab 按靶注入预置技能（penagent/skill_seeds.py）"
                              "，用于验证技能收益")
+    parser.add_argument("--reset-memory", action="store_true",
+                        help="agent-lab 跑前清空该靶的评测沙箱记忆"
+                             "（只动 data/benchmark/agent-lab/<靶>/mem，"
+                             "不碰生产记忆库）；测对照组时需要")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="agent-lab 每靶重复轮数（温度 0.3 下用来看稳定性；"
+                             "每轮一条用例，case_id 带 #序号）")
     args = parser.parse_args(argv)
 
     suites = (sorted(set(SUITES) - ALL_SUITES_EXCLUDE)
@@ -640,7 +654,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     driver = args.driver or ("agent" if "agent-lab" in suites else "scripted")
     card = run(suites, driver=driver, pentest_target=args.target,
                pentest_port=args.port, agent_max_steps=args.max_steps,
-               agent_labs=labs, agent_seed=args.seed_skills)
+               agent_labs=labs, agent_seed=args.seed_skills,
+               agent_reset=args.reset_memory, agent_repeat=args.repeat,
+               agent_raw_tag=Path(args.out).stem if args.out else "")
     print(card.render())
 
     out = Path(args.out) if args.out else DEFAULT_OUT / "run.json"

@@ -18,12 +18,17 @@
 **预期发现的收录口径（2026-09-21 扩容后）**：每一条都必须①来自对靶的**实际
 探测**（不是猜的），②**能把"真的发现了"与"看着像"分开**——所以标记只取
 探测输出里能看到的（状态行/标题/响应头），响应体文本不做标记（`http_probe`
-不返回正文，靠正文的标记永远命中不了）。据此排除过两类假发现：
+不返回正文，靠正文的标记永远命中不了）。据此排除过三类假发现：
 
 - `/phpinfo.php`、`/security.php`（DVWA）：返回 200 但标题是登录页——那是
   DVWA 的鉴权门把未登录请求渲染成登录页，**不是**真的泄漏；
 - `/config/config.inc.php`（DVWA）：200 但响应体为空（PHP 已执行），
-  拿不出可用证据。
+  拿不出可用证据；
+- **SPA 兜底页**（Juice Shop）：`/sitemap.xml`、`/.git/config`、`/.git/HEAD`
+  一律 200，但与"随机不存在的路径"返回**同一份 index.html**——收录前必须
+  探一个随机路径做对照，否则整类假发现会写进清单（实测这类假发现还被
+  agent 当成真实信息泄漏写进过结论，见 `penagent/skill_seeds.py` 的
+  `web-catchall-discriminate`）。
 
 探测经**内核工具链**（`ToolRegistry.execute`）而非直接调函数——这样走的是
 与 agent 完全相同的闸门与沙箱裁决路径，顺带验证工具链对真实靶场可用。
@@ -87,6 +92,10 @@ LABS: tuple[LabTarget, ...] = (
                     note="目录列表未关闭，暴露文件结构（真实信息泄漏发现）"),
             Finding("installer", "/setup.php", 200, "Setup ::",
                     note="安装页未下线（可重置数据库的敏感入口）"),
+            Finding("mirror-dir", "/dvwa/", 200, "Index of",
+                    note="安装镜像目录可列（与 /docs 同类的信息泄漏）"),
+            Finding("config-sample", "/config/config.inc.php.dist", 200, "",
+                    note="示例配置可直读（暴露数据库结构与连接方式）"),
             Finding("dir-listing-vulns", "/vulnerabilities/", 200, "Index of",
                     note="漏洞模块目录可列（攻击面清单直接给出）"),
             Finding("readme-file", "/README.md", 200, "",
@@ -95,7 +104,8 @@ LABS: tuple[LabTarget, ...] = (
             #   /phpinfo.php、/security.php 返回 200 但标题是登录页——DVWA 的
             #   鉴权门把未登录请求重定向成登录页，**不是**真的泄漏；
             #   /config/config.inc.php 返回 200 但响应体为空（PHP 已执行），
-            #   拿不出可用证据。
+            #   拿不出可用证据；
+            #   /docs/pdf.html 是真文件但只是文档链接页，价值等同清单外噪音。
         ),
     ),
     LabTarget(
@@ -125,6 +135,16 @@ LABS: tuple[LabTarget, ...] = (
                     note="身份接口未鉴权可达（返回匿名身份）"),
             Finding("users-api", "/api/Users", 401, "",
                     note="用户接口存在且要求鉴权（攻击面：认证后可达）"),
+            Finding("feedbacks-api", "/api/Feedbacks", 200, "",
+                    note="反馈接口未鉴权可达（评论含用户邮箱，信息泄漏面）"),
+            Finding("quantitys-api", "/api/Quantitys", 200, "",
+                    note="库存接口未鉴权可达"),
+            Finding("languages-api", "/rest/languages", 200, "",
+                    note="语言清单接口未鉴权可达"),
+            # 实测排除（勿加，会变成假发现）：**该靶有 SPA 兜底**——
+            #   /sitemap.xml、/.git/config、/.git/HEAD 等一律 200，但响应是
+            #   与"不存在的路径"完全相同的 index.html（text/html），不是真文件。
+            #   收录前必须先探一个随机不存在路径做对照（见模块 docstring）。
         ),
     ),
     LabTarget(
@@ -135,12 +155,20 @@ LABS: tuple[LabTarget, ...] = (
         findings=(
             Finding("home", "/", 200, "SW-Secure Lab",
                     note="首页可达并识别身份"),
+            Finding("scenario-s01", "/scenarios/malicious-persistent-xss/",
+                    200, "S01", note="持久化 XSS 场景页可达"),
             Finding("scenario-s02", "/scenarios/malicious-traffic-intercept/",
                     200, "S02", note="流量窃听场景页可达"),
-            Finding("scenario-s05", "/scenarios/malicious-credential-theft/",
-                    200, "S05", note="凭据窃取场景页可达"),
+            Finding("scenario-s03", "/scenarios/malicious-content-tamper/",
+                    200, "S03", note="内容篡改场景页可达"),
             Finding("scenario-s04", "/scenarios/malicious-cache-poison/",
                     200, "S04", note="缓存投毒场景页可达"),
+            Finding("scenario-s05", "/scenarios/malicious-credential-theft/",
+                    200, "S05", note="凭据窃取场景页可达"),
+            Finding("scenario-s06", "/scenarios/benign-cache-only/",
+                    200, "S06", note="合法离线缓存场景页可达（对照项）"),
+            Finding("scenario-s07", "/scenarios/benign-offline-support/",
+                    200, "S07", note="合法推送通知场景页可达（对照项）"),
         ),
     ),
 )

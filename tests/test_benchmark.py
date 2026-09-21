@@ -384,7 +384,7 @@ def test_agent_lab_chain_gate_fails_case(monkeypatch, tmp_path):
     monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
     monkeypatch.setattr(
         lab_agent, "run_lab_agent",
-        lambda lab_, base, workdir, llm, max_steps=12, seed=False: {
+        lambda lab_, base, workdir, llm, **kw: {
             "outcome": "success", "steps": 3, "summary": "",
             "elapsed_s": 1.0, "records": [],
             "chain": {"ok": False, "tampered": [2], "broken_links": []},
@@ -436,9 +436,9 @@ def test_agent_lab_workdir_is_root_not_nested(monkeypatch, tmp_path):
 
     seen = {}
 
-    def _fake_run(lab_, base, workdir, llm, max_steps=12, seed=False):
+    def _fake_run(lab_, base, workdir, llm, **kw):
         seen["workdir"] = str(workdir)
-        seen["seed"] = seed
+        seen.update(kw)
         return {"outcome": "success", "steps": 1, "summary": "",
                 "elapsed_s": 0.1, "records": [],
                 "chain": {"ok": True, "tampered": [], "broken_links": []},
@@ -453,6 +453,115 @@ def test_agent_lab_workdir_is_root_not_nested(monkeypatch, tmp_path):
     benchmark.run_agent_lab_suite(str(root), max_steps=1, seed=True)
     assert seen["workdir"] == str(root), "工作目录不该再套一层"
     assert seen["seed"] is True, "--seed-skills 没有透传到运行侧"
+
+
+def test_agent_lab_repeat_makes_one_case_per_round(monkeypatch, tmp_path):
+    """`--repeat N` 每轮一条用例（case_id 带 #序号）——单轮分数有噪声，要看得见每轮。"""
+    import lab
+    import lab_agent
+    import benchmark
+    from penagent.llm import LLMConfig
+
+    calls = []
+
+    def _fake_run(lab_, base, workdir, llm, **kw):
+        calls.append(kw.get("raw_name"))
+        return {"outcome": "success", "steps": 1, "summary": "",
+                "elapsed_s": 0.1, "records": [],
+                "chain": {"ok": True, "tampered": [], "broken_links": []},
+                "mission_id": "m1", "injected_skills": []}
+
+    monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
+    monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
+    monkeypatch.setattr(lab_agent, "run_lab_agent", _fake_run)
+    monkeypatch.setattr(lab_agent, "_save_raw", lambda run, path: None)
+
+    card = benchmark.run(["agent-lab"], workdir=tmp_path,
+                         agent_labs=["dvwa"], agent_repeat=3)
+
+    ids = [r.case_id for r in card.results]
+    assert ids == ["dvwa#1", "dvwa#2", "dvwa#3"]
+    assert card.attempted == 3
+    # 每轮的原始素材分开落盘，否则复盘只剩最后一轮
+    assert calls == ["last_run_r1.json", "last_run_r2.json",
+                     "last_run_r3.json"]
+
+
+def test_reset_sandbox_memory_guardrails(tmp_path):
+    """清空只发生在 `<root>/<lab>/mem`；越界 lab_id 一律拒绝。
+
+    这条是安全护栏：`--reset-memory` 清的是评测沙箱，一旦路径拼接被绕过
+    就可能删到生产记忆库或目录树其它部分。
+    """
+    from lab_agent import _reset_sandbox_memory
+
+    mem = tmp_path / "dvwa" / "mem" / "skills"
+    mem.mkdir(parents=True)
+    (mem / "s.json").write_text("{}", encoding="utf-8")
+    keep = tmp_path / "juice-shop" / "mem"
+    keep.mkdir(parents=True)
+    prod = tmp_path / "prod" / "skills"
+    prod.mkdir(parents=True)
+
+    assert _reset_sandbox_memory(tmp_path, "dvwa") is True
+    assert not (tmp_path / "dvwa" / "mem").exists()
+    assert keep.exists(), "别的靶的记忆不该被连带删除"
+    assert prod.exists()
+
+    # 越界 lab_id：一律拒绝执行
+    for bad in ("..", "../prod", "a/b", "a\\b", ""):
+        assert _reset_sandbox_memory(tmp_path, bad) is False
+    assert prod.exists()
+
+
+def test_reset_memory_flag_reaches_run_lab_agent(monkeypatch, tmp_path):
+    """`--reset-memory` 传到运行侧、且在建 agent 之前执行（先清后建）。"""
+    import lab
+    import lab_agent
+    import benchmark
+    from penagent.llm import LLMConfig
+
+    order = []
+    monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
+    monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
+    monkeypatch.setattr(lab_agent, "_reset_sandbox_memory",
+                        lambda workdir, lab_id: order.append(
+                            f"reset:{lab_id}") or True)
+
+    def _fake_build(lab_id, workdir, llm, max_steps):
+        order.append(f"build:{lab_id}")
+
+        class _Agent:
+            memory = None
+
+            def run(self, *a, **kw):
+                class _R:
+                    outcome, steps, summary = "success", 1, ""
+                    mission_id = "m1"
+                    injected_skills: list = []
+                return _R()
+
+        class _Ev:
+            path = tmp_path / "chain.jsonl"
+
+            def tail(self):
+                return None
+
+            def load(self):
+                return []
+
+            def verify(self):
+                return {"ok": True, "tampered": [], "broken_links": []}
+
+        return _Agent(), _Ev()
+
+    monkeypatch.setattr(lab_agent, "_build_agent", _fake_build)
+    monkeypatch.setattr(lab_agent, "_save_raw", lambda run, path: None)
+
+    benchmark.run(["agent-lab"], workdir=tmp_path, agent_labs=["dvwa"],
+                  agent_reset=True)
+
+    assert order == ["reset:dvwa", "build:dvwa"], "必须是先清沙箱、再建 agent"
 
 
 def test_agent_lab_labs_filter_passes_through(monkeypatch, tmp_path):
@@ -472,11 +581,27 @@ def test_lab_ground_truth_expansion_pinned():
 
     names = {lab_id: {f.name for f in get_lab(lab_id).findings}
              for lab_id in ("dvwa", "juice-shop", "sw-secure-lab")}
-    assert {"installer", "dir-listing-vulns"} <= names["dvwa"]
+    assert {"installer", "dir-listing-vulns", "mirror-dir",
+            "config-sample"} <= names["dvwa"]
     assert {"dir-listing-ftp", "confidential-doc", "backup-file",
-            "whoami", "users-api"} <= names["juice-shop"]
-    assert {"scenario-s02", "scenario-s05", "scenario-s04"} <= \
+            "whoami", "users-api", "feedbacks-api", "quantitys-api",
+            "languages-api"} <= names["juice-shop"]
+    assert {"scenario-s01", "scenario-s02", "scenario-s03", "scenario-s04",
+            "scenario-s05", "scenario-s06", "scenario-s07"} <= \
         names["sw-secure-lab"]
+
+
+def test_lab_ground_truth_excludes_spa_fallback_paths():
+    """Juice Shop 的 SPA 兜底路径不得入清单（200 但其实是首页）。
+
+    实测：`/sitemap.xml`、`/.git/config` 与"随机不存在路径"返回同一份
+    index.html。把它们当预期发现等于奖励假阳性。
+    """
+    from lab import get_lab
+
+    paths = {f.path for f in get_lab("juice-shop").findings}
+    for bogus in ("/sitemap.xml", "/.git/config", "/.git/HEAD"):
+        assert bogus not in paths, f"{bogus} 是 SPA 兜底页，不该当预期发现"
 
 
 def test_lab_ground_truth_markers_are_observable():

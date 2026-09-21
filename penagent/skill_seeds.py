@@ -36,26 +36,37 @@ from .memory import Memory, Skill
 SEED_SKILLS: tuple[Skill, ...] = (
     Skill(
         id="web-api-family-enum",
-        title="Web 端点族枚举：父路径 5xx 不代表子路径不存在",
+        title="Web 端点族枚举：按通用资源名词表铺开，父路径 5xx 不代表子路径不存在",
         target_fingerprint="web service http rest api endpoint",
         category="web-recon",
         steps=[
-            "**先横后纵**：先把各族常见子路径一次铺开（/api、/rest 下的 "
-            "products/search、admin/application-version、Challenges、Users、"
-            "user/whoami），再回头对单点深挖",
+            "**先横后纵**：先把各族常见子路径一次铺开，再回头对单点深挖",
+            "**用通用资源名词表枚举，不要只探别人点名过的那几个**：对已发现"
+            "的 API 前缀（/api、/rest）逐个试 products、orders、users、"
+            "feedbacks、reviews、challenges、quantitys、security-questions、"
+            "languages、basket、deliveries、memories、complaints、banners、"
+            "config 等常见资源名——同一前缀下的接口往往成套出现",
             "父路径（/api、/rest 等）返回 4xx/5xx 时不要放弃整族——子路径"
-            "可能独立可达",
+            "可能独立可达（实测 /api 与 /rest 本身 500，其下子路径却大量 200）",
             "401/403 同样是有效发现（接口存在、需鉴权或禁访），按状态码如实"
             "记录，不要因为读不到内容就丢弃",
             "步数有限：横向铺开的收益高于对单一目录/单点的反复深挖",
+            "**收口前做覆盖自检**：把「计划覆盖的面」（各族子路径、目录里的"
+            "高风险项）与「已探过的清单」对一遍，缺口先补上再收口——觉得"
+            "「差不多了」就收口，是最常见的漏项来源",
         ],
         tools=["http_probe", "httpx_probe"],
         evidence_text="来源：2026-09-21 agent-lab 第二轮（juice-shop）——探过 "
                       "/rest 与 /api（均 500）后整族放弃，漏掉 "
                       "/rest/products/search?q=、/api/Challenges、"
                       "/rest/admin/application-version（该轮 6/10）；"
-                      "第三轮加'先横后纵'：此前只讲枚举、没讲优先级，"
-                      "目录深挖把 20 步预算吃光",
+                      "第三轮加'先横后纵'后 10/10，但第四轮实测暴露**清单驱动**"
+                      "的局限：技能里点名的子路径全探到了，通用资源名的接口"
+                      "（/api/Feedbacks、/api/Quantitys、/rest/languages，均 200）"
+                      "一个没试——故改写为'按通用资源名词表铺开'的方法式指导；"
+                      "第四轮三轮复测（10/10、8/10、7/10）显示漏项与**提前收口**"
+                      "相关（分别停在 20/15/11 步，/api/Users 连续两轮没探），"
+                      "故补'收口前覆盖自检'",
     ),
     Skill(
         id="web-dir-listing-enum",
@@ -76,6 +87,29 @@ SEED_SKILLS: tuple[Skill, ...] = (
                       "已列出的 acquisitions.md；第三轮加了'逐项枚举'后反向"
                       "踩坑：13 个文件逐个探完，20 步里 13 步耗在 /ftp，"
                       "REST 族一个没试（该轮 4/10）——故改为限量 + 先横后纵",
+    ),
+    Skill(
+        id="web-catchall-discriminate",
+        title="SPA 兜底页甄别：路径都返回 200 时先证明它不是兜底",
+        target_fingerprint="web service http spa catchall fallback",
+        category="web-recon",
+        steps=[
+            "若干互不相干的路径都返回 200、且标题与正文都跟应用首页一样时，"
+            "**先怀疑是 SPA / 兜底页**，而不是一口气记成一堆发现",
+            "判据：探一个几乎不可能存在的随机路径（如 "
+            "/no-such-path-<随机串>）——若它同样 200 且响应体与"
+            "'疑似发现'一致，那些 200 就没有信息量",
+            "真发现的判据是**响应内容随路径变化**（内容类型/长度/正文不同，"
+            "如 application/json vs text/html），或状态码有区分（401/403/500）",
+            "结论里只写经对照验证过的路径；把兜底页当发现写进报告等于污染"
+            "结论的可信度",
+        ],
+        tools=["http_probe", "httpx_probe"],
+        evidence_text="来源：2026-09-21 agent-lab 第三轮 B（juice-shop）——"
+                      "agent 把 /.git/config 的 200 当真实信息泄漏写进结论；"
+                      "实测它与不存在路径 /no-such-path-xyz 返回的是同一份 "
+                      "index.html（text/html），而同轮的 /api/Feedbacks 返回 "
+                      "application/json 才是真接口",
     ),
 )
 

@@ -27,6 +27,35 @@ def _agent(tmp_path: Path, memory: Memory) -> PenAgent:
                     mode=load_mode("pentest-standard"))
 
 
+def test_all_seeds_survive_injection_top3_limit(tmp_path):
+    """所有种子都要能进提示词——注入上限是 **3 条**（skills[-3:]）。
+
+    超出的技能会**静默**不进提示词（不报错、分数不动，同 R-20 那类失效）。
+    这条把容量钉住：种子加到第 4 条时这里直接失败，提醒先合并/取舍，
+    而不是让某条知识悄悄失效。
+    """
+    memory = Memory(tmp_path / "mem")
+    agent = _agent(tmp_path, memory)
+    seed_skills(agent.memory)
+
+    matched = agent.memory.find_skills(PROD_FINGERPRINT)
+    ranked = agent._rank_skills(matched, PROD_FINGERPRINT)
+    injected = {s.id for s in ranked[-3:]}
+
+    missing = {s.id for s in SEED_SKILLS} - injected
+    assert not missing, (
+        f"这些种子进不了提示词（注入上限 3 条，当前 {len(SEED_SKILLS)} 条）: "
+        f"{sorted(missing)}")
+    assert len(SEED_SKILLS) <= 3, "种子超过注入容量，需要合并或改注入上限"
+
+
+def test_seed_ids_pinned():
+    """三条种子一个都不能少（删掉等于把量出来的教训丢了）。"""
+    ids = {s.id for s in SEED_SKILLS}
+    assert {"web-api-family-enum", "web-dir-listing-enum",
+            "web-catchall-discriminate"} <= ids
+
+
 def test_seed_skills_idempotent(tmp_path):
     """重复写入不重复：第二次全部 skipped。"""
     memory = Memory(tmp_path / "mem")

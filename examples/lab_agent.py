@@ -240,19 +240,44 @@ def _build_agent(lab_id: str, workdir: Path, llm, max_steps: int):
     return agent, evidence
 
 
+def _reset_sandbox_memory(workdir: Path, lab_id: str) -> bool:
+    """清空某靶的**评测沙箱**记忆（重复轮次测对照组用）。返回是否执行了删除。
+
+    护栏：只允许删 `<workdir>/<lab_id>/mem`，且 lab_id 不得含路径分隔符——
+    这是评测脚本，**绝不能**因为传参意外删到生产记忆库（`data/skills/...`）
+    或目录树其它部分。
+    """
+    import shutil
+
+    if not lab_id or "/" in lab_id or "\\" in lab_id or ".." in lab_id:
+        return False
+    sandbox = Path(workdir) / lab_id / "mem"
+    if sandbox.resolve().parent != (Path(workdir) / lab_id).resolve():
+        return False
+    if sandbox.exists():
+        shutil.rmtree(sandbox, ignore_errors=True)
+        return True
+    return False
+
+
 def run_lab_agent(lab, base_url: str, workdir: Path, llm,
                   max_steps: int = DEFAULT_MAX_STEPS,
-                  seed: bool = False) -> dict:
+                  seed: bool = False, reset: bool = False,
+                  raw_name: str = "last_run.json") -> dict:
     """让 agent 自主跑一次该靶的侦察任务，返回原始素材（不判分）。
 
     调用方拿 `records` 与 `chain` 自己判分——判分逻辑与执行逻辑分开，
     判分可被单测覆盖、可被复算。
 
     `seed=True` 时先把 `penagent/skill_seeds.py` 的预置技能写进本靶记忆库
-    （幂等）——这是"技能注入 -> 评测验证收益"的开关。**写入的是 agent
-    实际读取的那个 memory 对象**（带模式 namespace）：`Memory(root)` 与
-    `Memory(root).for_namespace(模式)` 是两个目录，写错地方不会报错、
+    （幂等 + refresh）——这是"技能注入 -> 评测验证收益"的开关。**写入的是
+    agent 实际读取的那个 memory 对象**（带模式 namespace）：`Memory(root)`
+    与 `Memory(root).for_namespace(模式)` 是两个目录，写错地方不会报错、
     只会静默不生效。
+
+    `reset=True` 先清空本靶记忆（**只动评测沙箱目录** `<suite>/<lab>/mem`，
+    绝不碰生产记忆库）——重复轮次要测对照组时，种过的技能会一直生效，
+    必须能回到干净状态。
 
     指纹走上产口径（CLI 的 `_auto_fingerprint`：`<host> web service`），
     不用裸 URL：技能匹配是关键词共现，裸 URL 只剩 "http" 一个词，
@@ -260,6 +285,9 @@ def run_lab_agent(lab, base_url: str, workdir: Path, llm,
     与历史轮次的可比性。
     """
     import urllib.parse
+
+    if reset:
+        _reset_sandbox_memory(workdir, lab.id)
 
     agent, evidence = _build_agent(lab.id, workdir, llm, max_steps)
     if seed:
@@ -283,6 +311,7 @@ def run_lab_agent(lab, base_url: str, workdir: Path, llm,
         "chain": evidence.verify(),
         "mission_id": result.mission_id,
         "injected_skills": list(result.injected_skills),
+        "raw_name": raw_name,
     }
 
 
@@ -292,11 +321,21 @@ def run_lab_agent(lab, base_url: str, workdir: Path, llm,
 def run_agent_lab_suite(root: Path, driver: str = "agent",
                         max_steps: int = DEFAULT_MAX_STEPS,
                         labs: Optional[list[str]] = None,
-                        seed: bool = False):
+                        seed: bool = False, reset: bool = False,
+                        repeat: int = 1, raw_tag: str = ""):
     """agent 驱动的真实靶场评测套件。
 
     靶不可达 / LLM 未配置 -> skipped（环境缺失不等于能力不足）。
-    `seed=True` 时按靶写入预置技能（见 `run_lab_agent`）。
+    `seed=True` 按靶写入预置技能、`reset=True` 先清空该靶评测沙箱记忆
+    （见 `run_lab_agent`）。
+
+    `repeat=N`：每个靶跑 N 轮，**每轮一条用例**（case_id 带 `#序号`）。
+    温度 0.3 下单轮分数有噪声，"稳不稳"只能靠重复轮次看——聚合口径刻意
+    不做成"平均分"：0/3 与"2/3 轮满分"是两回事，逐轮列出才看得见。
+
+    `raw_tag`：原始素材的子目录标签（用评分卡输出名当标签）。**不同臂
+    （有技能/无技能）跑同一靶时文件名会撞车**——实测对照组把处理组的
+    `last_run_r1.json` 覆盖过，分数还在评分卡里、复盘素材却没了。
     """
     from benchmark import CaseResult          # 统一结果模型
     from lab import DEFAULT_URLS, LABS, reachable
@@ -309,65 +348,76 @@ def run_agent_lab_suite(root: Path, driver: str = "agent",
     from penagent.llm import LLMConfig
 
     llm = LLMConfig.from_env()
+    targets = [lab for lab in LABS if not labs or lab.id in labs]
     if not llm.ready():
         return [_skipped(lab.id, "LLM 未配置（设 PENTEST_LLM_* 后可用）")
-                for lab in LABS if not labs or lab.id in labs]
+                for lab in targets]
 
     results = []
     # root 就是本套件自己的工作目录（与 run_ctf_suite 等同约定，不再套一层）
     workdir = Path(root)
-    for lab in LABS:
-        if labs and lab.id not in labs:
-            continue
+    for lab in targets:
         base_url = DEFAULT_URLS.get(lab.id, "")
         if not base_url or not reachable(base_url):
             results.append(_skipped(lab.id, f"靶不可达（{lab.hint}）"))
             continue
-        # 真实运行是分钟级的，先给出"正在打哪个靶"——否则使用方看不到进展
-        print(f"[agent-lab] {lab.id} <- {base_url}（上限 {max_steps} 步"
-              f"{'，已注入预置技能' if seed else ''}）", flush=True)
-        started = time.time()
-        try:
-            run = run_lab_agent(lab, base_url, workdir, llm,
-                                max_steps=max_steps, seed=seed)
-        except Exception as exc:                          # noqa: BLE001
-            results.append(CaseResult(
-                suite="agent-lab", case_id=lab.id, category="recon-agent",
-                outcome="failed", passed=False,
-                elapsed_s=round(time.time() - started, 2),
-                detail=f"{type(exc).__name__}: {exc}"))
-            continue
-        print(f"[agent-lab] {lab.id} 完成：steps={run['steps']} "
-              f"{run['elapsed_s']}s outcome={run['outcome']}", flush=True)
-        # 原始素材落盘：判分口径之外的东西（探过哪些路径、报了什么错）以后
-        # 复盘时最常被问起，不留就只能翻证据链猜任务边界
-        try:
-            _save_raw(run, workdir / lab.id / "last_run.json")
-        except OSError as exc:                            # noqa: PERF203
-            print(f"[agent-lab] 原始素材落盘失败（不判失败）: {exc}",
-                  flush=True)
+        for idx in range(1, max(1, repeat) + 1):
+            case_id = lab.id if repeat <= 1 else f"{lab.id}#{idx}"
+            raw_name = ("last_run.json" if repeat <= 1
+                        else f"last_run_r{idx}.json")
+            # 真实运行是分钟级的，先给出"正在打哪个靶"——否则使用方看不到进展
+            print(f"[agent-lab] {case_id} <- {base_url}（上限 {max_steps} 步"
+                  f"{'，已注入预置技能' if seed else ''}"
+                  f"{'，已清空沙箱记忆' if reset else ''}）", flush=True)
+            started = time.time()
+            try:
+                run = run_lab_agent(lab, base_url, workdir, llm,
+                                    max_steps=max_steps, seed=seed,
+                                    reset=reset, raw_name=raw_name)
+            except Exception as exc:                      # noqa: BLE001
+                results.append(CaseResult(
+                    suite="agent-lab", case_id=case_id,
+                    category="recon-agent", outcome="failed", passed=False,
+                    elapsed_s=round(time.time() - started, 2),
+                    detail=f"{type(exc).__name__}: {exc}"))
+                continue
+            print(f"[agent-lab] {case_id} 完成：steps={run['steps']} "
+                  f"{run['elapsed_s']}s outcome={run['outcome']}", flush=True)
+            # 原始素材落盘：判分口径之外的东西（探过哪些路径、报了什么错）
+            # 以后复盘时最常被问起，不留就只能翻证据链猜任务边界。
+            # 带 tag 分目录，避免不同臂/不同实验互相覆盖（见 docstring）
+            raw_path = (workdir / lab.id / raw_tag / raw_name
+                        if raw_tag else workdir / lab.id / raw_name)
+            try:
+                _save_raw(run, raw_path)
+            except OSError as exc:                        # noqa: PERF203
+                print(f"[agent-lab] 原始素材落盘失败（不判失败）: {exc}",
+                      flush=True)
 
-        hits = score_from_evidence(lab.findings, run["records"])
-        matched = sum(1 for v in hits.values() if v)
-        total = len(hits)
-        chain_ok = bool(run["chain"].get("ok"))
-        passed = bool(total) and matched == total and chain_ok
-        missed = [k for k, v in hits.items() if not v]
-        why = ""
-        if not chain_ok:
-            why = (f"证据链校验失败（tampered={run['chain'].get('tampered')} "
-                   f"broken={run['chain'].get('broken_links')}）")
-        elif missed:
-            why = f"未探到: {', '.join(missed)}"
-        results.append(CaseResult(
-            suite="agent-lab", case_id=lab.id, category="recon-agent",
-            outcome="success" if passed else "failed", passed=passed,
-            steps=run["steps"], elapsed_s=run["elapsed_s"],
-            expected=f"{total} 项预期发现（agent 自主侦察）",
-            got=f"{matched}/{total} 命中 · 探测 {probes_in(run['records'])} 次"
-                f" · agent outcome={run['outcome']}"
-                f" · 注入技能 {len(run.get('injected_skills') or [])} 条",
-            detail=why))
+            hits = score_from_evidence(lab.findings, run["records"])
+            matched = sum(1 for v in hits.values() if v)
+            total = len(hits)
+            chain_ok = bool(run["chain"].get("ok"))
+            passed = bool(total) and matched == total and chain_ok
+            missed = [k for k, v in hits.items() if not v]
+            why = ""
+            if not chain_ok:
+                why = (f"证据链校验失败（tampered="
+                       f"{run['chain'].get('tampered')} broken="
+                       f"{run['chain'].get('broken_links')}）")
+            elif missed:
+                why = f"未探到: {', '.join(missed)}"
+            results.append(CaseResult(
+                suite="agent-lab", case_id=case_id,
+                category="recon-agent",
+                outcome="success" if passed else "failed", passed=passed,
+                steps=run["steps"], elapsed_s=run["elapsed_s"],
+                expected=f"{total} 项预期发现（agent 自主侦察）",
+                got=f"{matched}/{total} 命中 · 探测 "
+                    f"{probes_in(run['records'])} 次"
+                    f" · agent outcome={run['outcome']}"
+                    f" · 注入技能 {len(run.get('injected_skills') or [])} 条",
+                detail=why))
     return results
 
 
