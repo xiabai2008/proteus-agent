@@ -174,3 +174,104 @@ def test_g07_suite_registered():
     from benchmark import SUITES
 
     assert "g07" in SUITES
+
+
+# ----------------------------------------------------------------------
+# 真实靶场基线：定义与套件
+# ----------------------------------------------------------------------
+def test_lab_definitions_wellformed():
+    """靶定义结构自洽：id 唯一、每个靶有预期发现、路径以 / 开头。"""
+    from lab import DEFAULT_URLS, LABS
+
+    ids = [lab.id for lab in LABS]
+    assert len(ids) == len(set(ids)), "靶 id 重复"
+    assert all(lab.id in DEFAULT_URLS for lab in LABS), "缺默认地址"
+    for lab in LABS:
+        assert lab.findings, f"{lab.id} 没有预期发现"
+        assert lab.hint, f"{lab.id} 缺不可达时的提示"
+        names = [f.name for f in lab.findings]
+        assert len(names) == len(set(names)), f"{lab.id} 发现名重复"
+        assert all(f.path.startswith("/") for f in lab.findings)
+
+
+def test_get_lab_unknown_returns_none():
+    from lab import get_lab
+
+    assert get_lab("ghost-lab") is None
+    assert get_lab("dvwa") is not None
+
+
+def test_lab_suite_skips_when_unreachable(monkeypatch):
+    """靶不可达 -> 该项 skipped 并带启动提示（不是 failed）。"""
+    import benchmark
+    import lab
+
+    monkeypatch.setattr(lab, "reachable", lambda url, **kw: False)
+    results = benchmark.run_lab_suite(".")
+    assert results
+    assert all(r.outcome == "skipped" for r in results)
+    assert all(r.suite == "lab" for r in results)
+    assert any("不可达" in r.detail for r in results)
+
+
+# ----------------------------------------------------------------------
+# 渗透套件：断言必须落在响应内容上（防退化）
+#
+# 早期版本用子串匹配整段 JSON，`"server"` / `"title"` / `"disallow"` 这类
+# **键名**恒真、`"/debug"` 命中的是 URL 字段——四条断言里三条恒真，套件必然
+# 100%。下面两个用例一正一反把它钉住。
+# ----------------------------------------------------------------------
+def _patch_probes(monkeypatch, probes):
+    import benchmark
+
+    monkeypatch.setattr(benchmark, "_probe_target",
+                        lambda host, port: probes)
+
+
+def test_pentest_findings_all_false_when_nothing_matches(monkeypatch):
+    """什么都不满足时，**每一条**断言都必须为 False（有恒真项即失败）。"""
+    _patch_probes(monkeypatch, {
+        "home": {"status": 404, "title": ""},
+        "admin": {"status": 404},
+        "debug": {"status": 404},
+        "robots": {"disallow": []},
+    })
+    import benchmark
+
+    findings = benchmark._pentest_findings("127.0.0.1", 1)
+    truthy = [k for k, v in findings.items() if v]
+    assert not truthy, f"以下断言恒真（不落在响应内容上）: {truthy}"
+
+
+def test_pentest_findings_all_true_when_target_matches(monkeypatch):
+    """演示靶的真实响应应让全部断言命中。"""
+    _patch_probes(monkeypatch, {
+        "home": {"status": 200, "title": "Demo Portal - Flask/2.3"},
+        "admin": {"status": 401},
+        "debug": {"status": 200},
+        "robots": {"disallow": ["/admin", "/debug"]},
+    })
+    import benchmark
+
+    findings = benchmark._pentest_findings("127.0.0.1", 1)
+    missed = [k for k, v in findings.items() if not v]
+    assert not missed, f"应全部命中，却漏了: {missed}"
+
+
+def test_pentest_default_port_avoids_dvwa(monkeypatch):
+    """默认端口不是 8080——本机 8080 常被真实靶场（DVWA）占用，
+    套件不该打到别人的靶上。"""
+    import inspect
+
+    import benchmark
+
+    sig = inspect.signature(benchmark.run_pentest_suite)
+    assert sig.parameters["port"].default == 8090
+    sig_run = inspect.signature(benchmark.run)
+    assert sig_run.parameters["pentest_port"].default == 8090
+
+
+def test_lab_suite_registered():
+    from benchmark import SUITES
+
+    assert "lab" in SUITES

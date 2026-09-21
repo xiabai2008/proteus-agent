@@ -259,43 +259,46 @@ def run_ctf_suite(root: Path, driver: str = "scripted",
     return results
 
 
-# 渗透侦察套件的预期发现（本地授权靶 examples/target.py 的已知端点）
-PENTEST_EXPECT = {
-    "admin_protected": ["/admin", "401"],
-    "debug_leak": ["/debug"],
-    "robots_disallow": ["disallow"],
-    "tech_stack": ["server", "title"],
-}
+# 渗透侦察套件：演示靶（examples/target.py）的预期发现。
+#
+# 判定必须落在**响应内容**上——早期版本用子串匹配整段 JSON，结果 `"server"`
+# / `"title"` / `"disallow"` 这类**键名**恒真（http_probe 的返回 dict 永远含
+# 这些键）、`"/debug"` 命中的是 URL 字段——四条断言里三条恒真，套件必然 100%。
+# 现在改成逐项结构化判定（状态码/字段值/真实指纹）。
+PENTEST_HOME_TITLE = "Demo Portal"     # 演示靶首页标题里的真实指纹
 
 
 def run_pentest_suite(root: Path, driver: str = "scripted",
                       target: str = "127.0.0.1",
-                      port: int = 8080) -> list[CaseResult]:
-    """渗透侦察套件：对本地授权靶跑一次侦察，检查是否命中预期发现。
+                      port: int = 8090) -> list[CaseResult]:
+    """渗透侦察套件：对本地授权演示靶跑一次侦察，逐项断言预期发现。
+
+    默认端口 **8090** 而非 8080：本机 8080 常被真实靶场（DVWA）占用，
+    套件不该打到别人的靶上。
 
     靶子不可达时**标记 skipped 而不是 failed**——环境缺失不等于能力不足，
     这条区分很重要（否则"没起靶"会被误读成"agent 不行"）。
     """
     started = time.time()
-    reachable = _port_open(target, port)
-    if not reachable:
+    if not _port_open(target, port):
         return [CaseResult(
             suite="pentest", case_id="local-portal-recon", category="recon",
             outcome="skipped", passed=False,
             detail=f"靶子 {target}:{port} 不可达（先跑 "
                    f"python examples/target.py --port {port}）")]
 
-    found = _probe_target(target, port)
-    matched = [name for name, pats in PENTEST_EXPECT.items()
-               if any(p.lower() in found.lower() for p in pats)]
-    passed = len(matched) >= 2          # 至少命中两类发现才算侦察有效
+    findings = _pentest_findings(target, port)
+    matched = [name for name, ok in findings.items() if ok]
+    required = len(findings)
+    passed = len(matched) == required
+    missed = [k for k, v in findings.items() if not v]
     return [CaseResult(
         suite="pentest", case_id="local-portal-recon", category="recon",
         outcome="success" if passed else "failed", passed=passed,
         steps=len(matched), elapsed_s=round(time.time() - started, 2),
-        expected="至少 2 类发现（admin/debug/robots/tech）",
-        got=",".join(matched) or "无",
-        detail="" if passed else f"仅命中 {len(matched)} 类，低于阈值 2",
+        expected=f"{required} 项预期发现全命中",
+        got=f"{len(matched)}/{required}",
+        detail="" if passed else f"未命中: {', '.join(missed)}",
     )]
 
 
@@ -310,25 +313,96 @@ def _port_open(host: str, port: int, timeout: float = 1.5) -> bool:
         s.close()
 
 
-def _probe_target(host: str, port: int) -> str:
-    """对靶做被动侦察，把响应拼成一段文本供预期模式匹配。
+def _probe_target(host: str, port: int) -> dict:
+    """对演示靶做被动侦察，返回结构化探测结果。
 
     只用内核内置工具（零外部依赖），不引入攻击动作。
     """
     from penagent.builtin_tools import http_probe, robots_fetch
 
     base = f"http://{host}:{port}"
-    chunks = []
-    for url in (base, f"{base}/admin", f"{base}/debug"):
-        try:
-            chunks.append(json.dumps(http_probe(url), ensure_ascii=False))
-        except Exception as exc:                          # noqa: BLE001
-            chunks.append(f"{url} 探测失败: {exc}")
+    return {
+        "home": http_probe(base),
+        "admin": http_probe(f"{base}/admin"),
+        "debug": http_probe(f"{base}/debug"),
+        "robots": robots_fetch(base),
+    }
+
+
+def _pentest_findings(host: str, port: int) -> dict:
+    """逐项判定预期发现（每条断言都落在响应内容上）。"""
+    probes = _probe_target(host, port)
+    return {
+        "home_reachable": probes["home"].get("status") == 200,
+        "admin_protected": probes["admin"].get("status") == 401,
+        "debug_leak": probes["debug"].get("status") == 200,
+        "robots_disallow": bool(probes["robots"].get("disallow")),
+        "tech_stack": PENTEST_HOME_TITLE in str(
+            probes["home"].get("title", "")),
+    }
+
+
+# ----------------------------------------------------------------------
+# 真实靶场套件（DVWA / Juice Shop / SW-Secure Lab）
+#
+# 与渗透侦察套件的区别：那个打自造的演示靶（examples/target.py，三个端点）；
+# 这个打**业界标准的真实漏洞应用**——攻击面更广、框架特征更真实。
+# 预期发现清单定义在 examples/lab.py，探测经内核注册表（同 agent 路径）。
+# ----------------------------------------------------------------------
+def run_lab_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
+    """真实靶场基线：对运行中的靶场做被动侦察并断言预期发现。
+
+    靶不可达 -> 该靶标记 skipped 并给出启动提示（环境缺失不等于能力不足）。
+    **容器生命周期不归本模块管**——绝不 stop / rm 使用者的容器。
+    """
+    examples = str(ROOT / "examples")
+    if examples not in sys.path:
+        sys.path.insert(0, examples)
     try:
-        chunks.append(json.dumps(robots_fetch(base), ensure_ascii=False))
+        from lab import DEFAULT_URLS, LABS, probe_lab, reachable
     except Exception as exc:                              # noqa: BLE001
-        chunks.append(f"robots 失败: {exc}")
-    return "\n".join(chunks)
+        return [CaseResult(
+            suite="lab", case_id="__env__", category="env", outcome="skipped",
+            passed=False, detail=f"lab 模块不可用: {exc}")]
+
+    registry = None
+    results: list[CaseResult] = []
+    for lab in LABS:
+        base = DEFAULT_URLS.get(lab.id, "")
+        started = time.time()
+        if not base or not reachable(base):
+            results.append(CaseResult(
+                suite="lab", case_id=lab.id, category="recon",
+                outcome="skipped", passed=False,
+                elapsed_s=round(time.time() - started, 2),
+                expected=f"{len(lab.findings)} 项预期发现",
+                detail=f"靶不可达（{lab.hint}）"))
+            continue
+        try:
+            if registry is None:
+                from lab import _kernel_registry
+
+                registry = _kernel_registry()
+            hits = probe_lab(lab, base, registry=registry)
+        except Exception as exc:                          # noqa: BLE001
+            results.append(CaseResult(
+                suite="lab", case_id=lab.id, category="recon",
+                outcome="failed", passed=False,
+                elapsed_s=round(time.time() - started, 2),
+                detail=f"{type(exc).__name__}: {exc}"))
+            continue
+        matched = sum(1 for v in hits.values() if v)
+        total = len(hits)
+        passed = bool(total) and matched == total
+        missed = [k for k, v in hits.items() if not v]
+        results.append(CaseResult(
+            suite="lab", case_id=lab.id, category="recon",
+            outcome="success" if passed else "failed", passed=passed,
+            steps=matched, elapsed_s=round(time.time() - started, 2),
+            expected=f"{total} 项预期发现全命中",
+            got=f"{matched}/{total}",
+            detail="" if passed else f"未命中: {', '.join(missed)}"))
+    return results
 
 
 # ----------------------------------------------------------------------
@@ -444,6 +518,7 @@ def run_g07_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
 SUITES: dict[str, Callable[..., list[CaseResult]]] = {
     "ctf": run_ctf_suite,
     "pentest": run_pentest_suite,
+    "lab": run_lab_suite,
     "g07": run_g07_suite,
 }
 
@@ -454,7 +529,7 @@ SUITES: dict[str, Callable[..., list[CaseResult]]] = {
 def run(suites: list[str], driver: str = "scripted",
         workdir: Optional[Path] = None,
         pentest_target: str = "127.0.0.1",
-        pentest_port: int = 8080) -> Scorecard:
+        pentest_port: int = 8090) -> Scorecard:
     """跑指定套件，汇总为一张评分卡。
 
     渗透套件的靶地址可传（`--target` / `--port`），否则本机 8080 被别的服务
@@ -507,8 +582,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="与基线结果 JSON 对比（逐例给出改进/回归）")
     parser.add_argument("--target", default="127.0.0.1",
                         help="渗透套件的靶主机（默认 127.0.0.1）")
-    parser.add_argument("--port", type=int, default=8080,
-                        help="渗透套件的靶端口（默认 8080）")
+    parser.add_argument("--port", type=int, default=8090,
+                        help="渗透套件的靶端口（默认 8090；8080 常被真实靶场占用）")
     args = parser.parse_args(argv)
 
     suites = (sorted(SUITES) if args.suite == "all"
