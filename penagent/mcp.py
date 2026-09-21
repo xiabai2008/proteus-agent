@@ -91,7 +91,6 @@ class PentestMCPServer:
 
             self._default_profile = load_mode(default_mode)
             self.default_mode = default_mode
-        self._agents: dict[str, PenAgent] = {}
 
     # ------------------------------------------------------------------
     def _agent(self, authorize: bool = False,
