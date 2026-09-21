@@ -515,12 +515,33 @@ def run_g07_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
     return results
 
 
+def run_agent_lab_suite(root: Path, driver: str = "agent",
+                        max_steps: int = 12) -> list[CaseResult]:
+    """agent 驱动的真实靶场评测：让 agent 自己决定探什么。
+
+    与上面的 `lab` 套件互补——那个是脚本直探工具链（不经 agent 决策），
+    这个把决策交给 agent，判定回到证据链核对预期发现。实现在
+    `examples/lab_agent.py`（判分逻辑是纯函数，可单测、可复算）。
+    """
+    examples = str(ROOT / "examples")
+    if examples not in sys.path:
+        sys.path.insert(0, examples)
+    from lab_agent import run_agent_lab_suite as _run  # noqa: E402
+
+    return _run(root, driver=driver, max_steps=max_steps)
+
+
 SUITES: dict[str, Callable[..., list[CaseResult]]] = {
     "ctf": run_ctf_suite,
     "pentest": run_pentest_suite,
     "lab": run_lab_suite,
+    "agent-lab": run_agent_lab_suite,
     "g07": run_g07_suite,
 }
+
+# `--suite all` 不含 agent-lab：它按靶调用真实 LLM（有实际花费与分钟级时长），
+# 应当由使用方显式点名运行，而不是被"跑一遍看总分"顺带触发。
+ALL_SUITES_EXCLUDE = {"agent-lab"}
 
 
 # ----------------------------------------------------------------------
@@ -529,7 +550,8 @@ SUITES: dict[str, Callable[..., list[CaseResult]]] = {
 def run(suites: list[str], driver: str = "scripted",
         workdir: Optional[Path] = None,
         pentest_target: str = "127.0.0.1",
-        pentest_port: int = 8090) -> Scorecard:
+        pentest_port: int = 8090,
+        agent_max_steps: int = 12) -> Scorecard:
     """跑指定套件，汇总为一张评分卡。
 
     渗透套件的靶地址可传（`--target` / `--port`），否则本机 8080 被别的服务
@@ -549,6 +571,9 @@ def run(suites: list[str], driver: str = "scripted",
             card.results.extend(runner(base / name, driver=driver,
                                        target=pentest_target,
                                        port=pentest_port))
+        elif name == "agent-lab":
+            card.results.extend(runner(base / name, driver=driver,
+                                       max_steps=agent_max_steps))
         else:
             card.results.extend(runner(base / name, driver=driver))
     return card
@@ -572,10 +597,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         prog="python examples/benchmark.py",
         description="统一评测骨架：跑一批用例，产出可对比的评分卡")
     parser.add_argument("--suite", default="ctf",
-                        help="套件：ctf / pentest / all（逗号分隔，默认 ctf）")
+                        help="套件：ctf / pentest / lab / agent-lab / g07 / all"
+                             "（逗号分隔，默认 ctf；all 不含 agent-lab）")
     parser.add_argument("--driver", default="scripted",
-                        choices=("scripted", "llm"),
-                        help="决策驱动（scripted 离线确定性 / llm 真实模型）")
+                        choices=("scripted", "llm", "agent"),
+                        help="决策驱动（scripted 离线确定性 / llm 真实模型 / "
+                             "agent 由 agent 自主决策）")
     parser.add_argument("--out", default="",
                         help=f"结果落盘路径（缺省 {DEFAULT_OUT}/run.json）")
     parser.add_argument("--compare", default="",
@@ -584,12 +611,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="渗透套件的靶主机（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8090,
                         help="渗透套件的靶端口（默认 8090；8080 常被真实靶场占用）")
+    parser.add_argument("--max-steps", type=int, default=12,
+                        help="agent-lab 套件的单靶决策步数上限（默认 12）")
     args = parser.parse_args(argv)
 
-    suites = (sorted(SUITES) if args.suite == "all"
+    suites = (sorted(set(SUITES) - ALL_SUITES_EXCLUDE)
+              if args.suite == "all"
               else [s.strip() for s in args.suite.split(",") if s.strip()])
     card = run(suites, driver=args.driver, pentest_target=args.target,
-               pentest_port=args.port)
+               pentest_port=args.port, agent_max_steps=args.max_steps)
     print(card.render())
 
     out = Path(args.out) if args.out else DEFAULT_OUT / "run.json"

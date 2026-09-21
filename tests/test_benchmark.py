@@ -275,3 +275,197 @@ def test_lab_suite_registered():
     from benchmark import SUITES
 
     assert "lab" in SUITES
+
+
+# ----------------------------------------------------------------------
+# agent 驱动的靶场评测：判定纯函数 + 套件接线
+#
+# 判定错了，评分卡就会骗人——这里逐条钉住判定口径：必须**与工具无关**、
+# 必须有状态码、必须真的走到预期内容上；爬虫列出 URL 不算发现。
+# ----------------------------------------------------------------------
+def _rec(tool, args, output, ok=True):
+    """构造一条证据记录（形状与 agent 写入的 tool_call 一致）。"""
+    from penagent.evidence import EvidenceRecord
+
+    return EvidenceRecord(seq=1, kind="tool_call",
+                          content={"tool": tool, "args": args, "ok": ok,
+                                   "output": str(output)})
+
+
+def _finding(name="f", path="/", status=200, contains=""):
+    from lab import Finding
+
+    return Finding(name, path, status, contains)
+
+
+def test_agent_lab_scoring_requires_status_evidence():
+    """爬虫列出的 URL（无状态码）不算发现——观察到的 != 验证过的。"""
+    from lab_agent import score_from_evidence
+
+    crawl = _rec("katana_crawl", {"url": "http://h:80"},
+                 "http://h:80 http://h:80/login.php")
+    hits = score_from_evidence([_finding(path="/login.php")], [crawl])
+    assert hits["f"] is False
+
+
+def test_agent_lab_scoring_tool_agnostic():
+    """内置 http_probe 与外部 httpx_probe 的字段名不同，判定都要认。"""
+    from lab_agent import score_from_evidence
+
+    builtin = _rec("http_probe", {"url": "http://h:80/a"},
+                   {"url": "http://h:80/a", "status": 200})
+    httpx = _rec("httpx_probe", {"target": "http://h:80/a"},
+                 {"url": "http://h:80/a", "status_code": 200,
+                  "input": "http://h:80/a", "path": "/a"})
+    assert score_from_evidence([_finding(path="/a")], [builtin])["f"] is True
+    assert score_from_evidence([_finding(path="/a")], [httpx])["f"] is True
+
+
+def test_agent_lab_scoring_requires_marker_content():
+    """状态码对但内容标记不在 -> 不算命中（防"看到 200 就记功"）。"""
+    from lab_agent import score_from_evidence
+
+    rec = _rec("http_probe", {"url": "http://h:80/docs"},
+               {"url": "http://h:80/docs", "status": 200, "title": "x"})
+    miss = score_from_evidence(
+        [_finding(path="/docs", contains="Index of")], [rec])
+    assert miss["f"] is False
+
+
+def test_agent_lab_scoring_follows_redirect_chain():
+    """3xx + 跳转目标被探过 -> 算发现（DVWA 的 / 就靠这条）。"""
+    from lab_agent import score_from_evidence
+
+    recs = [
+        _rec("httpx_probe", {"target": "http://h:80"},
+             {"url": "http://h:80", "status_code": 302,
+              "location": "login.php", "input": "http://h:80"}),
+        _rec("http_probe", {"url": "http://h:80/login.php"},
+             {"url": "http://h:80/login.php", "status": 200,
+              "title": "Login :: DVWA"}),
+    ]
+    hits = score_from_evidence(
+        [_finding(path="/", contains="DVWA")], recs)
+    assert hits["f"] is True
+
+
+def test_agent_lab_scoring_query_value_agnostic():
+    """端点的 query 值可变：agent 自选 q=test 也算命中 ?q= 那条预期。"""
+    from lab_agent import score_from_evidence
+
+    rec = _rec("http_probe",
+               {"url": "http://h:80/rest/products/search?q=test"},
+               {"url": "http://h:80/rest/products/search?q=test",
+                "status": 200})
+    hits = score_from_evidence(
+        [_finding(path="/rest/products/search?q=")], [rec])
+    assert hits["f"] is True
+
+
+def test_agent_lab_scoring_ignores_failed_calls():
+    """执行失败的工具调用（ok=False）不能算证据。"""
+    from lab_agent import score_from_evidence
+
+    rec = _rec("http_probe", {"url": "http://h:80/a"},
+               {"url": "http://h:80/a", "status": 200}, ok=False)
+    assert score_from_evidence([_finding(path="/a")], [rec])["f"] is False
+
+
+def test_agent_lab_chain_gate_fails_case(monkeypatch, tmp_path):
+    """证据链校验不过 -> 该靶判失败，不因"命中数对"而放过。
+
+    传 `tmp_path` 作 root：套件会把原始素材落到 root 下，写 "." 会把产物
+    落进仓库根（本用例最初就是这么污染工作树的）。
+    """
+    import lab
+    import lab_agent
+    import benchmark
+
+    monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
+    monkeypatch.setattr(
+        lab_agent, "run_lab_agent",
+        lambda lab_, base, workdir, llm, max_steps=12: {
+            "outcome": "success", "steps": 3, "summary": "",
+            "elapsed_s": 1.0, "records": [],
+            "chain": {"ok": False, "tampered": [2], "broken_links": []},
+            "mission_id": "m1"})
+    # LLM 就绪检查放行（不打真实模型）
+    from penagent.llm import LLMConfig
+
+    monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
+
+    results = benchmark.run_agent_lab_suite(str(tmp_path), max_steps=1)
+    assert results
+    assert all(r.outcome == "failed" for r in results)
+    assert all("证据链校验失败" in r.detail for r in results)
+    assert not (tmp_path.parent / "dvwa").exists(), "不该往 root 之外写"
+
+
+def test_agent_lab_suite_skips_without_llm(monkeypatch, tmp_path):
+    """LLM 未配置 -> 全部 skipped（不是 failed）。"""
+    import benchmark
+    from penagent.llm import LLMConfig
+
+    monkeypatch.setattr(LLMConfig, "ready", lambda self: False)
+    results = benchmark.run_agent_lab_suite(str(tmp_path))
+    assert results
+    assert all(r.outcome == "skipped" for r in results)
+    assert all("LLM 未配置" in r.detail for r in results)
+
+
+def test_agent_lab_suite_skips_unreachable(monkeypatch, tmp_path):
+    """靶不可达 -> skipped 并带启动提示。"""
+    import benchmark
+    import lab
+    from penagent.llm import LLMConfig
+
+    monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
+    monkeypatch.setattr(lab, "reachable", lambda url, **kw: False)
+    results = benchmark.run_agent_lab_suite(str(tmp_path))
+    assert results
+    assert all(r.outcome == "skipped" for r in results)
+    assert any("不可达" in r.detail for r in results)
+
+
+def test_agent_lab_workdir_is_root_not_nested(monkeypatch, tmp_path):
+    """套件的工作目录就是 root 本身——曾经多套一层 agent-lab，产物写偏。"""
+    import lab
+    import lab_agent
+    import benchmark
+    from penagent.llm import LLMConfig
+
+    seen = {}
+
+    def _fake_run(lab_, base, workdir, llm, max_steps=12):
+        seen["workdir"] = str(workdir)
+        return {"outcome": "success", "steps": 1, "summary": "",
+                "elapsed_s": 0.1, "records": [],
+                "chain": {"ok": True, "tampered": [], "broken_links": []},
+                "mission_id": "m1"}
+
+    monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
+    monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
+    monkeypatch.setattr(lab_agent, "run_lab_agent", _fake_run)
+    monkeypatch.setattr(lab_agent, "_save_raw", lambda run, path: None)
+
+    root = tmp_path / "bench"
+    benchmark.run_agent_lab_suite(str(root), max_steps=1)
+    assert seen["workdir"] == str(root), "工作目录不该再套一层"
+
+
+def test_agent_lab_registered_and_excluded_from_all():
+    """套件已注册；`--suite all` 不含它（真 LLM 有花费，需显式点名）。"""
+    from benchmark import ALL_SUITES_EXCLUDE, SUITES
+
+    assert "agent-lab" in SUITES
+    assert "agent-lab" in ALL_SUITES_EXCLUDE
+
+
+def test_agent_lab_objective_does_not_leak_paths():
+    """任务提示词不列预期路径——列了就变成脚本化填空，量不出自主侦察。"""
+    from lab_agent import mission_objective
+
+    text = mission_objective("http://127.0.0.1:8080")
+    for leaked in ("/docs", "/robots.txt", "/rest/products/search",
+                   "/api/Products", "login.php"):
+        assert leaked not in text, f"提示词泄漏了预期路径 {leaked}"
