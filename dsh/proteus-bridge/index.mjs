@@ -103,14 +103,78 @@ function resultCallId(data) {
   return fromBlock === undefined ? '' : String(fromBlock)
 }
 
+/** 网络动词：命中即认为这条 shell 命令在对目标发请求。 */
+const NETWORK_VERBS = [
+  'curl', 'wget', 'iwr', 'invoke-webrequest', 'invoke-restmethod',
+  'ncat', 'netcat', 'telnet', 'ssh', 'nmap', 'masscan', 'nikto',
+  'httpx', 'nuclei', 'sqlmap', 'ffuf', 'gobuster', 'dalfox', 'naabu',
+  'fscan', 'whatweb', 'wpscan', 'hydra', 'hping3', 'nslookup',
+]
+
+const URL_RE = /https?:\/\/[^\s"'`|;)<>]+/gi
+const IP_RE = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g
+const HOST_FLAG_RE = /(?:--host|--url|--target|-host|-u|-h)\s+([^\s"']+)/gi
+
+function hostOf(urlish) {
+  try {
+    const withScheme = /^https?:\/\//i.test(urlish) ? urlish : `http://${urlish}`
+    return new URL(withScheme).hostname
+  } catch {
+    return ''
+  }
+}
+
+/** 从命令文本里抽候选目标主机（小写去重）；没有 URL/主机参数时退回裸 IP。 */
+function targetsIn(command) {
+  const found = new Set()
+  for (const m of command.matchAll(URL_RE)) {
+    const host = hostOf(m[0])
+    if (host !== '') found.add(host.toLowerCase())
+  }
+  for (const m of command.matchAll(HOST_FLAG_RE)) {
+    const host = hostOf(m[1])
+    if (host !== '') found.add(host.toLowerCase())
+  }
+  if (found.size === 0) {
+    for (const m of command.matchAll(IP_RE)) found.add(m[0])
+  }
+  return [...found]
+}
+
+function isNetworkCommand(command) {
+  const text = command.toLowerCase()
+  return NETWORK_VERBS.some((verb) => text.includes(verb))
+}
+
+function withinTargets(host, targets) {
+  return targets.some((t) => {
+    const base = String(t).toLowerCase()
+    return host === base || host.endsWith(`.${base}`)
+  })
+}
+
+function readStringArray(value, fallback) {
+  if (!Array.isArray(value)) return fallback
+  const items = value.filter((v) => typeof v === 'string' && v !== '')
+  return items.length > 0 ? items : fallback
+}
+
 /**
- * 插件入口：订阅 `session/event`，把 tool/call 与 tool/result 追加进 spool。
+ * 插件入口：订阅 `session/event`（审计）+ `tools/pre-execute`（目标动作裁决）。
+ *
+ * 裁决只针对**对目标发请求的宿主 shell 命令**：`mcp__proteus__*` 已过内核闸门
+ * 一律放行；非网络命令放行不打扰；命中网络动词时按 `mode` 裁决（默认 ask），
+ * 并把裁决写进 spool（kind: policy）——审计链里能看到"为什么被问/被拒"。
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx - 宿主上下文。
- * @param {{spoolPath?: string}} [config] - 由 bundle 补丁层传入的配置。
+ * @param {{spoolPath?: string, mode?: string, targets?: string[],
+ *          shellTools?: string[]}} [config] - 由 bundle 补丁层传入的配置。
  */
 export function apply(ctx, config = {}) {
   const spoolPath = typeof config.spoolPath === 'string' ? config.spoolPath : ''
+  const mode = typeof config.mode === 'string' ? config.mode : 'ask'
+  const targets = readStringArray(config.targets, ['127.0.0.1', 'localhost'])
+  const shellTools = readStringArray(config.shellTools, ['pwsh', 'bash'])
   if (spoolPath === '') {
     console.warn('[proteus-bridge] 未配置 spoolPath：审计桥未启用')
     return
@@ -158,5 +222,39 @@ export function apply(ctx, config = {}) {
       error: data?.error ? clip(data.error, 500) : '',
       output: resultText(data?.message),
     })
+  })
+
+  // ---- 裁决：对目标发请求的宿主 shell 命令按档位处理（mode=off 时只审计） ----
+  if (mode === 'off') return
+
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    const name = String(exec?.name ?? '')
+    if (!shellTools.includes(name)) return next()
+    const command = String(
+      exec?.arguments?.command ?? exec?.arguments?.script ?? '')
+    if (command === '' || !isNetworkCommand(command)) return next()
+
+    const hosts = targetsIn(command)
+    const outside = hosts.filter((host) => !withinTargets(host, targets))
+    const reason = outside.length > 0
+      ? `目标 ${outside.join(', ')} 不在内核授权白名单（${targets.join(', ')}）内；`
+        + '内核闸门不会放行这类目标，若确需访问请先显式授权。'
+      : '目标动作建议走内核工具（mcp__proteus__http_raw / '
+        + 'mcp__proteus__pentest_run 等）：内核侧有目标白名单、模式闸门与'
+        + '证据链，宿主 shell 直连的结论不可机验。'
+    const decision = mode === 'deny'
+      ? { kind: 'deny', reason }
+      : { kind: 'ask', reason }
+    write({
+      ts: Date.now(),
+      kind: 'policy',
+      tool: name,
+      decision: decision.kind,
+      hosts,
+      outside,
+      reason: clip(reason, 500),
+      command: clip(command, 300),
+    })
+    return decision
   })
 }

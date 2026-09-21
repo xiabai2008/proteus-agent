@@ -17,13 +17,25 @@
 #   dsh plugin --profile web add <REPO>/dsh/proteus-bridge
 # 注意：装完要重启 DSH 进程（bundle 层在启动时合成）。
 #
-# 未纳入本层的事（见 docs/DSH插件化与内核旁路治理.md 第三步）：
-# `tools/pre-execute` 的目标动作裁决——先以 ask 上线，等内核工具补齐后再收紧。
+# 三步走里的第三步：`tools/pre-execute` 目标动作裁决。
+#
+# 规则（只针对"对目标发请求"的宿主 shell 命令，其它一概不管）：
+#   - 命令里出现网络动词（curl / Invoke-WebRequest / sqlmap / nmap …）时：
+#     目标在授权集内 → 按 `mode`（默认 ask）裁决，理由里给出内核替代工具；
+#     目标在授权集外 → 同样 ask，理由说明"内核白名单不会放行该目标"。
+#   - 非网络命令（本地文件、echo、脚本）→ 放行，不打扰。
+#   - `mcp__proteus__*` 一律放行（它本身已经过内核闸门）。
+# 裁决结果同时写进 spool（kind: policy），审计链里能看到"为什么被问/被拒"。
+#
+# mode: ask（默认，用户已拍板先跑一段时间）/ deny（收紧）/ off（只观测不裁决）
 
 - insert:
     - id: proteus-bridge
       name: dsh-proteus-bridge
       config:
         # spool 落盘位置：跟随 PENTEST_WS（本机路径不入库，与 preset 同约定）。
-        # 注意 !!js 整行禁止出现 ": "（冒号+空格会被 YAML 拆成映射键）。
+        # 注意 !!js 整行禁止出现 ": "（冒号+空格会被 YAML 拆成映射键）
         spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+        mode: ask
+        targets: ['127.0.0.1', 'localhost']
+        shellTools: ['pwsh', 'bash']

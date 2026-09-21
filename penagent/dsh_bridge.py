@@ -139,6 +139,21 @@ def import_spool(spool: str | Path = DEFAULT_SPOOL,
             continue
         call_id = str(event.get("callId") or "")
         kind = event.get("kind")
+        if kind == "policy":
+            # 宿主桥的目标动作裁决记录：留痕"为什么被问/被拒"（observation）
+            chain.append("observation", {
+                "source": "dsh",
+                "kind": "target_action_decision",
+                "decision": str(event.get("decision") or ""),
+                "tool": str(event.get("tool") or ""),
+                "hosts": event.get("hosts") or [],
+                "outside": event.get("outside") or [],
+                "reason": str(event.get("reason") or "")[:500],
+                "command": str(event.get("command") or "")[:300],
+                "ts": event.get("ts"),
+            })
+            appended += 1
+            continue
         if kind == "call":
             pending[call_id] = event
             continue

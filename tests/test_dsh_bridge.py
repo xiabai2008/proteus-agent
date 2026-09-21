@@ -266,3 +266,102 @@ def test_result_with_unknown_callid_single_pending_pairs(tmp_path):
     import_spool(spool, chain=chain, state_path=None)
     content = chain.load()[0].content
     assert content["tool"] == "http_raw" and content["output"] == "200"
+
+def test_policy_event_becomes_observation(tmp_path):
+    """裁决事件（kind=policy）在链上留成 observation——"为什么被问/被拒"要可查。"""
+    chain = EvidenceChain(tmp_path / "chain.jsonl")
+    spool = tmp_path / "dsh-events.jsonl"
+    spool.write_text(json.dumps({
+        "ts": 1, "kind": "policy", "tool": "pwsh", "decision": "ask",
+        "hosts": ["127.0.0.1"], "outside": [],
+        "reason": "目标动作建议走内核工具", "command": "curl http://127.0.0.1:3000/",
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    report = import_spool(spool, chain=chain, state_path=None)
+    assert report["records"] == 1 and report["chain_ok"] is True
+    rec = chain.load()[0]
+    assert rec.kind == "observation"
+    assert rec.content["decision"] == "ask"
+    assert rec.content["kind"] == "target_action_decision"
+    assert rec.content["hosts"] == ["127.0.0.1"]
+
+
+# ----------------------------------------------------------------------
+# 裁决层（预执行策略）：只针对"对目标发请求的宿主 shell 命令"
+# ----------------------------------------------------------------------
+def _policy_call(tmp_path, tool, command, **cfg):
+    """用桩 ctx 跑一次 pre-execute，返回 (裁决, spool 记录列表)。"""
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("本机无 node，跳过宿主插件策略测试")
+    # 每次调用独立 spool——同一 tmp_path 里连着跑两次时不能串味
+    import uuid
+
+    spool = tmp_path / f"policy-{uuid.uuid4().hex[:8]}.jsonl"
+    config = {"spoolPath": str(spool), **cfg}
+    script = f"""
+import {{ apply }} from {json.dumps(PLUGIN.as_uri())};
+const listeners = {{}};
+const ctx = {{ on: (e, f) => {{ (listeners[e] ||= []).push(f); }} }};
+apply(ctx, {json.dumps(config, ensure_ascii=False)});
+const hooks = listeners['tools/pre-execute'] || [];
+const exec = {{ name: {json.dumps(tool)}, arguments: {{ command: {json.dumps(command)} }} }};
+const out = [];
+for (const fn of hooks) {{
+  const d = await fn(exec, async () => ({{ kind: 'allow' }}));
+  out.push(JSON.stringify(d));
+}}
+console.log(out.join('|'));
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:400]
+    decisions = [json.loads(x) for x in proc.stdout.strip().split("|") if x]
+    records = ([json.loads(ln) for ln in spool.read_text(encoding="utf-8").splitlines()]
+               if spool.exists() else [])
+    return decisions[0] if decisions else None, records
+
+
+def test_policy_asks_on_shell_request_to_authorized_target(tmp_path):
+    decision, records = _policy_call(
+        tmp_path, "pwsh", "curl http://127.0.0.1:3000/ -s")
+    assert decision["kind"] == "ask"
+    assert "内核工具" in decision["reason"]
+    assert records[-1]["kind"] == "policy" and records[-1]["hosts"] == ["127.0.0.1"]
+
+
+def test_policy_asks_on_out_of_scope_target(tmp_path):
+    """越界目标：同样 ask，但理由不同（白名单不会放行）——默认档位是 ask。"""
+    decision, records = _policy_call(
+        tmp_path, "pwsh", "nmap -sV 203.0.113.10")
+    assert decision["kind"] == "ask"
+    assert "不在内核授权白名单" in decision["reason"]
+    assert records[-1]["outside"] == ["203.0.113.10"]
+
+
+def test_policy_allows_local_only_command(tmp_path):
+    """本地命令（echo/文件操作）不打扰。"""
+    decision, records = _policy_call(tmp_path, "pwsh", "echo hello > out.txt")
+    assert decision["kind"] == "allow"
+    assert records == []
+
+
+def test_policy_allows_kernel_and_other_tools(tmp_path):
+    """内核工具（已过内核闸门）与无关工具一律放行。"""
+    kernel, _ = _policy_call(tmp_path, "mcp__proteus__http_raw",
+                             "curl http://127.0.0.1:3000/")
+    other, _ = _policy_call(tmp_path, "read", "curl http://127.0.0.1:3000/")
+    assert kernel["kind"] == "allow" and other["kind"] == "allow"
+
+
+def test_policy_deny_mode_and_off_mode(tmp_path):
+    denied, _ = _policy_call(tmp_path, "pwsh", "curl http://127.0.0.1:3000/",
+                             mode="deny")
+    assert denied["kind"] == "deny" and "内核工具" in denied["reason"]
+
+    # off：**不注册裁决**（不是返回 allow）——注册表默认放行，等于只审计不干预
+    off, off_records = _policy_call(tmp_path, "pwsh",
+                                    "curl http://127.0.0.1:3000/", mode="off")
+    assert off is None and off_records == []

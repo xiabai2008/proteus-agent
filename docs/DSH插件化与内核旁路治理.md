@@ -112,7 +112,7 @@ DSH 的两层组合（源码调研结论，证据见括号）：
 |---|---|---|---|
 | 第一步 · 内核补原始证据工具 | **已实施** | `penagent/builtin_tools.py` 的 `http_raw`（状态行 + 完整响应头 + 正文片段 + 耗时；不跟随重定向；4xx/5xx 按响应返回） | 真实靶场实测：`/sitemap.xml` 与 `/` 同为 `200 text/html len=9903`（SPA 兜底一眼可分），`/api/Products` 为 `application/json len=16026`；内核 MCP 工具数 40 → **41** |
 | 第二步 · 证据链固化（只读观测） | **已实施** | 宿主 bundle `dsh/proteus-bridge`（订阅 `session/event` → spool）+ 内核导入器 `penagent/dsh_bridge.py` + CLI `python -m penagent dsh-sync` | 真实 headless 会话跑完 → spool 2 行 → 入链 1 条 `tool='pwsh' · ok=True · args={'command': 'echo bridge-v2-ok'}`，链校验 OK；DSH web 侧 `--dump-config` 可见 `# == dsh-proteus-bridge` 层 |
-| 第三步 · `pre-execute` 目标动作裁决 | **未实施** | — | 需先拍板：安全前提（宿主进程内执行）与默认档位（ask / deny） |
+| 第三步 · `pre-execute` 目标动作裁决 | **已实施**（2026-09-21，用户拍板：接受宿主进程内执行的前提 + 默认档位 `ask`） | 同 bundle 的 `tools/pre-execute`：只拦"对目标发请求的宿主 shell 命令"（网络动词识别 + 目标提取），越界目标与白名单内目标分别给不同理由；`mode: ask / deny / off` 可切 | 真机（headless）：模型用 `pwsh curl http://127.0.0.1:3000/` → **被 ask 拦下** → 该 profile 无审批应答者（fail-closed）→ `requires approval, but …`；模型重试仍被拦、转而用 `web_fetch` 又被 DSH 自己的 provider 拦（`WEB_BLOCKED_URL`），最后**如实说明没拿到输出**、未编造结果。链上一共留痕 5 条：2×裁决（observation）+ 2×失败的 tool_call + 1×web_fetch 拒绝 |
 
 **形态选择的落地结论**：第二步本可以塞进 preset 行里做，但按研究结论它拿不到 `session/event` 的订阅面——**必须是 host 平面 bundle**。这也是"要不要做成完整插件"这个问题的实际答案：**该做成插件的那部分，就是"机制与审计"**（事件订阅、裁决、策略）；"提供工具"那部分继续留在 MCP + preset 行即可（成本最低、与 DSH 版本耦合最小）。
 
@@ -178,3 +178,26 @@ python -m penagent dsh-sync --data data --flush-open    # 会话结束后冲刷�
 - **与 persona 的关系**：`prompts/dsh-persona.md` 保留"优先 + 三种例外"（软约束，
   面向模型）；方案 C 把同一条规则落到 `pre-execute`（硬约束，面向机制）——两者同源，
   一个讲道理、一个踩刹车。
+
+### 第三步的语义细节（真机跑出来的两条必须记下）
+
+1. **`ask` 在无人值守路径上等于拒绝**：headless（以及任何没有审批应答者的 profile）
+   遇到 `ask` 会 fail-closed —— 实测返回 `Error: tool "pwsh" requires approval, but
+   …`。这符合"没人能批准时宁可不放行"的语义，但**要意识到默认档位在不同入口的
+   实际效果不同**：web 会话里 `ask` 是弹审批卡片（可"允许一次"），headless 里
+   就是拒绝。自动化场景若想放行，得先接审批应答者，或把 `mode` 调成 `deny`
+   （显式拒绝、理由更清楚）——不要以为"默认 ask 就等于宽松"。
+2. **裁决不惩罚"本地动作"**：`echo`、文件读写、跑本地脚本一律放行（实测的
+   `echo bridge-v2-ok` 未被拦），只有"网络动词 + 目标"同时命中才介入——否则
+   会退化成"什么都要批"的噪音门。
+
+### 裁决层的边界（诚实声明）
+
+- 只覆盖**宿主 shell 工具**（`shellTools: [pwsh, bash]`，可配）。模型若改用其它
+  能发网络请求的宿主工具（如 `web_fetch`），本层不管——实测那次由 DSH 自身的
+  web provider 拒绝（`WEB_BLOCKED_URL`，provider 内建 SSRF 防护），属另一道闸。
+- 目标识别是**启发式**（URL/`--host`/`-u` 参数/裸 IP），命令里做变量拼接或
+  编码绕过时可能认不出——所以它是"提高旁路成本 + 留痕"，不是密不透风的 egress
+  管控（DSH 没有 egress 词汇，这点在前文能力边界里已写明）。
+- `mcp__proteus__*` 一律放行：内核闸门已经管过了，宿主层不重复设卡。
+
