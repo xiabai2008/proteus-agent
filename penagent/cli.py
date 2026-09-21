@@ -153,6 +153,25 @@ def cmd_agents(args) -> int:
 
 def cmd_skills(args) -> int:
     memory = Memory(args.data)
+    mode_id = getattr(args, "mode", "")
+    if mode_id:
+        # 记忆按模式分区（Memory(root) 与 Memory(root).for_namespace(模式)
+        # 是两个目录）：agent 运行时读的是模式 namespace，种错了地方
+        # 不报错、只是静默不生效
+        from .modes import load_mode
+
+        memory = memory.for_namespace(load_mode(mode_id).memory_namespace)
+        print(f"目标分区: {memory.namespace}（模式 {mode_id}）")
+    if getattr(args, "seed", False):
+        from .skill_seeds import seed_skills
+
+        refresh = bool(getattr(args, "refresh", False))
+        report = seed_skills(memory, refresh=refresh)
+        print(f"预置技能写入: 新增 {len(report['added'])} 条 {report['added']}；"
+              f"刷新 {len(report['refreshed'])} 条 {report['refreshed']}；"
+              f"已存在跳过 {len(report['skipped'])} 条 {report['skipped']}")
+        print("（默认幂等：已存在的 id 不覆盖，避免抹掉复用统计；"
+              "种子文件更新后用 --refresh 覆盖正文、保留统计）")
     skills = memory.list_skills(sort_by_rate=True)
     print(f"经验库技能 {len(skills)} 条（按成功率排序）:")
     for s in skills:
@@ -289,6 +308,16 @@ def main(argv: list[str] | None = None) -> int:
     ):
         p = sub.add_parser(name, help=help_t)
         p.add_argument("--data", default="data")
+        if name == "skills":
+            p.add_argument("--seed", action="store_true",
+                           help="写入预置技能种子（幂等；来源见 "
+                                "penagent/skill_seeds.py）")
+            p.add_argument("--refresh", action="store_true",
+                           help="配合 --seed：用种子文件的新定义覆盖已有技能"
+                                "正文（保留成功率等学习统计）")
+            p.add_argument("--mode", default="",
+                           help="写到指定模式的记忆分区（如 pentest-standard）"
+                                "——agent 运行读的是模式分区，不指定则写默认分区")
         p.set_defaults(fn=fn)
 
     p_ev = sub.add_parser("eval", help="进化评测（07 仿真对比）")

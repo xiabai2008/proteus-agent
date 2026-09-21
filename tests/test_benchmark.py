@@ -384,11 +384,11 @@ def test_agent_lab_chain_gate_fails_case(monkeypatch, tmp_path):
     monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
     monkeypatch.setattr(
         lab_agent, "run_lab_agent",
-        lambda lab_, base, workdir, llm, max_steps=12: {
+        lambda lab_, base, workdir, llm, max_steps=12, seed=False: {
             "outcome": "success", "steps": 3, "summary": "",
             "elapsed_s": 1.0, "records": [],
             "chain": {"ok": False, "tampered": [2], "broken_links": []},
-            "mission_id": "m1"})
+            "mission_id": "m1", "injected_skills": []})
     # LLM 就绪检查放行（不打真实模型）
     from penagent.llm import LLMConfig
 
@@ -436,12 +436,13 @@ def test_agent_lab_workdir_is_root_not_nested(monkeypatch, tmp_path):
 
     seen = {}
 
-    def _fake_run(lab_, base, workdir, llm, max_steps=12):
+    def _fake_run(lab_, base, workdir, llm, max_steps=12, seed=False):
         seen["workdir"] = str(workdir)
+        seen["seed"] = seed
         return {"outcome": "success", "steps": 1, "summary": "",
                 "elapsed_s": 0.1, "records": [],
                 "chain": {"ok": True, "tampered": [], "broken_links": []},
-                "mission_id": "m1"}
+                "mission_id": "m1", "injected_skills": []}
 
     monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
     monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
@@ -449,8 +450,9 @@ def test_agent_lab_workdir_is_root_not_nested(monkeypatch, tmp_path):
     monkeypatch.setattr(lab_agent, "_save_raw", lambda run, path: None)
 
     root = tmp_path / "bench"
-    benchmark.run_agent_lab_suite(str(root), max_steps=1)
+    benchmark.run_agent_lab_suite(str(root), max_steps=1, seed=True)
     assert seen["workdir"] == str(root), "工作目录不该再套一层"
+    assert seen["seed"] is True, "--seed-skills 没有透传到运行侧"
 
 
 def test_agent_lab_labs_filter_passes_through(monkeypatch, tmp_path):

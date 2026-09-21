@@ -517,7 +517,8 @@ def run_g07_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
 
 def run_agent_lab_suite(root: Path, driver: str = "agent",
                         max_steps: int = 12,
-                        labs: Optional[list[str]] = None) -> list[CaseResult]:
+                        labs: Optional[list[str]] = None,
+                        seed: bool = False) -> list[CaseResult]:
     """agent 驱动的真实靶场评测：让 agent 自己决定探什么。
 
     与上面的 `lab` 套件互补——那个是脚本直探工具链（不经 agent 决策），
@@ -525,13 +526,16 @@ def run_agent_lab_suite(root: Path, driver: str = "agent",
     `examples/lab_agent.py`（判分逻辑是纯函数，可单测、可复算）。
 
     `labs` 只跑指定靶（如 `["dvwa"]`）——单靶迭代时不必付三靶的时间与花费。
+    `seed=True` 按靶写入预置技能（`penagent/skill_seeds.py`），用于验证
+    技能注入的收益。
     """
     examples = str(ROOT / "examples")
     if examples not in sys.path:
         sys.path.insert(0, examples)
     from lab_agent import run_agent_lab_suite as _run  # noqa: E402
 
-    return _run(root, driver=driver, max_steps=max_steps, labs=labs)
+    return _run(root, driver=driver, max_steps=max_steps, labs=labs,
+                seed=seed)
 
 
 SUITES: dict[str, Callable[..., list[CaseResult]]] = {
@@ -555,7 +559,8 @@ def run(suites: list[str], driver: str = "scripted",
         pentest_target: str = "127.0.0.1",
         pentest_port: int = 8090,
         agent_max_steps: int = 12,
-        agent_labs: Optional[list[str]] = None) -> Scorecard:
+        agent_labs: Optional[list[str]] = None,
+        agent_seed: bool = False) -> Scorecard:
     """跑指定套件，汇总为一张评分卡。
 
     渗透套件的靶地址可传（`--target` / `--port`），否则本机 8080 被别的服务
@@ -578,7 +583,7 @@ def run(suites: list[str], driver: str = "scripted",
         elif name == "agent-lab":
             card.results.extend(runner(base / name, driver=driver,
                                        max_steps=agent_max_steps,
-                                       labs=agent_labs))
+                                       labs=agent_labs, seed=agent_seed))
         else:
             card.results.extend(runner(base / name, driver=driver))
     return card
@@ -604,10 +609,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--suite", default="ctf",
                         help="套件：ctf / pentest / lab / agent-lab / g07 / all"
                              "（逗号分隔，默认 ctf；all 不含 agent-lab）")
-    parser.add_argument("--driver", default="scripted",
-                        choices=("scripted", "llm", "agent"),
-                        help="决策驱动（scripted 离线确定性 / llm 真实模型 / "
-                             "agent 由 agent 自主决策）")
+    parser.add_argument("--driver", default="",
+                        choices=("", "scripted", "llm", "agent"),
+                        help="决策驱动（缺省按套件推断：agent-lab 记 agent，"
+                             "其余记 scripted；scripted 离线确定性 / "
+                             "llm 真实模型 / agent 由 agent 自主决策）")
     parser.add_argument("--out", default="",
                         help=f"结果落盘路径（缺省 {DEFAULT_OUT}/run.json）")
     parser.add_argument("--compare", default="",
@@ -620,15 +626,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="agent-lab 套件的单靶决策步数上限（默认 12）")
     parser.add_argument("--labs", default="",
                         help="agent-lab 只跑指定靶（逗号分隔，如 dvwa；缺省全跑）")
+    parser.add_argument("--seed-skills", action="store_true",
+                        help="agent-lab 按靶注入预置技能（penagent/skill_seeds.py）"
+                             "，用于验证技能收益")
     args = parser.parse_args(argv)
 
     suites = (sorted(set(SUITES) - ALL_SUITES_EXCLUDE)
               if args.suite == "all"
               else [s.strip() for s in args.suite.split(",") if s.strip()])
     labs = [s.strip() for s in args.labs.split(",") if s.strip()] or None
-    card = run(suites, driver=args.driver, pentest_target=args.target,
+    # 驱动标签：agent-lab 本质是 agent 驱动，不传 --driver 时不该记成 scripted
+    # （标错会让"这张卡是怎么来的"无从判断）
+    driver = args.driver or ("agent" if "agent-lab" in suites else "scripted")
+    card = run(suites, driver=driver, pentest_target=args.target,
                pentest_port=args.port, agent_max_steps=args.max_steps,
-               agent_labs=labs)
+               agent_labs=labs, agent_seed=args.seed_skills)
     print(card.render())
 
     out = Path(args.out) if args.out else DEFAULT_OUT / "run.json"

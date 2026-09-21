@@ -241,16 +241,38 @@ def _build_agent(lab_id: str, workdir: Path, llm, max_steps: int):
 
 
 def run_lab_agent(lab, base_url: str, workdir: Path, llm,
-                  max_steps: int = DEFAULT_MAX_STEPS) -> dict:
+                  max_steps: int = DEFAULT_MAX_STEPS,
+                  seed: bool = False) -> dict:
     """让 agent 自主跑一次该靶的侦察任务，返回原始素材（不判分）。
 
     调用方拿 `records` 与 `chain` 自己判分——判分逻辑与执行逻辑分开，
     判分可被单测覆盖、可被复算。
+
+    `seed=True` 时先把 `penagent/skill_seeds.py` 的预置技能写进本靶记忆库
+    （幂等）——这是"技能注入 -> 评测验证收益"的开关。**写入的是 agent
+    实际读取的那个 memory 对象**（带模式 namespace）：`Memory(root)` 与
+    `Memory(root).for_namespace(模式)` 是两个目录，写错地方不会报错、
+    只会静默不生效。
+
+    指纹走上产口径（CLI 的 `_auto_fingerprint`：`<host> web service`），
+    不用裸 URL：技能匹配是关键词共现，裸 URL 只剩 "http" 一个词，
+    匹配几乎无区分度。记忆库里没有技能时指纹不影响行为，故改变它不破坏
+    与历史轮次的可比性。
     """
+    import urllib.parse
+
     agent, evidence = _build_agent(lab.id, workdir, llm, max_steps)
+    if seed:
+        from penagent.skill_seeds import seed_skills
+
+        # refresh=True：评测记忆是测量沙箱，测的是"当前这版知识"——
+        # 种子文件迭代后重测必须拿到新正文（学习统计保留，见 seed_skills）
+        seed_skills(agent.memory, refresh=True)
+    host = urllib.parse.urlsplit(base_url).hostname or base_url
     start_seq = (evidence.tail().seq if evidence.tail() else 0)
     started = time.time()
-    result = agent.run(base_url, mission_objective(base_url))
+    result = agent.run(base_url, mission_objective(base_url),
+                       fingerprint=f"{host} web service")
     records = [r for r in evidence.load() if r.seq > start_seq]
     return {
         "outcome": result.outcome,
@@ -260,6 +282,7 @@ def run_lab_agent(lab, base_url: str, workdir: Path, llm,
         "records": records,
         "chain": evidence.verify(),
         "mission_id": result.mission_id,
+        "injected_skills": list(result.injected_skills),
     }
 
 
@@ -268,10 +291,12 @@ def run_lab_agent(lab, base_url: str, workdir: Path, llm,
 # ----------------------------------------------------------------------
 def run_agent_lab_suite(root: Path, driver: str = "agent",
                         max_steps: int = DEFAULT_MAX_STEPS,
-                        labs: Optional[list[str]] = None):
+                        labs: Optional[list[str]] = None,
+                        seed: bool = False):
     """agent 驱动的真实靶场评测套件。
 
     靶不可达 / LLM 未配置 -> skipped（环境缺失不等于能力不足）。
+    `seed=True` 时按靶写入预置技能（见 `run_lab_agent`）。
     """
     from benchmark import CaseResult          # 统一结果模型
     from lab import DEFAULT_URLS, LABS, reachable
@@ -299,12 +324,12 @@ def run_agent_lab_suite(root: Path, driver: str = "agent",
             results.append(_skipped(lab.id, f"靶不可达（{lab.hint}）"))
             continue
         # 真实运行是分钟级的，先给出"正在打哪个靶"——否则使用方看不到进展
-        print(f"[agent-lab] {lab.id} <- {base_url}（上限 {max_steps} 步）",
-              flush=True)
+        print(f"[agent-lab] {lab.id} <- {base_url}（上限 {max_steps} 步"
+              f"{'，已注入预置技能' if seed else ''}）", flush=True)
         started = time.time()
         try:
             run = run_lab_agent(lab, base_url, workdir, llm,
-                                max_steps=max_steps)
+                                max_steps=max_steps, seed=seed)
         except Exception as exc:                          # noqa: BLE001
             results.append(CaseResult(
                 suite="agent-lab", case_id=lab.id, category="recon-agent",
@@ -340,7 +365,8 @@ def run_agent_lab_suite(root: Path, driver: str = "agent",
             steps=run["steps"], elapsed_s=run["elapsed_s"],
             expected=f"{total} 项预期发现（agent 自主侦察）",
             got=f"{matched}/{total} 命中 · 探测 {probes_in(run['records'])} 次"
-                f" · agent outcome={run['outcome']}",
+                f" · agent outcome={run['outcome']}"
+                f" · 注入技能 {len(run.get('injected_skills') or [])} 条",
             detail=why))
     return results
 
