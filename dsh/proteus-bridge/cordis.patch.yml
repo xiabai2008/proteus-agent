@@ -1,0 +1,29 @@
+# dsh-proteus-bridge —— 宿主事件桥（host 平面 bundle 层）
+#
+# 做什么：订阅 `session/event` 里的 `tool/call` 与 `tool/result`，把**会话里
+# 发生的每一次工具调用**（不管是内核工具还是宿主自带工具）追加写进 spool
+# 文件；内核侧的导入器（`python -m penagent dsh-sync`）再把 spool 并入
+# penagent 的链式哈希证据链。
+#
+# 为什么需要它：2026-09-21 的真机实测发现模型会绕开内核工具、直接用宿主
+# shell 干活——那种情况下内核的证据链/记忆/技能全部空转，结论不可机验。
+# 本插件不阻止旁路（那是 pre-execute 裁决的事，且要先保证内核工具够用），
+# 只保证**旁路也留痕**、且痕迹可机验。
+#
+# 只读观测：不 allow/deny、不改结果、不阻断任何调用；写 spool 失败也不抛
+# ——审计通道断掉不该让会话失败（fail-open），失败只在控制台留痕。
+#
+# 安装（profile 侧）：
+#   dsh plugin --profile web add <REPO>/dsh/proteus-bridge
+# 注意：装完要重启 DSH 进程（bundle 层在启动时合成）。
+#
+# 未纳入本层的事（见 docs/DSH插件化与内核旁路治理.md 第三步）：
+# `tools/pre-execute` 的目标动作裁决——先以 ask 上线，等内核工具补齐后再收紧。
+
+- insert:
+    - id: proteus-bridge
+      name: dsh-proteus-bridge
+      config:
+        # spool 落盘位置：跟随 PENTEST_WS（本机路径不入库，与 preset 同约定）。
+        # 注意 !!js 整行禁止出现 ": "（冒号+空格会被 YAML 拆成映射键）。
+        spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'

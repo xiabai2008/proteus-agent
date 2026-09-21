@@ -106,6 +106,82 @@ def robots_fetch(base_url: str, timeout: float = 5.0) -> dict:
         return {"url": url, "error": str(exc)}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不跟随重定向：3xx 本身就是要取证的证据（跳转链、Location 值）。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def http_raw(url: str, method: str = "GET", body: str = "",
+             timeout: float = 10.0, max_body: int = 4000) -> dict:
+    """HTTP 原始探测（本地直连）：状态行 + 完整响应头 + 正文片段 + 耗时。
+
+    与 `http_probe` 的分工：那个只给**结论性字段**（状态码/标题/Server），
+    这个给**原始证据**——2026-09-21 的 DSH 真机实测中，模型拒绝用内核工具、
+    改用宿主 shell 的理由之一正是"`http_probe` 的固化输出给不了原始响应头与
+    正文，做不了精细判读"（判 `Server`/`X-Powered-By` 是否真缺失、用
+    `Content-Type` 甄别 SPA 兜底页、看 3xx 的 `Location`）。
+
+    三个刻意的行为：
+    - **不跟随重定向**（3xx 原样返回，带 `location`）；
+    - 4xx/5xx **不抛异常**，按响应返回（错误页正文同样是证据）；
+    - 正文按 `max_body` 截断（默认 4000 字符，硬上限 20000），带 `truncated`
+      标记——避免把上下文撑爆。
+
+    边界与 `http_probe` 同源：仍走 `_allow_http_url`（仅 http/https、
+    链路本地/组播/保留段拒绝）；目标白名单由 PolicyGate 在执行前裁决。
+    """
+    import time as _time
+    import urllib.error
+
+    method = (method or "GET").strip().upper()
+    if method not in ("GET", "HEAD", "POST"):
+        return {"url": url, "method": method,
+                "error": f"不支持的方法: {method}（仅 GET/HEAD/POST）"}
+    try:
+        cap = max(256, min(int(max_body or 4000), 20000))
+    except (TypeError, ValueError):
+        cap = 4000
+    data = body.encode("utf-8") if (method == "POST" and body) else None
+
+    try:
+        req = urllib.request.Request(
+            _allow_http_url(url), data=data, method=method,
+            headers={"User-Agent": "XPentest/0.1 (authorized test)"})
+        opener = urllib.request.build_opener(_NoRedirect)
+        started = _time.perf_counter()
+        try:
+            resp = opener.open(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            resp = exc            # 3xx 不跟随；4xx/5xx 也按响应返回
+        try:
+            raw = b"" if method == "HEAD" else resp.read(cap + 1)
+            elapsed_ms = round((_time.perf_counter() - started) * 1000, 1)
+            truncated = len(raw) > cap
+            result = {
+                "url": getattr(resp, "url", url),
+                "method": method,
+                "status": getattr(resp, "status", None)
+                          or getattr(resp, "code", None),
+                "reason": str(getattr(resp, "reason", "") or ""),
+                "headers": [[k, str(v)[:300]]
+                            for k, v in list(resp.headers.items())],
+                "location": resp.headers.get("Location", ""),
+                "body": raw[:cap].decode("utf-8", errors="replace"),
+                "truncated": truncated,
+                "elapsed_ms": elapsed_ms,
+            }
+        finally:
+            try:
+                resp.close()
+            except Exception:            # noqa: BLE001
+                pass
+        return result
+    except Exception as exc:             # noqa: BLE001
+        return {"url": url, "method": method, "error": str(exc)[:300]}
+
+
 def register_builtins(registry) -> None:
     """注册内置工具到注册表。"""
     from penagent.tools import ToolSpec
@@ -128,6 +204,17 @@ def register_builtins(registry) -> None:
                  description="抓取目标 robots.txt（信息收集）",
                  parameters={"base_url": {"type": "string"}},
                  fn=robots_fetch),
+        ToolSpec(name="http_raw",
+                 description=("HTTP 原始探测（本地直连）：状态行 + 完整响应头 + "
+                              "正文片段 + 耗时；不跟随重定向（3xx 带 location）、"
+                              "4xx/5xx 按响应返回。用于精细判读——SPA 兜底页甄别、"
+                              "响应头缺失判读、跳转链取证"),
+                 parameters={"url": {"type": "string"},
+                             "method": {"type": "string"},
+                             "body": {"type": "string"},
+                             "timeout": {"type": "number"},
+                             "max_body": {"type": "number"}},
+                 fn=http_raw),
     ]
     for s in specs:
         registry.register(s)

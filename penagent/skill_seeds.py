@@ -55,7 +55,7 @@ SEED_SKILLS: tuple[Skill, ...] = (
             "高风险项）与「已探过的清单」对一遍，缺口先补上再收口——觉得"
             "「差不多了」就收口，是最常见的漏项来源",
         ],
-        tools=["http_probe", "httpx_probe"],
+        tools=["http_probe", "http_raw", "httpx_probe"],
         evidence_text="来源：2026-09-21 agent-lab 第二轮（juice-shop）——探过 "
                       "/rest 与 /api（均 500）后整族放弃，漏掉 "
                       "/rest/products/search?q=、/api/Challenges、"
@@ -81,7 +81,7 @@ SEED_SKILLS: tuple[Skill, ...] = (
             "铺开（其它接口族）的收益更高；剩余项记进结论即可",
             "目录列表本身是一条发现（信息泄漏），结论里写明它暴露了什么",
         ],
-        tools=["http_probe", "httpx_probe"],
+        tools=["http_probe", "http_raw", "httpx_probe"],
         evidence_text="来源：2026-09-21 agent-lab 第二轮（juice-shop）——拿到 "
                       "/ftp 目录列表后只探了 package.json.bak，漏掉列表里"
                       "已列出的 acquisitions.md；第三轮加了'逐项枚举'后反向"
@@ -104,7 +104,7 @@ SEED_SKILLS: tuple[Skill, ...] = (
             "结论里只写经对照验证过的路径；把兜底页当发现写进报告等于污染"
             "结论的可信度",
         ],
-        tools=["http_probe", "httpx_probe"],
+        tools=["http_probe", "http_raw", "httpx_probe"],
         evidence_text="来源：2026-09-21 agent-lab 第三轮 B（juice-shop）——"
                       "agent 把 /.git/config 的 200 当真实信息泄漏写进结论；"
                       "实测它与不存在路径 /no-such-path-xyz 返回的是同一份 "

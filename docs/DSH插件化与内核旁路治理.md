@@ -106,6 +106,48 @@ DSH 的两层组合（源码调研结论，证据见括号）：
 
 ---
 
+## 三之补：实施状态（2026-09-21 当晚）
+
+| 步骤 | 状态 | 交付物 | 真机证据 |
+|---|---|---|---|
+| 第一步 · 内核补原始证据工具 | **已实施** | `penagent/builtin_tools.py` 的 `http_raw`（状态行 + 完整响应头 + 正文片段 + 耗时；不跟随重定向；4xx/5xx 按响应返回） | 真实靶场实测：`/sitemap.xml` 与 `/` 同为 `200 text/html len=9903`（SPA 兜底一眼可分），`/api/Products` 为 `application/json len=16026`；内核 MCP 工具数 40 → **41** |
+| 第二步 · 证据链固化（只读观测） | **已实施** | 宿主 bundle `dsh/proteus-bridge`（订阅 `session/event` → spool）+ 内核导入器 `penagent/dsh_bridge.py` + CLI `python -m penagent dsh-sync` | 真实 headless 会话跑完 → spool 2 行 → 入链 1 条 `tool='pwsh' · ok=True · args={'command': 'echo bridge-v2-ok'}`，链校验 OK；DSH web 侧 `--dump-config` 可见 `# == dsh-proteus-bridge` 层 |
+| 第三步 · `pre-execute` 目标动作裁决 | **未实施** | — | 需先拍板：安全前提（宿主进程内执行）与默认档位（ask / deny） |
+
+**形态选择的落地结论**：第二步本可以塞进 preset 行里做，但按研究结论它拿不到 `session/event` 的订阅面——**必须是 host 平面 bundle**。这也是"要不要做成完整插件"这个问题的实际答案：**该做成插件的那部分，就是"机制与审计"**（事件订阅、裁决、策略）；"提供工具"那部分继续留在 MCP + preset 行即可（成本最低、与 DSH 版本耦合最小）。
+
+### 实施中踩到的两个形状陷阱（都靠真机验证抓出来）
+
+1. **`tool/result` 的 `callId` 不在事件顶层**（那是 `tool/call` 的字段），而在
+   `message.source.callId`（`@deepseek-ai/dsh-llm` 的 `message.ts`：
+   `ToolMessageSource = { kind: 'tool', callId }`）。第一版插件取不到 → 结果行
+   callId 全空 → 配对失败、记录丢了工具名与参数。
+   → 插件改为三级探测（顶层 → `message.source` → block），导入器再加
+   `(turn, step)` 兜底配对，历史 spool 与形状变化都能吞下。
+2. **未配对的调用不能立即记账**：第一版把"只有调用没有结果"也入链，结果
+   随后到达时会留下同一次调用的两条记录——看着可审计、实际对不上。
+   → 改为**挂起并跨导入持久化**（状态文件里存 pending），`--flush-open`
+   才显式冲刷（会话已结束、结果永不来的场景）。
+
+### 用法（本机已装好）
+
+```bash
+# 宿主侧：把桥装进目标 profile（会自动追加 dsh.bundle 层）
+dsh plugin --profile web add <REPO>/dsh/proteus-bridge
+dsh plugin --profile headless add <REPO>/dsh/proteus-bridge   # 无 UI 验证用
+# 装完重启 DSH 进程（bundle 层在启动时合成）
+
+# 内核侧：把 spool 并入独立证据链（默认 data/dsh-chain.jsonl，不动内核任务链）
+python -m penagent dsh-sync --data data
+python -m penagent dsh-sync --data data --flush-open    # 会话结束后冲刷未配对调用
+```
+
+> **web profile 的 pnpm 版本陷阱**：本机 `~/.dsh/profiles/web` 的 node_modules
+> 由另一个 pnpm 大版本安装，`dsh plugin add` 直接失败（store 版本不匹配）。
+> 本次按该命令的等价做法手工登记：备份 `package.json` → 加 `link:` 依赖 →
+> `bundles` 追加 `dsh-proteus-bridge` → 建同名符号链接。备份文件留在
+> `~/.dsh/profiles/web/package.json.bak-proteus-bridge-*`。
+
 ## 四、建议：分三步走，顺序不能反
 
 1. **先做 A**（内核侧原始证据工具 + 直连/明示链路限制）——它是前提：L1 不修，

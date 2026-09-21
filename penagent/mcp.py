@@ -1,7 +1,7 @@
 """XPentest MCP Server：把渗透 Agent 能力暴露为 MCP 工具（stdio，零依赖）。
 
 MCP 工具（供外部 Agent 客户端调用）：
-- 底层工具：port_scan / http_probe / dns_lookup / robots_fetch（安全被动）
+- 底层工具：port_scan / http_probe / http_raw / dns_lookup / robots_fetch（安全被动）
            + poxiao_scan（危险，需 authorize=true）
 - 高层能力：pentest_run（LLM 决策完整任务）/ pentest_skills / pentest_missions
            / pentest_reflect

@@ -202,6 +202,34 @@ def cmd_verify(args) -> int:
     return 0 if v["ok"] else 1
 
 
+def cmd_dsh_sync(args) -> int:
+    """把 DSH 宿主会话的工具调用事件并入内核证据链（审计通道）。"""
+    from penagent.dsh_bridge import import_spool
+
+    data = Path(args.data)
+    report = import_spool(
+        spool=args.spool or (data / "dsh-events.jsonl"),
+        # 独立链（默认）：宿主会话的所有动作与内核任务链分开记，
+        # 避免混进内核的 mission 窗口与 verify 口径；需要合并时用 --chain 指定
+        chain_path=args.chain or (data / "dsh-chain.jsonl"),
+        state_path=None if args.no_state else (data / "dsh-spool.state.json"),
+        replay=args.replay,
+        flush_open=args.flush_open,
+    )
+    if report.get("note"):
+        print(f"无内容可导: {report['note']}")
+        return 0
+    print(f"DSH 事件导入: 新增记录 {report['records']} 条"
+          f"（读入 {report['lines']} 行，未配对 {report['open_calls']} 条，"
+          f"坏行 {report['bad_lines']}）")
+    print(f"证据链: {report['chain']} · 校验 "
+          f"{'OK' if report['chain_ok'] else 'FAILED'}"
+          f"（长度 {report.get('chain_length')}）")
+    if report.get("state_error"):
+        print(f"  [warn] 增量状态未落盘（下次会重复导入）: {report['state_error']}")
+    return 0 if report["chain_ok"] else 1
+
+
 def cmd_mcp(args) -> int:
     """启动 MCP Server（stdio）：供 Claude/Codex/OpenCode 等客户端驱动。"""
     from penagent.mcp import PentestMCPServer
@@ -305,9 +333,22 @@ def main(argv: list[str] | None = None) -> int:
         ("skills", cmd_skills, "经验库技能"),
         ("missions", cmd_missions, "作战记录"),
         ("verify", cmd_verify, "证据链校验"),
+        ("dsh-sync", cmd_dsh_sync, "导入 DSH 会话事件到证据链（审计桥）"),
     ):
         p = sub.add_parser(name, help=help_t)
         p.add_argument("--data", default="data")
+        if name == "dsh-sync":
+            p.add_argument("--spool", default="",
+                           help="宿主桥落的事件文件（缺省 <data>/dsh-events.jsonl）")
+            p.add_argument("--replay", action="store_true",
+                           help="忽略增量偏移，从头重放（换链重建用）")
+            p.add_argument("--no-state", action="store_true",
+                           help="不记录增量状态（每次全量导入）")
+            p.add_argument("--chain", default="",
+                           help="目标证据链（缺省 <data>/dsh-chain.jsonl，"
+                                "独立于内核任务链）")
+            p.add_argument("--flush-open", action="store_true",
+                           help="把仍未配对的调用按 ok=None 落链（会话已结束时用）")
         if name == "skills":
             p.add_argument("--seed", action="store_true",
                            help="写入预置技能种子（幂等；来源见 "

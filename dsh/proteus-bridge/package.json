@@ -1,0 +1,18 @@
+{
+  "name": "dsh-proteus-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 宿主事件 -> Proteus 内核证据链的审计桥（只读观测，不拦截执行）",
+  "main": "index.mjs",
+  "files": [
+    "index.mjs",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -240,7 +240,7 @@ node verify-proteus.mjs && rm verify-proteus.mjs
 | 类别 | 工具 |
 |---|---|
 | 高层能力（内核驱动） | `pentest_run` / `pentest_skills` / `pentest_missions` / `pentest_reflect` |
-| 内置被动侦察 | `port_scan` / `http_probe` / `dns_lookup` / `robots_fetch` |
+| 内置被动侦察 | `port_scan` / `http_probe` / `http_raw` / `dns_lookup` / `robots_fetch` |
 | 外部 CLI（本机已安装的才注册） | `poxiao_scan` / `poxiao_recon` / `ruoyi_scan` / `nuclei_scan` / `httpx_probe` / `fscan_scan` / `subfinder_enum` / `dnsx_lookup` / `katana_crawl` / `naabu_scan` / `dalfox_xss` / `sqlmap_auto` / `gobuster_dir` / `ffuf_fuzz` / `ehole_finger` / `pocsuite_poc` |
 
 工具清单来自内核的统一注册中心（`penagent/registry.py`）：新增工具改配置即可，

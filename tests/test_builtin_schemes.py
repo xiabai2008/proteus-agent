@@ -13,7 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import pytest
 
-from penagent.builtin_tools import http_probe, robots_fetch
+from penagent.builtin_tools import http_probe, http_raw, robots_fetch
 
 
 def test_http_probe_rejects_file_scheme(tmp_path):
@@ -49,3 +49,102 @@ def test_robots_fetch_rejects_file_scheme(tmp_path):
     result = robots_fetch(str(tmp_path))
     assert "error" in result
     assert "TOPSECRET" not in str(result)
+
+# ----------------------------------------------------------------------
+# http_raw：原始证据工具（2026-09-21 DSH 实测暴露的缺口）
+#
+# 背景：DSh 会话里模型拒绝用内核工具、改用宿主 shell 的理由之一是
+# "http_probe 的固化输出给不了原始响应头与正文"。本工具补这一课，
+# 下面把它的三条刻意行为钉住：不跟随重定向、错误响应不抛异常、正文截断。
+# ----------------------------------------------------------------------
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def raw_server():
+    """本地临时 HTTP 服务：/ok · /redirect · /err · /big 四条路由。"""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _send(self, code, body: bytes, ctype: str = "text/plain"):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Test", "raw-1")
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", "/target")
+                self.send_header("X-Test", "raw-1")
+                self.end_headers()
+            elif self.path == "/err":
+                self._send(500, b'{"error":"boom"}', "application/json")
+            elif self.path == "/big":
+                self._send(200, b"x" * 5000)
+            else:
+                self._send(200, b'{"ok":true}', "application/json")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_http_raw_returns_original_headers_body_and_timing(raw_server):
+    result = http_raw(f"{raw_server}/ok")
+    assert result["status"] == 200 and result.get("error") is None
+    headers = dict(result["headers"])
+    assert headers.get("X-Test") == "raw-1"          # 原始响应头，不是结论字段
+    assert "ok" in result["body"] and result["truncated"] is False
+    assert result["elapsed_ms"] > 0
+    assert result["location"] == ""
+
+
+def test_http_raw_does_not_follow_redirect(raw_server):
+    """3xx 本身是证据：不能跟随，要能拿到 Location。"""
+    result = http_raw(f"{raw_server}/redirect")
+    assert result["status"] == 302
+    assert result["location"] == "/target"
+    assert result["url"].endswith("/redirect")       # URL 未被改写
+
+
+def test_http_raw_returns_error_responses(raw_server):
+    """4xx/5xx 按响应返回（错误页正文同样是证据），不抛异常。"""
+    result = http_raw(f"{raw_server}/err")
+    assert result["status"] == 500 and "boom" in result["body"]
+
+
+def test_http_raw_truncates_body(raw_server):
+    result = http_raw(f"{raw_server}/big", max_body=1000)
+    assert result["truncated"] is True
+    assert len(result["body"]) == 1000
+    assert result["status"] == 200
+
+
+def test_http_raw_rejects_bad_scheme_and_method():
+    assert "协议不被允许" in http_raw("file:///etc/hosts")["error"]
+    assert "禁止的地址" in http_raw(
+        "http://169.254.169.254/latest/meta-data/")["error"]
+    assert "不支持的方法" in http_raw("http://127.0.0.1:1/",
+                                     method="DELETE")["error"]
+
+
+def test_http_raw_visible_in_registry_and_mcp():
+    """工具必须真进注册表与 MCP 工具表——否则等于没加。"""
+    from penagent.builtin_tools import register_builtins
+    from penagent.tools import ToolRegistry
+
+    reg = ToolRegistry()
+    register_builtins(reg)
+    assert "http_raw" in reg.names()
