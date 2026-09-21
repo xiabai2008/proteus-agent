@@ -24,6 +24,8 @@ from typing import Callable, Optional
 
 LEVELS = ("none", "local", "docker")
 DEFAULT_IMAGE = "python:3.12-slim"
+# 容器内的工作目录（固定 Linux 路径）：宿主路径不能直接作 -w，见 DockerRunner.wrap
+CONTAINER_WORKDIR = "/work"
 
 
 def tool_needs_isolation(spec) -> bool:
@@ -79,11 +81,21 @@ class DockerRunner:
         return self._probe
 
     def wrap(self, command: list[str], spec) -> list[str]:
-        """把宿主命令包成容器命令：只读挂载工作目录，默认断网。"""
-        workdir = str(getattr(spec, "workdir", "") or "") or os.getcwd()
+        """把宿主命令包成容器命令：挂载工作目录，默认断网。
+
+        **容器只认 Linux 路径**：`-w` 传宿主路径在 Windows 上必然失败——
+        实测 `-w 'D:\\proj'` 得到 docker returncode 125
+        `the working directory 'D:\\proj' is invalid`。所以宿主路径只用于
+        `-v` 的**宿主侧**，容器侧固定映射到 `CONTAINER_WORKDIR`，`-w` 也用它。
+
+        这个缺陷此前被掩盖：Docker 不可用时 `decide()` 直接拒绝，根本走不到
+        这里；Docker 恢复后才暴露（见 docs/修复待办清单.md R-11 复核）。
+        """
+        host_dir = str(getattr(spec, "workdir", "") or "") or os.getcwd()
         return [shutil.which("docker") or "docker", "run", "--rm", "-i",
                 "--network", self.network_mode(spec),
-                "-v", f"{workdir}:{workdir}", "-w", workdir,
+                "-v", f"{host_dir}:{CONTAINER_WORKDIR}",
+                "-w", CONTAINER_WORKDIR,
                 self.image, *command]
 
     def network_mode(self, spec) -> str:

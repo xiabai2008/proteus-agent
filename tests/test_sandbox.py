@@ -252,3 +252,46 @@ def test_python_solve_is_container_only_under_ctf_mode():
 
     assert decision.allowed and decision.isolated is True
     assert mode.sandbox == "docker", "模式须声明 docker 档（local 等于放行裸跑）"
+
+# ----------------------------------------------------------------------
+# 2b. 容器内工作目录：宿主路径不能直接作 -w（R-11 复核发现）
+#
+# 容器只认 Linux 路径。此前 wrap() 把宿主路径同时用作 -v 的容器侧与 -w，
+# 在 Windows 上必然失败（docker returncode 125，`the working directory
+# 'D:\...' is invalid`）。该缺陷此前被掩盖：Docker 不可用时 decide() 直接
+# 拒绝，走不到 wrap()；Docker 恢复后才暴露。
+# ----------------------------------------------------------------------
+def test_docker_wrap_uses_container_linux_workdir():
+    """-w 必须是容器内的 Linux 路径；宿主路径只出现在 -v 的宿主侧。"""
+    from penagent.sandbox import CONTAINER_WORKDIR
+
+    spec = ToolSpec(name="t", kind="cli", dangerous=True, workdir=r"D:\proj")
+    cmd = DockerRunner().wrap(["python", "-c", "x"], spec)
+
+    w_idx = cmd.index("-w")
+    assert cmd[w_idx + 1] == CONTAINER_WORKDIR, \
+        f"-w 用了容器不认的路径: {cmd[w_idx + 1]!r}"
+    v_idx = cmd.index("-v")
+    assert cmd[v_idx + 1] == f"{spec.workdir}:{CONTAINER_WORKDIR}"
+
+
+def test_docker_container_execution_actually_works(tmp_path):
+    """端到端：包装后的命令在容器内**真跑**成功（容器不可用时跳过）。
+
+    这条覆盖"裁决放行"之外的**真实执行**——正是它暴露出 -w 的路径缺陷：
+    修复前该用例必然失败（返回码 125，工具体一次都没跑起来）。
+    """
+    runner = DockerRunner(probe_timeout=8.0)
+    ok, reason = runner.available()
+    if not ok:
+        pytest.skip(f"容器不可用: {reason}")
+
+    spec = ToolSpec(name="probe", kind="cli", dangerous=True, timeout=120,
+                    command=["python", "-c", "print('container-ok')"],
+                    workdir=str(tmp_path))
+    registry = ToolRegistry(sandbox=build_sandbox("docker", runner=runner))
+    registry.register(spec)
+
+    result = registry.execute("probe", {})
+    assert result.ok, f"容器内执行失败: {result.error[:200]}"
+    assert "container-ok" in str(result.output)
