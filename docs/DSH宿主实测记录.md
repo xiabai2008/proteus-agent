@@ -634,3 +634,7 @@ PowerShell `Invoke-WebRequest` 把整轮侦察做完，最后用宿主的 `write
 即：**档位是机制性生效的**（沙箱拒绝发生在工具执行前，提权要人工审批），
 模型也正确走了"拒绝 → 提权申请 → 被拒后如实收口"的路径。`proteus-ctf`
 （`danger-full-access` + `approval: never`）未实测。
+
+> **后续（方案评估）**：本文第十节暴露的"L1 能力 / L2 机制 / L3 审计"三层问题，
+> 以及"preset 行 vs 完整插件"的能力边界与三步走建议，见
+> `docs/DSH插件化与内核旁路治理.md`。
