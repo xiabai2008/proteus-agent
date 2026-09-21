@@ -248,3 +248,42 @@ def test_poxiao_ruoyi_stay_cli():
     assert "rayscan" not in center.names(source=SOURCE_CLI)
     # poxiao/ruoyi 未出现在 MCP server 声明里
     assert not any(s.name in ("poxiao", "ruoyi-scan") for s in center.servers())
+
+
+# ----------------------------------------------------------------------
+# R-14：外部 MCP Server 的接入开关
+#
+# 现状：build_center() 只 load_mcp_servers()（登记声明），从不 discover_mcp()
+# （实际连接），于是 mcp_servers.json 声明的 seckb / rayscan / chameleon
+# 在**生产路径**全部不可用（唯一调用点在探针脚本与测试里）。
+# 默认不连接是为避免启动被不可达的外部服务拖住——取舍合理，但需要一个
+# **显式开关**，而不是让这些能力永远悬空。
+# ----------------------------------------------------------------------
+def test_build_center_default_does_not_connect_external_servers(monkeypatch):
+    """默认（discover_mcp 未开）不得连接外部 server：启动不被拖住。"""
+    from penagent import registry as reg_mod
+
+    calls = []
+
+    def _spy(self, name=None, probe=None):
+        calls.append(name)
+        return {}
+
+    monkeypatch.setattr(reg_mod.ToolCenter, "discover_mcp", _spy)
+    reg_mod.build_center()
+    assert calls == []
+
+
+def test_build_center_discover_flag_connects_external_servers(monkeypatch):
+    """显式开启时才连接；name=None 表示连接全部已声明的 server。"""
+    from penagent import registry as reg_mod
+
+    calls = []
+
+    def _spy(self, name=None, probe=None):
+        calls.append(name)
+        return {}
+
+    monkeypatch.setattr(reg_mod.ToolCenter, "discover_mcp", _spy)
+    reg_mod.build_center(discover_mcp=True)
+    assert calls == [None]

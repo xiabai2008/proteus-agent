@@ -310,8 +310,16 @@ DEFAULT_CTF_TOOLS_JSON = Path(__file__).resolve().parent / "ctf_tools.json"
 
 def build_center(*, with_builtins: bool = True, with_external_cli: bool = True,
                  with_mcp_servers: bool = True,
-                 with_ctf_tools: bool = True) -> ToolCenter:
-    """组装默认注册中心（登记 + 声明；不连接外部 MCP Server）。"""
+                 with_ctf_tools: bool = True,
+                 discover_mcp: bool = False) -> ToolCenter:
+    """组装默认注册中心（登记 + 声明；默认不连接外部 MCP Server）。
+
+    `discover_mcp=True` 时才真正连接 `mcp_servers.json` 声明的外部 server
+    （阻塞式逐个探测，超时见配置）。默认 False 是为避免启动被不可达的外部
+    服务拖住——取舍合理，但代价是这些能力须显式开启才可用（此前没有任何
+    生产路径调用 discover_mcp，声明的 seckb / rayscan / chameleon 全部悬空，
+    见 docs/修复待办清单.md R-14）。
+    """
     from penagent.ctf_tools import register_ctf_tools
 
     center = ToolCenter()
@@ -324,4 +332,8 @@ def build_center(*, with_builtins: bool = True, with_external_cli: bool = True,
         center.load_cli_config(DEFAULT_CTF_TOOLS_JSON, origin="ctf_tools.json")
     if with_mcp_servers:
         center.load_mcp_servers()
+        if discover_mcp:
+            # 失败会在 center 的 notes 里留原因（discover_mcp 内部记录），
+            # 不可达的 server 不注册其工具，不抛异常
+            center.discover_mcp()
     return center

@@ -32,10 +32,11 @@ def _make_agent(args, registry=None, memory=None, evidence=None):
     if registry is not None:
         reg = registry
     elif mode is not None:
-        # 带模式时走统一注册中心：模式声明的工具可用性与沙箱档位随之生效
         from penagent.registry import build_center
 
-        reg = build_center().build_registry(mode)
+        reg = build_center(
+            discover_mcp=bool(getattr(args, "discover_mcp", False))
+        ).build_registry(mode)
     else:
         reg = ToolRegistry()
         register_builtins(reg)
@@ -171,15 +172,19 @@ def cmd_verify(args) -> int:
 def cmd_mcp(args) -> int:
     """启动 MCP Server（stdio）：供 Claude/Codex/OpenCode 等客户端驱动。"""
     from penagent.mcp import PentestMCPServer
+    from penagent.registry import build_center
 
+    center = build_center(discover_mcp=getattr(args, "discover_mcp", False))
     server = PentestMCPServer(data_dir=args.data,
                               allowed_targets=args.targets or None,
                               authorize=getattr(args, "authorize", False),
-                              default_mode=getattr(args, "default_mode", ""))
+                              default_mode=getattr(args, "default_mode", ""),
+                              center=center)
     print(f"XPentest MCP Server 就绪（tools/list 可查工具，"
           f"targets={args.targets or '127.0.0.1/localhost'}，"
           f"authorize={'on' if getattr(args, 'authorize', False) else 'off'}，"
-          f"default_mode={server.default_mode or '（未配置）'}）",
+          f"default_mode={server.default_mode or '（未配置）'}，"
+          f"工具数={len(server.registry.names())}）",
           file=sys.stderr)
     server.serve_stdio()
     return 0
@@ -242,6 +247,10 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--data", default="data")
     p_run.add_argument("--rl-policy", default="data/rl/policy.json",
                        help="RL 策略 Q 表路径（不存在则跳过）")
+    p_run.add_argument("--discover-mcp", action="store_true",
+                       help="连接 mcp_servers.json 声明的外部 MCP Server"
+                            "（seckb 知识库 / RayScan / Chameleon）；默认不连接，"
+                            "避免启动被不可达的外部服务拖住")
     p_run.set_defaults(fn=cmd_run)
 
     p_ref = sub.add_parser("reflect", help="任务后反思（LLM 复盘→技能沉淀）")
@@ -275,6 +284,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="服务端默认模式 id：pentest_run 未显式指定 mode 时"
                             "回落到它（如 pentest-standard）。不配则该路径不加"
                             "模式约束——沙箱裁决缺失，危险工具直跑宿主")
+    p_mcp.add_argument("--discover-mcp", action="store_true",
+                       help="连接 mcp_servers.json 声明的外部 MCP Server"
+                            "（seckb 知识库 / RayScan / Chameleon）；默认不连接，"
+                            "避免启动被不可达的外部服务拖住")
     p_mcp.set_defaults(fn=cmd_mcp)
 
     p_gaps = sub.add_parser("gaps", help="技能盲区发现（能力进化分析）")
