@@ -602,3 +602,35 @@ PowerShell `Invoke-WebRequest` 把整轮侦察做完，最后用宿主的 `write
 解压/脚本能力也没了，而 preset 的设计初衷正需要它们）；② 宿主侧对 shell 加网络出口
 策略（DSH 是否支持待查）；③ 接受"DSH 会话存在旁路"并写进文档，把内核价值限定在
 显式使用 `mcp__proteus__*` 或 `pentest_run` 的路径上。
+### 10.4 补记：模型的拒绝理由（值得记下来）+ 档位机制验证
+
+**模型为什么不用内核工具**（会话第 2 轮里它自己给出的理由，逐条成立）：
+
+1. **纪律约束**：任务限定"不发载荷、不爆破、不高频"，而 `nuclei_scan` /
+   `sqlmap_auto` / `dalfox_xss` / `ffuf_fuzz` / `gobuster_dir` / `fscan_scan` /
+   `pf_*` 本质是主动攻击/爆破/模板扫描器，会违反约束；剩下的轻量工具够不够用是另一回事。
+2. **链路不成立**：chameleon 系与 `pentest_run` 走**远端采集桥/代理**（带
+   `proxy_region`），对 `127.0.0.1:3000` 这种本机回环目标，远端代理看不到被扫端——
+   这是**内核侧的能力缺口**，不是模型的偏好问题。
+3. **证据精度**：任务要求"状态码 + 响应头 + 可重放证据"，pwsh 的
+   `Invoke-WebRequest` 能给原始响应头（判读 `Server`/`X-Powered-By` 为空）、
+   能读完整正文并用 `Content-Type` 严格区分 SPA 回退与真实端点；内核单点工具
+   （`http_probe` / `robots_fetch`）的固定输出格式给不了这些精细判读。
+4. **可审计性**：单一脚本、30 余次请求统一节流与统一判读逻辑，比拼装多个单点
+   工具更干净。
+
+结论要跟着证据走：**这更像"内核在该场景确实不划算"，而不是"模型不会用工具"**。
+所以 persona 的规则改成"优先走内核 + 三种允许例外（链路到不了 / 重型扫描器不
+符合任务纪律 / 证据精度需要原始响应控制），例外要说明理由并标注该步不经内核校验"，
+而不是一刀切"必须走内核"。
+
+**档位机制验证（三档 → 实测两档）**：
+
+| 档位 | 会话 runtime context | 写文件实测 |
+|---|---|---|
+| `proteus-standard` | `file policy: workspace-write` + `Approval policy: ask` | 正常落盘（本轮报告即由此写出） |
+| `proteus-safe` | `file policy: read-only` + `Approval policy: ask` | 直接写 → **`FS_SANDBOX_DENIED`**；模型按提示发起一次性提权（`sandbox_permissions: workspace-write` + 理由）→ UI 弹审批 → **拒绝后写入未发生**，模型如实说明 |
+
+即：**档位是机制性生效的**（沙箱拒绝发生在工具执行前，提权要人工审批），
+模型也正确走了"拒绝 → 提权申请 → 被拒后如实收口"的路径。`proteus-ctf`
+（`danger-full-access` + `approval: never`）未实测。
