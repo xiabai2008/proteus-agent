@@ -400,8 +400,9 @@ def test_sandbox_image_runs_sqlmap_through_command_rewrite():
     实际写法，不能简化成裸名否则测不到重写逻辑。
 
     `egress=True`：出网工具在 `network_egress=false` 的模式下会被沙箱拒绝
-    （本用例实测到该拒绝，即 docs/修复待办清单.md R-16 记录的那个矛盾）。
-    这里测的是**容器化链路本身**，故显式放开出网。
+    （R-16 的机制，现仍保留——pentest-standard 已于 2026-09-21 决策改声明
+    `network_egress: true`，但 base 模式与其他模式仍可关闸）。这里测的是
+    **容器化链路本身**，故显式放开出网。
     """
     runner = _sandbox_image_or_skip()
     spec = ToolSpec(name="sqlmap_probe", kind="cli", dangerous=True,
@@ -483,8 +484,9 @@ def test_sandbox_sqlmap_real_scan_against_juiceshop():
 def test_egress_off_blocks_networked_tool_before_container():
     """`network_egress=false` 时出网工具被**沙箱层**拒绝（R-16 的机制）。
 
-    这条钉住当前行为：不是缺陷，是一个需要决策的配置矛盾——渗透工具本质
-    需要出网，而 pentest-standard 声明 `network_egress: false`。
+    钉住该机制本身：渗透工具本质需要出网，pentest-standard 已于
+    2026-09-21 决策改为 `network_egress: true`（R-16 选①），但该闸门
+    机制保留——base 缺省仍是 false，其他模式可按需关闸。
     """
     spec = ToolSpec(name="net_tool", kind="cli", dangerous=True,
                     network=True, command=["echo", "x"])

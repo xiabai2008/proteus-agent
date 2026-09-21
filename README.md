@@ -220,7 +220,9 @@ proteus-agent/
 
 **安全评审**：F-E2E-3 已收口——`rsactf_attack` 维持宿主直跑（离线数学攻击、无网络出口；专用镜像 proteus-sandbox 虽已内置 RsaCtfTool（R-15），但默认镜像不含它且需显式配置 `PENTEST_DOCKER_IMAGE`，Docker-free 环境提权后仍不可用），人工把关由 require_confirm 档位承担；结论与依据登记于 `penagent/ctf_tools.json`，契约用例 `test_rsactf_attack_review_locks_host_direct_tier` 锁定防止静默改档。
 
-**下一步**：Web 控制台 ask 档人工确认通道实测（F-E2E-5）· `pentest-standard` 的 `scope.network_egress: false` 与渗透工具出网需求的矛盾（R-16）· SQLi/暴力破解等 require_confirm 审批闭环的实战覆盖 · 镜像内渗透工具扩到 nuclei/ffuf 等（需先解决模板/字典依赖）· 记忆/技能进化长周期数据沉淀。
+**下一步**：Web 控制台 ask 档人工确认通道实测（F-E2E-5）· SQLi/暴力破解等 require_confirm 审批闭环的实战覆盖 · 镜像内渗透工具扩到 nuclei/ffuf 等（需先解决模板/字典依赖）· 记忆/技能进化长周期数据沉淀。
+
+> R-16 已于 2026-09-21 决策收口：`pentest-standard` 改 `network_egress: true`（渗透必须触达目标，边界由 `target_allowlist` 硬校验承担），闸门机制本身保留。详见 `docs/修复待办清单.md`。
 
 ---
 
