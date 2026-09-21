@@ -1,10 +1,11 @@
-"""CLI 入口：pentest 命令。
+"""CLI 入口。
 
-用法示例：
-  pentest run --target http://127.0.0.1:8080 --objective "侦察并总结目标"
-  pentest run --target ... --authorize          # 允许危险工具
-  pentest reflect <mission_id>                  # 任务后反思（LLM 复盘）
-  pentest skills / missions / agents / verify
+用法示例（本仓库未安装 console_script，入口是 `python -m penagent`；
+仓库里没有 pyproject.toml / setup.py，所以不存在可直接调用的 `pentest` 命令）：
+  python -m penagent run --target http://127.0.0.1:8080 --objective "侦察并总结目标"
+  python -m penagent run --target ... --authorize   # 允许危险工具
+  python -m penagent reflect <mission_id>           # 任务后反思（LLM 复盘）
+  python -m penagent skills / missions / agents / verify
 """
 from __future__ import annotations
 
@@ -14,12 +15,9 @@ import sys
 from pathlib import Path
 
 from penagent.agent import PenAgent, Policy
-from penagent.builtin_tools import register_builtins
 from penagent.evidence import EvidenceChain
-from penagent.external_tools import load_external_tools
 from penagent.llm import LLMConfig
 from penagent.memory import Memory
-from penagent.tools import ToolRegistry
 
 
 def _make_agent(args, registry=None, memory=None, evidence=None):
@@ -31,21 +29,15 @@ def _make_agent(args, registry=None, memory=None, evidence=None):
         mode = load_mode(mode_id)
     if registry is not None:
         reg = registry
-    elif mode is not None:
+    else:
+        # 统一走注册中心：模式可用性、CTF 工具、适配层（PacketForge /
+        # RayScan）都在这里装配。此前无模式分支自行拼装 ToolRegistry 并
+        # 单独注册 adapters，与带模式分支的工具集不一致（R-9）。
         from penagent.registry import build_center
 
         reg = build_center(
             discover_mcp=bool(getattr(args, "discover_mcp", False))
         ).build_registry(mode)
-    else:
-        reg = ToolRegistry()
-        register_builtins(reg)
-        load_external_tools(reg)
-    from penagent.adapters.packetforge import register_packetforge
-    from penagent.adapters.rayscan import register_rayscan
-
-    register_packetforge(reg)
-    register_rayscan(reg)
     mem = memory or Memory(args.data)
     ev = evidence or EvidenceChain(Path(args.data) / "chain.jsonl")
     policy = Policy(allowed_targets=args.targets or None,
@@ -118,22 +110,44 @@ def cmd_reflect(args) -> int:
 
 
 def cmd_agents(args) -> int:
-    reg = ToolRegistry()
-    register_builtins(reg)
-    info = load_external_tools(reg)
-    from penagent.adapters.packetforge import register_packetforge
-    from penagent.adapters.rayscan import register_rayscan
+    """列出工具（走统一注册中心，与内核实际挂载一致）。
 
-    pf_info = register_packetforge(reg)
-    rs_info = register_rayscan(reg)
-    print(f"内置工具 {len(reg.names())} 个:")
-    for name in reg.names():
-        spec = reg.get(name)
+    两层过滤都要生效才等于"实际可用"：
+    1. 注册中心的 `entry.modes`（工具声明的模式可用性）
+    2. `ModeProfile.capability` 的 allow/deny（模式对工具的裁决）
+    所以这里直接构建与内核同款的注册表再列出，而不是只按声明过滤。
+    此前本命令自行拼装 `ToolRegistry + builtins + adapters`，与 `--mode`
+    实际挂载的注册表不一致（见 docs/修复待办清单.md R-9）。
+    """
+    from penagent.modes import load_mode
+    from penagent.registry import build_center
+
+    mode_id = getattr(args, "mode", "") or ""
+    mode = load_mode(mode_id) if mode_id else None
+    center = build_center(discover_mcp=getattr(args, "discover_mcp", False))
+    registry = center.build_registry(mode)
+    if mode is not None:
+        # 第二层过滤：与 PenAgent.__init__ 完全同款——只按 entry.modes 过滤
+        # 得到的是"工具声明在哪些模式可用"，还要过 ModeProfile.capability
+        # 才是内核真正能执行的集合（漏这层会虚报可用工具）
+        registry = mode.filtered_registry(registry)
+    entries = {e.name: e for e in center.all_entries()}
+
+    names = registry.names()
+    scope = f"模式 {mode_id} 实际可执行" if mode_id else "无模式（内核工具全集）"
+    print(f"工具 {len(names)} 个（{scope}）:")
+    by_source: dict[str, int] = {}
+    for name in names:
+        spec = registry.get(name)
+        entry = entries.get(name)
+        source = entry.source if entry else "?"
+        by_source[source] = by_source.get(source, 0) + 1
         danger = " [高危]" if spec.dangerous else ""
-        print(f"  {name:<18} [{spec.kind}]{danger} {spec.description}")
-    print(f"\n外部工具加载: {info}")
-    print(f"PacketForge 接入: {pf_info}")
-    print(f"RayScan 接入: {rs_info}")
+        print(f"  {name:<22} [{source}]{danger} "
+              f"{spec.description[:34]}")
+    print(f"\n按来源: {by_source}")
+    for note in center.summary().get("notes", []):
+        print(f"注: {str(note)[:110]}")
     return 0
 
 
@@ -227,7 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, ValueError):
             pass
     parser = argparse.ArgumentParser(
-        prog="pentest", description="XPentest：LLM 驱动的个人渗透 Agent")
+        prog="python -m penagent",
+        description="XPentest：LLM 驱动的个人渗透 Agent")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_run = sub.add_parser("run", help="执行渗透任务（LLM 决策）")
@@ -258,8 +273,16 @@ def main(argv: list[str] | None = None) -> int:
     p_ref.add_argument("--data", default="data")
     p_ref.set_defaults(fn=cmd_reflect)
 
+    p_ag = sub.add_parser("agents", help="列出可用工具")
+    p_ag.add_argument("--data", default="data")
+    p_ag.add_argument("--mode", default="",
+                      help="只看该模式可见的工具（缺省列出全部已登记）")
+    p_ag.add_argument("--discover-mcp", action="store_true",
+                      help="列出前先连接外部 MCP Server"
+                           "（seckb 知识库 / RayScan / Chameleon）")
+    p_ag.set_defaults(fn=cmd_agents)
+
     for name, fn, help_t in (
-        ("agents", cmd_agents, "列出可用工具"),
         ("skills", cmd_skills, "经验库技能"),
         ("missions", cmd_missions, "作战记录"),
         ("verify", cmd_verify, "证据链校验"),

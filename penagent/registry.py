@@ -208,6 +208,14 @@ class ToolCenter:
     def names(self, **kw) -> list[str]:
         return [e.name for e in self.discover(**kw)]
 
+    def all_entries(self) -> list["ToolEntry"]:
+        """全部登记（**不按模式可用性过滤**）——用于诊断展示。
+
+        `discover()` 会按 `entry.modes` 过滤，因此不带 mode_id 时看不到那些
+        仅限某些模式使用的工具（如 CTF 工具链）。诊断类输出需要完整清单。
+        """
+        return sorted(self._entries.values(), key=lambda e: (e.source, e.name))
+
     def servers(self) -> list[MCPServerSpec]:
         return list(self._servers.values())
 
@@ -311,6 +319,7 @@ DEFAULT_CTF_TOOLS_JSON = Path(__file__).resolve().parent / "ctf_tools.json"
 def build_center(*, with_builtins: bool = True, with_external_cli: bool = True,
                  with_mcp_servers: bool = True,
                  with_ctf_tools: bool = True,
+                 with_adapters: bool = True,
                  discover_mcp: bool = False) -> ToolCenter:
     """组装默认注册中心（登记 + 声明；默认不连接外部 MCP Server）。
 
@@ -319,6 +328,11 @@ def build_center(*, with_builtins: bool = True, with_external_cli: bool = True,
     服务拖住——取舍合理，但代价是这些能力须显式开启才可用（此前没有任何
     生产路径调用 discover_mcp，声明的 seckb / rayscan / chameleon 全部悬空，
     见 docs/修复待办清单.md R-14）。
+
+    `with_adapters=True` 时把 PacketForge / RayScan 适配层一并登记。此前这
+    两个适配层**只在 CLI 路径**注册，导致走本中心的 DSH / MCP 路径看不到它们
+    ——同一条命令在不同入口下工具集不一致（R-9）。适配层不可用时不注册
+    （沿用"不可用不注册"语义），不抛异常。
     """
     from penagent.ctf_tools import register_ctf_tools
 
@@ -330,6 +344,18 @@ def build_center(*, with_builtins: bool = True, with_external_cli: bool = True,
     if with_ctf_tools:
         register_ctf_tools(center)
         center.load_cli_config(DEFAULT_CTF_TOOLS_JSON, origin="ctf_tools.json")
+    if with_adapters:
+        # 适配层接收的是 ToolRegistry 接口，先注册到临时注册表再转入中心
+        from penagent.adapters.packetforge import register_packetforge
+        from penagent.adapters.rayscan import register_rayscan
+
+        for register, origin in ((register_packetforge, "packetforge"),
+                                 (register_rayscan, "rayscan")):
+            probe = ToolRegistry()
+            register(probe)
+            for spec in _specs_from(probe):
+                center.register_spec(spec, source=SOURCE_FUNCTION,
+                                     origin=origin)
     if with_mcp_servers:
         center.load_mcp_servers()
         if discover_mcp:

@@ -287,3 +287,50 @@ def test_build_center_discover_flag_connects_external_servers(monkeypatch):
     monkeypatch.setattr(reg_mod.ToolCenter, "discover_mcp", _spy)
     reg_mod.build_center(discover_mcp=True)
     assert calls == [None]
+
+
+# ----------------------------------------------------------------------
+# R-9：工具清单必须与内核实际挂载一致
+#
+# 此前 `agents` 自行拼装 ToolRegistry + builtins + adapters，与带模式的
+# 内核注册表不一致（看不到 CTF 工具、不反映 capability 裁决）；而适配层
+# 又只在 CLI 路径注册，DSH/MCP 路径看不到。两处都统一到 build_center。
+# ----------------------------------------------------------------------
+def test_build_center_adapters_toggle():
+    """with_adapters 开关生效：关掉后适配层（packetforge/rayscan）不在登记里。"""
+    off = build_center(with_adapters=False).all_entries()
+    assert all(e.origin not in ("packetforge", "rayscan") for e in off)
+
+
+def test_all_entries_not_filtered_by_mode():
+    """all_entries() 返回完整登记（含仅限特定模式的 CTF 工具）。"""
+    all_names = {e.name for e in build_center().all_entries()}
+    assert "rsactf_attack" in all_names      # 仅在 ctf-* 模式挂载
+    assert "port_scan" in all_names          # 全模式
+
+
+def test_agents_listing_matches_kernel_registry(tmp_path):
+    """`agents --mode` 的算法必须与内核实际注册表逐名一致（R-9）。
+
+    两层过滤都要生效：`entry.modes`（工具声明的模式可用性）+
+    `ModeProfile.capability`（模式对工具的裁决）。漏任一层都会虚报可用工具
+    （实测过：只按 entry.modes 过滤时 ctf-crypto 虚报 29 个，实际 5 个）。
+    """
+    from penagent.agent import PenAgent, Policy
+    from penagent.evidence import EvidenceChain
+    from penagent.llm import LLMConfig
+    from penagent.memory import Memory
+    from penagent.modes import load_mode
+
+    center = build_center()
+    for mid in ("ctf-crypto", "ctf-web", "pentest-standard", None):
+        mode = load_mode(mid) if mid else None
+        registry = center.build_registry(mode)
+        if mode is not None:
+            registry = mode.filtered_registry(registry)   # cmd_agents 的算法
+        agent = PenAgent(registry, Memory(tmp_path / (mid or "nomode")),
+                         EvidenceChain(tmp_path / f"{mid or 'nomode'}.jsonl"),
+                         LLMConfig(),
+                         policy=Policy(allowed_targets=["127.0.0.1"]),
+                         mode=mode)
+        assert set(registry.names()) == set(agent.registry.names()), mid
