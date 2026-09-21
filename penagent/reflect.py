@@ -18,6 +18,7 @@ REFLECT_PROMPT = """你是 XPentest 的反思引擎。分析以下作战记录�
 {"outcome_analysis": "成败归因（为什么成功/失败，哪些工具/参数/策略起了作用）",
  "skill": null 或 {
    "title": "技能名",
+   "category": "漏洞方向标签（sqli / ssrf / xss / 上传 / 越权 / web-recon / report-gen 等，取最贴近的一个；无法归类则空串）",
    "target_fingerprint": "适用目标特征（如: python web 应用）",
    "steps": ["可复用步骤1", "步骤2"],
    "tools": ["用到的工具名"],
@@ -26,6 +27,8 @@ REFLECT_PROMPT = """你是 XPentest 的反思引擎。分析以下作战记录�
 
 要求：
 - 仅当任务成功且步骤可复用时输出 skill，否则 null；
+- category 决定该技能归属哪个模式技能包（模式 `skills:` 字段按它过滤），
+  请从上述标签中选一个最贴近的；
 - evidence_refs 只能引用作战记录中真实存在的 seq；
 - 若任务失败，分析失败模式与改进建议（写入 outcome_analysis）。
 
@@ -71,6 +74,7 @@ class Reflector:
         skill = Skill(
             id=str(uuid.uuid4())[:8],
             title=skill_data.get("title", "未命名技能"),
+            category=str(skill_data.get("category", "") or "").strip(),
             target_fingerprint=skill_data.get("target_fingerprint", ""),
             steps=skill_data.get("steps", []),
             tools=skill_data.get("tools", []),

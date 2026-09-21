@@ -251,6 +251,23 @@ class PenAgent:
                 self.memory.update_skill(target)
         self._used_skills = []
 
+    def _filter_mode_skills(self, skills: list) -> list:
+        """按模式的技能包过滤（`mode.skills` 的机制性消费）。
+
+        AGENTS.md 第 4 节把 `skills` 定义为"本模式技能包 / 技能检索过滤"，
+        但该字段此前无任何消费方（仅 Web 控制台展示与测试断言）。这里让它
+        真正生效：按 `Skill.category` 与本模式声明的技能包求交。
+
+        语义上只过滤"**明确标注了 category 且不在白名单内**"的技能——未标注
+        （category 为空）的保留，避免因历史数据未标注而被静默丢弃；
+        无模式或未声明技能包时完全不过滤（保持升级前行为）。
+        """
+        if self.mode is None or not self.mode.skills:
+            return skills
+        allowed = set(self.mode.skills)
+        return [s for s in skills
+                if not s.category or s.category in allowed]
+
     def _rank_skills(self, skills: list, fingerprint: str,
                      stealth: bool = False) -> list:
         """技能注入排序：策略最优技能优先，其余按成功率降序。
@@ -342,6 +359,8 @@ class PenAgent:
         mission = MissionResult(mission_id=mission_id, target=target,
                                 objective=objective)
         skills = self.memory.find_skills(fingerprint or target)
+        # 模式技能包过滤：mode.skills 声明之外的类别不注入（R-3）
+        skills = self._filter_mode_skills(skills)
         skills = self._rank_skills(skills, fingerprint or target,
                                    stealth=stealth)
         mission.injected_skills = [s.title for s in skills[-3:]]

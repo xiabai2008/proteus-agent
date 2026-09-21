@@ -194,3 +194,90 @@ def test_budget_exhausted_in_ctf_mode_still_needs_flag(monkeypatch, tmp_path):
 
     assert result.outcome == "success"
     assert "flag{budget-ok}" in result.summary
+
+
+# ----------------------------------------------------------------------
+# R-3：mode.skills 作为技能包过滤
+#
+# 该字段此前**无任何消费方**（仅在 Web 控制台展示与测试断言中出现），与
+# AGENTS.md 第 4 节声明的"技能检索过滤"语义不符。这里让它机制性生效：
+# 按 Skill.category 过滤本模式的技能包。语义上只过滤"明确标注了 category
+# 且不在白名单内"的技能——未标注的保留，避免静默丢弃历史数据。
+# ----------------------------------------------------------------------
+def _mode_with_skills(skills):
+    """构造带 skills 声明的模式档案（ModeProfile 冻结，用 replace）。"""
+    from dataclasses import replace
+
+    from penagent.modes import load_mode
+
+    return replace(load_mode("pentest-standard"), skills=tuple(skills))
+
+
+def test_mode_skills_filter_drops_out_of_pack_category(tmp_path):
+    """category 不在 mode.skills 内的技能不被注入。"""
+    mem = Memory(tmp_path, namespace="pentest-standard")
+    mem.add_skill(Skill(id="s-sqli", title="SQLi 链", category="sqli",
+                        target_fingerprint="web flask", evidence_refs=[1]))
+    mem.add_skill(Skill(id="s-xss", title="XSS 链", category="xss",
+                        target_fingerprint="web flask", evidence_refs=[1]))
+    agent = _agent(tmp_path, mode=_mode_with_skills(["sqli"]),
+                   namespace_memory=mem)
+
+    picked = agent._filter_mode_skills(agent.memory.find_skills("web flask"))
+    assert [s.id for s in picked] == ["s-sqli"]
+
+
+def test_uncategorized_skill_survives_mode_filter(tmp_path):
+    """未标注 category 的技能保留：过滤不得静默丢弃历史数据。"""
+    mem = Memory(tmp_path, namespace="pentest-standard")
+    mem.add_skill(Skill(id="s-old", title="未标注技能",
+                        target_fingerprint="web flask"))
+    agent = _agent(tmp_path, mode=_mode_with_skills(["sqli"]),
+                   namespace_memory=mem)
+
+    picked = agent._filter_mode_skills(agent.memory.find_skills("web flask"))
+    assert [s.id for s in picked] == ["s-old"]
+
+
+def test_empty_mode_skills_disables_filtering(tmp_path):
+    """mode.skills 为空 = 不过滤（未声明技能包的模式行为不变）。"""
+    mem = Memory(tmp_path, namespace="pentest-standard")
+    mem.add_skill(Skill(id="s-xss", title="XSS 链", category="xss",
+                        target_fingerprint="web flask"))
+    agent = _agent(tmp_path, mode=_mode_with_skills([]),
+                   namespace_memory=mem)
+
+    picked = agent._filter_mode_skills(agent.memory.find_skills("web flask"))
+    assert [s.id for s in picked] == ["s-xss"]
+
+
+def test_no_mode_means_no_filtering(tmp_path):
+    """无模式时不加这一层过滤（与升级前行为一致）。"""
+    mem = Memory(tmp_path)
+    mem.add_skill(Skill(id="s-xss", title="XSS 链", category="xss",
+                        target_fingerprint="web flask"))
+    agent = _agent(tmp_path, mode=None, namespace_memory=mem)
+
+    picked = agent._filter_mode_skills(agent.memory.find_skills("web flask"))
+    assert [s.id for s in picked] == ["s-xss"]
+
+
+def test_reflect_extracts_skill_category(monkeypatch, tmp_path):
+    """反思沉淀技能时提取 category——否则 mode.skills 过滤永远命中不了。"""
+    from penagent.reflect import Reflector
+
+    mem = Memory(tmp_path)
+    ev = EvidenceChain(tmp_path / "chain.jsonl")
+    ev.append("tool_call", {"tool": "http_probe", "ok": True})
+    mid = mem.new_mission("http://127.0.0.1", "测试目标")
+    mem.add_step(mid, {"step": 1, "tool": "http_probe", "ok": True})
+
+    monkeypatch.setattr("penagent.reflect.chat_json", lambda *a, **kw: {
+        "outcome_analysis": "成功",
+        "skill": {"title": "SQLi 注入链", "category": "sqli",
+                  "target_fingerprint": "web flask",
+                  "steps": ["探测"], "tools": ["sqlmap"],
+                  "evidence_refs": [1]}})
+    _, skill = Reflector().reflect(mid, mem, ev)
+    assert skill is not None
+    assert skill.category == "sqli"
