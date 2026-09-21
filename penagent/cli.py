@@ -174,10 +174,12 @@ def cmd_mcp(args) -> int:
 
     server = PentestMCPServer(data_dir=args.data,
                               allowed_targets=args.targets or None,
-                              authorize=getattr(args, "authorize", False))
+                              authorize=getattr(args, "authorize", False),
+                              default_mode=getattr(args, "default_mode", ""))
     print(f"XPentest MCP Server 就绪（tools/list 可查工具，"
           f"targets={args.targets or '127.0.0.1/localhost'}，"
-          f"authorize={'on' if getattr(args, 'authorize', False) else 'off'}）",
+          f"authorize={'on' if getattr(args, 'authorize', False) else 'off'}，"
+          f"default_mode={server.default_mode or '（未配置）'}）",
           file=sys.stderr)
     server.serve_stdio()
     return 0
@@ -269,6 +271,10 @@ def main(argv: list[str] | None = None) -> int:
     p_mcp.add_argument("--authorize", action="store_true",
                        help="操作员级高危授权：开启后白名单内的高危工具才放行"
                             "（工具调用参数里的 authorize 一律不生效）")
+    p_mcp.add_argument("--default-mode", default="",
+                       help="服务端默认模式 id：pentest_run 未显式指定 mode 时"
+                            "回落到它（如 pentest-standard）。不配则该路径不加"
+                            "模式约束——沙箱裁决缺失，危险工具直跑宿主")
     p_mcp.set_defaults(fn=cmd_mcp)
 
     p_gaps = sub.add_parser("gaps", help="技能盲区发现（能力进化分析）")

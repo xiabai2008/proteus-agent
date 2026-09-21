@@ -132,3 +132,52 @@ def test_pentest_run_unknown_mode_is_structured_error(server):
     assert payload["ok"] is False
 
 
+# ----------------------------------------------------------------------
+# R-1：服务端级默认模式（pentest_run 未传 mode 时的回落）
+#
+# 背景：mode 是 pentest_run 的**可选**参数。不传时 _agent() 走 mode=None
+# 分支——沙箱裁决完全缺失（危险 CLI 工具直跑宿主）、记忆落 default 分区、
+# 步数预算退回 12。但"显式要求不给模式时报错"是不可接受的（向后兼容与
+# 无模式冒烟都要保留），所以修法是**服务端级 default_mode**：
+# 配置了才回落，未配置保持原行为。
+# ----------------------------------------------------------------------
+def test_server_default_mode_applied_when_omitted(tmp_path):
+    """配了 default_mode：不带 mode 调用回落到它（沙箱/预算/分区随之生效）。"""
+    server = PentestMCPServer(data_dir=str(tmp_path / "data"),
+                              default_mode="pentest-standard")
+    agent = server._agent()
+    assert agent.mode is not None and agent.mode.id == "pentest-standard"
+    # 模式预算生效（无模式时是 12）
+    assert agent.max_steps == 40
+    # 记忆落模式分区（无模式时是 default）
+    assert agent.memory.namespace == "pentest-standard"
+    # 沙箱策略随模式挂上（无模式时是 None）
+    assert agent.registry.sandbox is not None
+
+
+def test_server_explicit_mode_overrides_default(tmp_path):
+    """显式传 mode 时优先于 default_mode。"""
+    server = PentestMCPServer(data_dir=str(tmp_path / "data"),
+                              default_mode="pentest-standard")
+    agent = server._agent(mode_id="ctf-crypto")
+    assert agent.mode is not None and agent.mode.id == "ctf-crypto"
+
+
+def test_server_default_mode_validated_at_construction(tmp_path):
+    """default_mode 在构造期校验：未知 id 直接抛 ModeError（fail-closed）。
+
+    配错模式名应在启动时大声失败，而不是等第一次任务才报。
+    """
+    from penagent.modes import ModeError
+
+    with pytest.raises(ModeError):
+        PentestMCPServer(data_dir=str(tmp_path / "data"),
+                         default_mode="ghost-mode")
+
+
+def test_server_without_default_mode_keeps_legacy_behavior(tmp_path):
+    """未配 default_mode：保持向后兼容（mode=None，全量注册表 + 证据链判定器）。"""
+    server = PentestMCPServer(data_dir=str(tmp_path / "data"))
+    assert server._agent().mode is None
+
+

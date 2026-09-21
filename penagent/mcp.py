@@ -30,9 +30,11 @@ MCP_VERSION = "2025-06-18"
 SERVER_TOOLS = [
     ToolSpec(name="pentest_run",
              description="执行完整渗透/CTF 任务（LLM 决策循环），返回总结与证据引用。"
-                         "mode 选择模式档案：pentest-standard（默认，常规渗透与侦察）/"
-                         "ctf-web / ctf-crypto（CTF 与解题任务选 ctf-*，判定器/预算/工具"
-                         "白名单随之切换）。危险动作需 authorize=true。",
+                         "mode 指定模式档案：pentest-standard（常规渗透与侦察）/"
+                         "ctf-web / ctf-crypto（CTF 与解题任务选 ctf-*）——"
+                         "决定工具白名单、权限档位、预算与判定器；"
+                         "省略时使用服务端配置的默认模式（未配置则不加模式约束）。"
+                         "危险动作需 authorize=true。",
              parameters={"target": {"type": "string"},
                          "objective": {"type": "string"},
                          "mode": {"type": "string"},
@@ -55,7 +57,8 @@ class PentestMCPServer:
     def __init__(self, data_dir: str = "data",
                  allowed_targets: Optional[list[str]] = None,
                  center: Optional[ToolCenter] = None,
-                 authorize: bool = False) -> None:
+                 authorize: bool = False,
+                 default_mode: str = "") -> None:
         self.data_dir = data_dir
         # 授权目标与高危授权：服务端级（操作员给），不来自调用参数。
         # 目标规范化必须做：CLI 的 --targets 是 "a,b" 字符串，直接 list() 会
@@ -77,6 +80,17 @@ class PentestMCPServer:
         self.memory = Memory(data_dir)
         self.evidence = EvidenceChain(Path(data_dir) / "chain.jsonl")
         self.llm = LLMConfig.from_env()
+        # 服务端级默认模式：pentest_run 未显式指定 mode 时的回落。
+        # 空串 = 保持向后兼容（无模式路径：全量注册表 + 证据链判定器）；
+        # 非空时**构造期即校验**存在性——配错模式名在启动时大声失败，
+        # 而不是等第一次任务才报（fail-closed，与 modes.py 加载即校验一致）。
+        self.default_mode = ""
+        self._default_profile = None
+        if default_mode:
+            from penagent.modes import load_mode
+
+            self._default_profile = load_mode(default_mode)
+            self.default_mode = default_mode
         self._agents: dict[str, PenAgent] = {}
 
     # ------------------------------------------------------------------
@@ -90,12 +104,20 @@ class PentestMCPServer:
         且作用范围是**本次任务的注册表副本**——不改动服务端共享注册表。
         `mode_id` 非空时按模式档案构建注册表（capability 白名单 / 沙箱档位 /
         判定器 / 预算随之切换），未知 id 抛 ModeError 由调用方转 isError。
+        `mode_id` 为空且服务端配了 `default_mode` 时回落到该默认模式（R-1）；
+        两者皆无则走无模式路径（向后兼容）。
         """
         mode = None
         if mode_id:
             from penagent.modes import load_mode
 
             mode = load_mode(mode_id)
+        elif self._default_profile is not None:
+            # 未显式指定 mode：回落到服务端默认模式（R-1）。
+            # 不做这层回落时，不带 mode 的任务走 mode=None 分支——
+            # 沙箱裁决缺失（危险 CLI 工具直跑宿主）、记忆落 default 分区、
+            # 步数预算退回 12，等于模式约束完全失效（违反硬规则 1）。
+            mode = self._default_profile
         policy = Policy(allowed_targets=self.allowed_targets or None,
                         authorize=bool(authorize) or self.authorize,
                         mode=mode)
