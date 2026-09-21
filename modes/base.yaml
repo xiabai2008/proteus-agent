@@ -13,6 +13,9 @@ permission:
   auto_approve: []
   require_confirm: []
   hard_deny: []
+# budget 语义见 AGENTS.md 第 4 节。max_steps / max_minutes / model_tier 已机制性
+# 生效；max_cost_usd 为**预留字段**——OpenAI 兼容网关普遍不回传 token 用量，
+# 可靠计量前不做硬约束（写在这里只是占位，不要当作成本上限）。
 budget: {max_steps: 40, max_minutes: 180, max_cost_usd: 5.0, model_tier: {recon: cheap, reason: strong}}
 scope: {target_allowlist: required, network_egress: false}
 verifier: {type: evidence_chain}

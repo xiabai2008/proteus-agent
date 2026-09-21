@@ -11,6 +11,7 @@ permission:
   auto_approve: [codec_decode, codec_chain, file_type]
   require_confirm: [python_solve, rsactf_attack]
   hard_deny: []
+# max_cost_usd 为预留字段（当前不生效），详见 modes/base.yaml 的注释
 budget: {max_steps: 60, max_minutes: 20, max_cost_usd: 1.0}
 scope: {network_egress: true}
 verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
