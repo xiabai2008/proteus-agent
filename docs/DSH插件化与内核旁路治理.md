@@ -201,3 +201,29 @@ python -m penagent dsh-sync --data data --flush-open    # 会话结束后冲刷�
   管控（DSH 没有 egress 词汇，这点在前文能力边界里已写明）。
 - `mcp__proteus__*` 一律放行：内核闸门已经管过了，宿主层不重复设卡。
 
+### 第三轮实测：Web 会话复测（2026-09-21 深夜）
+
+三步都落地后，在 **Web UI**（用户主路径）新建 Proteus 会话，下达一个**同时需要
+目标流量与原始响应头**的任务（首页状态码+完整响应头、`/sitemap.xml` 与
+`/api/Products` 的判读、逐条给出可重放证据）。
+
+**结果：模型主动走内核链路，零 shell、零审批打断。**
+
+- 轨迹里的 4 次调用全部是内核工具：`mcp__proteus__http_raw` ×3
+  （`/`、`/sitemap.xml`、`/api/Products`）+ `mcp__proteus__http_probe` ×1；
+- 它自己的结论原话："三项验证全部完成，全程仅 GET、无载荷、无爆破，且**全部走内核
+  链路**（http_raw/http_probe 系本地直连的内置工具，对回环目标成立，**证据链完整
+  可机验**）"；
+- 判读比"只看 Content-Type"更硬：它比对 `ETag` / `Content-Length` /
+  `Last-Modified`，证明 `/sitemap.xml` 与首页是**同一份物理文件**（三项全等），
+  而 `/api/Products` 三项均不同且返回 JSON —— SPA 兜底判定成立。
+
+**这一步验证了第一/二步的因果**：不是靠 persona 说教，而是"内核终于有了能给出原始
+证据的工具"（L1 修复）之后，模型自己算出了"走内核更划算"这笔账。
+
+**审计口径也已统一**：本轮 4 次内核调用经宿主事件流进入同一条审计链
+（`data/dsh-chain.jsonl`，链长 10、校验 OK），里面既有宿主 shell 的被拦记录与
+裁决理由，也有内核工具的成功调用。用评测侧 `score_from_evidence` 直接读这条链，
+`home` 与 `api-products` 被正确记功（本轮只探了 3 个 URL，2/13 属正常）——
+**宿主路径与内核路径的评测口径打通了**，这正是第二步"证据链固化"要换来的东西。
+
