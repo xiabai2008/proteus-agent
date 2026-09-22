@@ -229,6 +229,54 @@ def test_live_check_skips_without_running_process(tmp_path, monkeypatch):
     assert dsh_install.live_check("web", tmp_path) == []
 
 
+def test_is_dsh_cmdline_accepts_both_launch_shapes():
+    """两种启动姿势都要认——只认前一种会让运行态检查**静默跳过**。
+
+    实测（2026-09-23）：用户从源码起的是 `bin.ts "web"`，命令行里没有
+    `--profile web`，于是检查"通过"了却什么都没查。
+    """
+    launcher = ('"C:\\Program Files\\nodejs\\node.exe" apps/cli/lib/bin.js '
+                '--profile web --patch D:/x/dsh/proteus.cordis.patch.yml --no-open')
+    devmode = 'node  --import tsx/esm apps/cli/src/bin.ts "web"'
+    other_profile = ('node apps/cli/lib/bin.js --profile headless')
+    other_dev = 'node --import tsx/esm apps/cli/src/bin.ts "headless"'
+
+    assert dsh_install._is_dsh_cmdline(launcher, "web") is True
+    assert dsh_install._is_dsh_cmdline(devmode, "web") is True
+    assert dsh_install._is_dsh_cmdline(other_profile, "web") is False
+    assert dsh_install._is_dsh_cmdline(other_dev, "web") is False
+    assert dsh_install._is_dsh_cmdline("", "web") is False
+    assert dsh_install._is_dsh_cmdline("notepad.exe web", "web") is False
+
+
+def test_bridge_live_check_reads_spool_ownership(tmp_path):
+    """审计桥活体判据：spool 最新记录有没有 preset 字段（与怎么启动无关）。"""
+    spool = tmp_path / "dsh-events.jsonl"
+    # 老代码写的记录（没有 preset 字段）
+    spool.write_text('{"kind":"call","tool":"pwsh"}\n' * 3, encoding="utf-8")
+    problems, _ = dsh_install.bridge_live_check(spool)
+    assert len(problems) == 1 and "旧代码" in problems[0]
+
+    # 新代码写的记录（带 preset）
+    spool.write_text('{"kind":"call","tool":"pwsh"}\n'
+                     '{"kind":"call","tool":"pwsh","preset":"proteus"}\n',
+                     encoding="utf-8")
+    problems, note = dsh_install.bridge_live_check(spool)
+    assert problems == [] and "当前代码" in note
+
+
+def test_bridge_live_check_skips_when_no_spool(tmp_path):
+    problems, note = dsh_install.bridge_live_check(tmp_path / "nope.jsonl")
+    assert problems == [] and "暂无 spool" in note
+
+
+def test_bridge_live_check_skips_unparseable_spool(tmp_path):
+    spool = tmp_path / "x.jsonl"
+    spool.write_text("not json\n", encoding="utf-8")
+    problems, note = dsh_install.bridge_live_check(spool)
+    assert problems == [] and "没有可解析记录" in note
+
+
 def test_parse_start_handles_net_and_garbage():
     assert dsh_install._parse_start("not-a-date") == 0.0
     assert dsh_install._parse_start("") == 0.0

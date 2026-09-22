@@ -196,7 +196,8 @@ emit({{ type: 'assistant/message', time: 3, data: {{}} }});   // 无关事件：
 console.log('PLUGIN_OK');
 """
     proc = subprocess.run([node, "--input-type=module", "-e", script],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=60)
     assert "PLUGIN_OK" in proc.stdout, proc.stderr[:400]
 
     lines = [json.loads(x) for x in spool.read_text(encoding="utf-8").splitlines()]
@@ -226,7 +227,8 @@ emit({{ type: 'tool/call', time: 1, data: {{ turn: 1, step: 2, callId: 'k1', nam
 emit({{ type: 'tool/result', time: 2, data: {{ turn: 1, step: 2, callId: 'k1', message: {{ content: [{{ isError: false, content: '200 text/html' }}] }} }} }});
 """
     subprocess.run([node, "--input-type=module", "-e", script],
-                   capture_output=True, text=True, timeout=60, check=True)
+                   capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=60, check=True)
 
     chain = EvidenceChain(tmp_path / "chain.jsonl")
     report = import_spool(spool, chain=chain, state_path=None)
@@ -327,7 +329,8 @@ for (const fn of hooks) {{
 console.log(out.join('|'));
 """
     proc = subprocess.run([node, "--input-type=module", "-e", script],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=60)
     assert proc.returncode == 0, proc.stderr[:400]
     decisions = [json.loads(x) for x in proc.stdout.strip().split("|") if x]
     records = ([json.loads(ln) for ln in spool.read_text(encoding="utf-8").splitlines()]
@@ -402,7 +405,8 @@ apply(ctx, {{ spoolPath: {json.dumps(str(spool))}, role: {json.dumps(role)} }});
 console.log(JSON.stringify(seen));
 """
         proc = subprocess.run([node, "--input-type=module", "-e", script],
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=60)
         assert proc.returncode == 0, proc.stderr[:300]
         registered = json.loads(proc.stdout.strip())
         assert ("session/event" in registered) is want_event, role
@@ -433,7 +437,8 @@ for (const fn of (listeners['session/event'] || [])) {{
 console.log('ok');
 """
     proc = subprocess.run([node, "--input-type=module", "-e", script],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=60)
     assert proc.returncode == 0, proc.stderr[:400]
     if not spool.exists():
         return []

@@ -250,6 +250,21 @@ def roster_check(home: Path) -> tuple[list[str], str]:
 # ----------------------------------------------------------------------
 # 运行态：进程是否加载了当前安装的模块
 # ----------------------------------------------------------------------
+def _is_dsh_cmdline(cmd: str, profile: str) -> bool:
+    """这条命令行是不是"这个 profile 的 DSH"。
+
+    必须兼容两种启动姿势（2026-09-23 实测）：启动器的
+    `apps/cli/lib/bin.js --profile web …` 与源码/开发模式的
+    `apps/cli/src/bin.ts "web"`。只认前一种会让运行态检查**静默跳过**
+    ——看起来"通过"，其实什么都没查（实测就是这么漏过去的）。
+    """
+    if "apps/cli/lib/bin.js" not in cmd and "apps/cli/src/bin.ts" not in cmd:
+        return False
+    if f"--profile {profile}" in cmd or f"--profile={profile}" in cmd:
+        return True
+    return f'"{profile}"' in cmd or f" {profile}" in cmd
+
+
 def running_dsh(profile: str) -> list[dict]:
     """正在跑该 profile 的 DSH 进程（`pid` / `start` / `cmd`）。
 
@@ -259,7 +274,8 @@ def running_dsh(profile: str) -> list[dict]:
         return []
     ps = (
         "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | "
-        f"Where-Object {{ $_.CommandLine -like '*--profile {profile}*' }} | "
+        "Where-Object { $_.CommandLine -like '*apps/cli/lib/bin.js*' "
+        "-or $_.CommandLine -like '*apps/cli/src/bin.ts*' } | "
         "ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; "
         "start = $_.CreationDate.ToString('o'); cmd = $_.CommandLine } } | "
         "ConvertTo-Json -Compress"
@@ -279,7 +295,8 @@ def running_dsh(profile: str) -> list[dict]:
         return []
     if isinstance(rows, dict):
         rows = [rows]
-    return [r for r in rows if isinstance(r, dict)]
+    return [r for r in rows
+            if isinstance(r, dict) and _is_dsh_cmdline(r.get("cmd") or "", profile)]
 
 
 def _parse_start(value: str) -> float:
@@ -377,6 +394,33 @@ def wait_gone(procs: list[dict], profile: str = "web",
     return False
 
 
+def bridge_live_check(spool: Path) -> tuple[list[str], str]:
+    """审计桥是不是在跑**当前**代码——判据：spool 最新记录有没有 `preset` 字段。
+
+    这条**不依赖"怎么启动的"**：老代码从不写 `preset`，新代码必写。进程检查
+    （`live_check`）是辅助——它在识别不出进程时会跳过，而这条不会。
+    """
+    if not spool.is_file():
+        return [], f"暂无 spool（{spool}）：还没有会话产生过工具调用"
+    recent: list[dict] = []
+    for line in reversed(spool.read_text(encoding="utf-8",
+                                         errors="replace").splitlines()):
+        if not line.strip():
+            continue
+        try:
+            recent.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+        if len(recent) >= 5:
+            break
+    if not recent:
+        return [], "spool 里没有可解析记录，跳过审计桥活体检查"
+    if any("preset" in rec for rec in recent):
+        return [], "审计桥已在跑当前代码（最新记录带 preset 归属）"
+    return ["审计桥仍在跑旧代码：spool 最新记录没有 preset 字段"
+            "（老代码从不写它）——重启 DSH 才会加载新模块"], ""
+
+
 # ----------------------------------------------------------------------
 # 同步
 # ----------------------------------------------------------------------
@@ -447,8 +491,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true",
                     help="只检查，不改动（有漂移即非零退出）")
     ap.add_argument("--no-roster", action="store_true", help="跳过 roster 健康检查")
+    ap.add_argument("--spool", default="",
+                    help="宿主桥 spool 路径（缺省 <仓库>/data/dsh-events.jsonl）")
     ap.add_argument("--no-live", action="store_true",
-                    help="跳过运行态检查（正在跑的进程是否加载了当前模块）")
+                    help="跳过运行态检查（进程模块 / 审计桥代码是否为当前版本）")
     ap.add_argument("--restart", action="store_true",
                     help="启动器用：若已有实例在跑，先关掉它再继续"
                          "（否则新实例会以 EADDRINUSE 127.0.0.1:4080 失败退出）")
@@ -494,10 +540,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_bundle_check:
         problems += check_bundle(home, args.profile)
         problems += check_bridge_entry(home, args.profile)
+    notes: list[str] = []
     if not args.no_live:
         problems += live_check(args.profile, dst)
+        bridge_problems, bridge_live_note = bridge_live_check(
+            Path(args.spool) if args.spool else REPO / "data" / "dsh-events.jsonl")
+        problems += bridge_problems
+        if bridge_live_note:
+            notes.append(bridge_live_note)
 
-    notes: list[str] = []
     if not args.no_roster:
         roster_problems, roster_note = roster_check(home)
         problems += roster_problems

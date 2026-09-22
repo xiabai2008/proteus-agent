@@ -309,7 +309,8 @@ node verify-proteus.mjs && rm verify-proteus.mjs
 | 会话里没有 `mcp__proteus__*` | 内核没起来。`failOnStartupError: false` 会让 preset 照常挂载，只是少这组工具——按 5.2 单独验证命令；常见原因是 `command` 里的 python 路径失效或 `cwd` 不对 |
 | preset 在选择器里消失 | 整份 composition broken（某行解析不到），**或目录是链接**（发现机制不跟随 reparse point）。`python tools/dsh_install.py --check` 会指出原因 |
 | 双击启动器后"好像没重启" | 旧实例还占着 4080，新实例以 `EADDRINUSE: address already in use 127.0.0.1:4080` **启动失败并退出**（窗口一闪，看不到报错）。启动器现在**默认直接关掉旧实例再启动**；若它仍失败，手动兜底：任务管理器结束 `node.exe`（命令行含 `--profile web`）后双击启动器 |
-| 改了仓库，会话行为没变 | 两种原因，`--check` 分别报得出来：① 安装副本过期 →"与仓库不同步"，跑不带 `--check` 即同步（启动器每次启动前也会同步）；② **副本是新的、但进程还在跑旧模块**（Node 的 ESM 缓存不重启不更新，见 5.1）→ 报"DSH 进程 pid=… 启动于 …，早于安装文件的最新改动"。后者只能重启 |
+| 改了仓库，会话行为没变 | 两种原因，`--check` 分别报得出来：① 安装副本过期 →"与仓库不同步"，跑不带 `--check` 即同步（启动器每次启动前也会同步）；② **副本是新的、但进程还在跑旧模块**（Node 的 ESM 缓存不重启不更新，见 5.1）→ 两条判据：进程那条报"DSH 进程 pid=… 启动于 …，早于安装文件的最新改动"；**spool 那条**报"审计桥仍在跑旧代码：最新记录没有 `preset` 字段"。后者与"怎么启动的"无关，最可靠。两种都只能重启 |
+
 | 审计层像是旧版本 | `node_modules/dsh-proteus-bridge` 是普通目录而非链接（旧副本）。`--check` 会报；按 §二 用 `dsh plugin add` 重装 |
 | `dsh plugin add` 报 `ERR_PNPM_UNEXPECTED_STORE` | pnpm 11 不再读项目 `.npmrc` 的 `store-dir`；在 profile 的 `pnpm-workspace.yaml` 里加 `storeDir` 指向 `node_modules` 实际链自的那个 store（见 §二 的实测前提） |
 | `pentest_run` 报 LLM 相关错误 | 该工具会在内核里跑 LLM 决策循环，需要 `PENTEST_LLM_*`；preset 已从宿主环境透传这三个变量，缺失时内核走默认端点 |
