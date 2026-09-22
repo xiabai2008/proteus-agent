@@ -197,6 +197,47 @@ def test_check_fails_on_drift(tmp_path, capsys):
 
 
 # ----------------------------------------------------------------------
+# 运行态：改了的代码在**正在跑的进程**里生效了吗（Node 的 ESM 缓存不重启不更新）
+# ----------------------------------------------------------------------
+def test_live_check_flags_process_older_than_installed_files(tmp_path, monkeypatch):
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    dst = home / ".agent-presets" / "proteus"
+    monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: [
+        {"pid": 25904, "start": "2020-01-01T00:00:00", "cmd": "x"}])
+
+    problems = dsh_install.live_check("web", dst)
+    assert len(problems) == 1
+    assert "pid=25904" in problems[0] and "ESM 缓存" in problems[0]
+
+
+def test_live_check_passes_when_process_started_after_files(tmp_path, monkeypatch):
+    import datetime
+
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    dst = home / ".agent-presets" / "proteus"
+    future = (datetime.datetime.now() + datetime.timedelta(minutes=1)).isoformat()
+    monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: [
+        {"pid": 1, "start": future, "cmd": "x"}])
+    assert dsh_install.live_check("web", dst) == []
+
+
+def test_live_check_skips_without_running_process(tmp_path, monkeypatch):
+    """没在跑就跳过——这条检查不该在"只装不跑"的场景下报错。"""
+    monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: [])
+    assert dsh_install.live_check("web", tmp_path) == []
+
+
+def test_parse_start_handles_net_and_garbage():
+    assert dsh_install._parse_start("not-a-date") == 0.0
+    assert dsh_install._parse_start("") == 0.0
+    # .NET 的 'o'：7 位小数 + 偏移，必须能解析（截到秒的退化路径）
+    assert dsh_install._parse_start("2026-09-22T10:20:44.1234567+08:00") > 0
+    assert dsh_install._parse_start("2026-09-22T10:20:44") > 0
+
+
+# ----------------------------------------------------------------------
 # 审计桥接线
 # ----------------------------------------------------------------------
 def test_check_bundle_reports_missing_wiring(tmp_path):

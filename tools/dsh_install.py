@@ -248,6 +248,87 @@ def roster_check(home: Path) -> tuple[list[str], str]:
 
 
 # ----------------------------------------------------------------------
+# 运行态：进程是否加载了当前安装的模块
+# ----------------------------------------------------------------------
+def running_dsh(profile: str) -> list[dict]:
+    """正在跑该 profile 的 DSH 进程（`pid` / `start` / `cmd`）。
+
+    仅 Windows 尽力而为——拿不到就返回空表（调用方据此跳过，而不是报错）。
+    """
+    if os.name != "nt":
+        return []
+    ps = (
+        "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | "
+        f"Where-Object {{ $_.CommandLine -like '*--profile {profile}*' }} | "
+        "ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; "
+        "start = $_.CreationDate.ToString('o'); cmd = $_.CommandLine } } | "
+        "ConvertTo-Json -Compress"
+    )
+    try:
+        proc = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(rows, dict):
+        rows = [rows]
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _parse_start(value: str) -> float:
+    """把 `CreationDate.ToString('o')` 解析成时间戳；解析不了返回 0。
+
+    退化路径：.NET 的 'o' 带 7 位小数，部分 Python 的 `fromisoformat` 不接受，
+    截到秒即可——这里只用来比先后，不需要亚秒精度。
+    """
+    import datetime
+
+    text = str(value).strip().replace("Z", "+00:00")
+    for candidate in (text, text[:19]):
+        try:
+            return datetime.datetime.fromisoformat(candidate).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def live_check(profile: str, dst: Path) -> list[str]:
+    """改了的模块，正在跑的进程里**是不是真的生效了**。
+
+    这条补的是最后一个静默失效面：文件同步对了、`--check` 也过了，但 Node 的
+    ESM 缓存**不重启不更新**（指南 §5.1 记过这个坑）——进程仍在跑旧模块，而
+    从会话里完全看不出来。判据：进程启动时间 vs 安装文件的最新改动时间。
+    """
+    procs = running_dsh(profile)
+    if not procs:
+        return []
+    newest = max((p.stat().st_mtime for p in dst.iterdir() if p.is_file()),
+                 default=0.0)
+    if newest == 0.0:
+        return []
+    import time as _time
+
+    stamp = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(newest))
+    problems = []
+    for proc in procs:
+        started = _parse_start(proc.get("start", ""))
+        if started and started < newest:
+            problems.append(
+                f"DSH 进程 pid={proc.get('pid')} 启动于 "
+                f"{str(proc.get('start'))[:19]}，早于安装文件的最新改动（{stamp}）"
+                f"——Node 的 ESM 缓存不重启不更新，该进程加载的仍是旧模块。"
+                f"重启 DSH 后本项即消失")
+    return problems
+
+
+# ----------------------------------------------------------------------
 # 同步
 # ----------------------------------------------------------------------
 def _remove_link(path: Path) -> None:
@@ -317,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true",
                     help="只检查，不改动（有漂移即非零退出）")
     ap.add_argument("--no-roster", action="store_true", help="跳过 roster 健康检查")
+    ap.add_argument("--no-live", action="store_true",
+                    help="跳过运行态检查（正在跑的进程是否加载了当前模块）")
     ap.add_argument("--no-bundle-check", action="store_true",
                     help="跳过审计桥的 profile 接线检查")
     args = ap.parse_args(argv)
@@ -337,6 +420,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_bundle_check:
         problems += check_bundle(home, args.profile)
         problems += check_bridge_entry(home, args.profile)
+    if not args.no_live:
+        problems += live_check(args.profile, dst)
 
     notes: list[str] = []
     if not args.no_roster:

@@ -24,9 +24,9 @@ rem    闸门与证据链（守卫会拒绝目标动作，但那是事后兜底�
 rem 这里只同步/校验 preset 与 host 补丁，**不校验审计桥**——审计缺失不构成治理
 rem 缺口，不该拦住启动。
 if not "%PENTEST_PY312%"=="" (
-  "%PENTEST_PY312%\python.exe" "%PENTEST_WS%\proteus-agent\tools\dsh_install.py" --no-bundle-check --no-roster
+  "%PENTEST_PY312%\python.exe" "%PENTEST_WS%\proteus-agent\tools\dsh_install.py" --no-bundle-check --no-roster --no-live
 ) else (
-  python "%PENTEST_WS%\proteus-agent\tools\dsh_install.py" --no-bundle-check --no-roster
+  python "%PENTEST_WS%\proteus-agent\tools\dsh_install.py" --no-bundle-check --no-roster --no-live
 )
 if errorlevel 1 (
   echo [proteus] preset 同步/校验未通过——先按上面的提示修好再启动，不要带着无治理的会话跑。
