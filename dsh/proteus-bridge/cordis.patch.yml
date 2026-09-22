@@ -17,7 +17,12 @@
 #   dsh plugin --profile web add <REPO>/dsh/proteus-bridge
 # 注意：装完要重启 DSH 进程（bundle 层在启动时合成）。
 #
-# 三步走里的第三步：`tools/pre-execute` 目标动作裁决。
+# 审计行（host 平面）。
+#
+# 注意：**裁决不在这里**——`tools/pre-execute` 是作用域过滤派发的，host 平面的
+# 监听收不到 preset 作用域内的工具调用（2026-09-22 真机实测：web 会话里
+# `pwsh curl` 直接执行、无审批，而同一份代码在无 preset 的 headless 里能拦）。
+# 裁决行见 `dsh/.agent-presets/proteus/agent.cordis.yml` 的 `proteus-tools-policy`。
 #
 # 规则（只针对"对目标发请求"的宿主 shell 命令，其它一概不管）：
 #   - 命令里出现网络动词（curl / Invoke-WebRequest / sqlmap / nmap …）时：
@@ -36,6 +41,5 @@
         # spool 落盘位置：跟随 PENTEST_WS（本机路径不入库，与 preset 同约定）。
         # 注意 !!js 整行禁止出现 ": "（冒号+空格会被 YAML 拆成映射键）
         spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
-        mode: ask
-        targets: ['127.0.0.1', 'localhost']
-        shellTools: ['pwsh', 'bash']
+        # 本行只做审计：裁决必须挂在 preset 作用域（见 docs/DSH插件化与内核旁路治理.md）
+        role: audit

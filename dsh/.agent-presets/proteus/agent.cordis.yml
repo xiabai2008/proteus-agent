@@ -287,6 +287,29 @@
   name: '@deepseek-ai/dsh-plugin-manager/tools'
   disabled: true
 
+# ── Proteus 专属行 2/3：目标动作裁决（preset 作用域） ──────────────────────
+#
+# 为什么这一行必须在 preset 里而不是 host 平面 bundle 里：`tools/pre-execute`
+# 的派发是**作用域过滤**的——host 平面（bundle/root）的监听收不到 preset
+# 作用域内的工具调用。2026-09-22 真机实测：web 会话里 `pwsh curl 127.0.0.1:3000`
+# 直接被执行、无审批；而同一份代码挂在无 preset 的 headless profile 里能拦住。
+# 审计行（session/event，全局事件）仍在 host 平面 bundle——所以拆成两个挂载点，
+# 由 `role` 分工（audit / policy），同一份实现不重复记录。
+#
+# **实现只有一份**：`./proteus-tools-policy.mjs`（本目录内的相对行——DSH 对
+# preset 行只解析"本目录相对文件"或已安装包，包名在 preset 作用域解析不到，
+# 实测 roster 会报 cannot be resolved）。host 平面的 bundle 行做薄再导出，
+# 指向同一份实现，避免两份代码漂移。
+# mode: ask（默认）/ deny / off；只拦"对目标发请求的宿主 shell 命令"。
+- id: proteus-tools-policy
+  name: './proteus-tools-policy.mjs'
+  config:
+    role: policy
+    mode: ask
+    targets: ['127.0.0.1', 'localhost']
+    shellTools: ['pwsh', 'bash']
+    spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+
 # ── Proteus 专属行 2/2：内核 MCP 客户端 ────────────────────────────────────
 #
 # 一个 mcp-client 实例 = 一个外部 MCP server。工具在会话里以

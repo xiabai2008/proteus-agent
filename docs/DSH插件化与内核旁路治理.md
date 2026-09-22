@@ -112,7 +112,7 @@ DSH 的两层组合（源码调研结论，证据见括号）：
 |---|---|---|---|
 | 第一步 · 内核补原始证据工具 | **已实施** | `penagent/builtin_tools.py` 的 `http_raw`（状态行 + 完整响应头 + 正文片段 + 耗时；不跟随重定向；4xx/5xx 按响应返回） | 真实靶场实测：`/sitemap.xml` 与 `/` 同为 `200 text/html len=9903`（SPA 兜底一眼可分），`/api/Products` 为 `application/json len=16026`；内核 MCP 工具数 40 → **41** |
 | 第二步 · 证据链固化（只读观测） | **已实施** | 宿主 bundle `dsh/proteus-bridge`（订阅 `session/event` → spool）+ 内核导入器 `penagent/dsh_bridge.py` + CLI `python -m penagent dsh-sync` | 真实 headless 会话跑完 → spool 2 行 → 入链 1 条 `tool='pwsh' · ok=True · args={'command': 'echo bridge-v2-ok'}`，链校验 OK；DSH web 侧 `--dump-config` 可见 `# == dsh-proteus-bridge` 层 |
-| 第三步 · `pre-execute` 目标动作裁决 | **已实施**（2026-09-21，用户拍板：接受宿主进程内执行的前提 + 默认档位 `ask`） | 同 bundle 的 `tools/pre-execute`：只拦"对目标发请求的宿主 shell 命令"（网络动词识别 + 目标提取），越界目标与白名单内目标分别给不同理由；`mode: ask / deny / off` 可切 | 真机（headless）：模型用 `pwsh curl http://127.0.0.1:3000/` → **被 ask 拦下** → 该 profile 无审批应答者（fail-closed）→ `requires approval, but …`；模型重试仍被拦、转而用 `web_fetch` 又被 DSH 自己的 provider 拦（`WEB_BLOCKED_URL`），最后**如实说明没拿到输出**、未编造结果。链上一共留痕 5 条：2×裁决（observation）+ 2×失败的 tool_call + 1×web_fetch 拒绝 |
+| 第三步 · `pre-execute` 目标动作裁决 | **已实施**（2026-09-21 拍板默认 `ask`；2026-09-22 修正挂载点，见下） | **裁决行挂在 preset 作用域**（`dsh/.agent-presets/proteus/proteus-tools-policy.mjs`）；host 平面 bundle 只做审计（`role: audit`）。只拦"对目标发请求的宿主 shell 命令"（网络动词 + 目标提取），`mode: ask / deny / off` | 真机（headless）：模型用 `pwsh curl http://127.0.0.1:3000/` → **被 ask 拦下** → 该 profile 无审批应答者（fail-closed）→ `requires approval, but …`；模型重试仍被拦、转而用 `web_fetch` 又被 DSH 自己的 provider 拦（`WEB_BLOCKED_URL`），最后**如实说明没拿到输出**、未编造结果。链上一共留痕 5 条：2×裁决（observation）+ 2×失败的 tool_call + 1×web_fetch 拒绝 |
 
 **形态选择的落地结论**：第二步本可以塞进 preset 行里做，但按研究结论它拿不到 `session/event` 的订阅面——**必须是 host 平面 bundle**。这也是"要不要做成完整插件"这个问题的实际答案：**该做成插件的那部分，就是"机制与审计"**（事件订阅、裁决、策略）；"提供工具"那部分继续留在 MCP + preset 行即可（成本最低、与 DSH 版本耦合最小）。
 
@@ -226,4 +226,41 @@ python -m penagent dsh-sync --data data --flush-open    # 会话结束后冲刷�
 裁决理由，也有内核工具的成功调用。用评测侧 `score_from_evidence` 直接读这条链，
 `home` 与 `api-products` 被正确记功（本轮只探了 3 个 URL，2/13 属正常）——
 **宿主路径与内核路径的评测口径打通了**，这正是第二步"证据链固化"要换来的东西。
+
+### 2026-09-22 修正：裁决必须挂在 preset 作用域（真机再次打败静态推理）
+
+**现象**：第三轮实测后，在 Web 会话里让模型"用 pwsh 直接 curl 本地靶场"——
+**命令直接执行了，没有审批卡**。取证：spool 里这次调用**有审计记录**
+（说明 bundle 已加载），但**没有 policy 记录**（说明裁决监听没被派发）。
+
+**根因**：DSH 的工具派发是**作用域过滤**的（`@deepseek-ai/dsh-scope`）。
+web 路径里 agent 跑在 preset 作用域内，而我们的裁决监听挂在 host 平面（bundle/root）
+——**收不到该作用域的工具调用**。同一份代码挂在**没有 preset 的 headless** profile
+里能拦住，正是因为那里只有一个 root ToolRuntime。审计不受影响：`session/event`
+是全局事件。
+
+**修法（两条 DSH 规则 + 一个布局）**：
+
+1. 裁决行必须写进 **preset 的 composition**（agent 平面）；
+2. preset 行**解析不到包名**（写 `dsh-proteus-bridge` 会得到 `broken=… cannot be
+   resolved`，而 broken 的 preset 不进选择器、界面零提示 —— 与 F3 同款陷阱）；
+   只能写"本目录相对文件"。于是在 preset 目录里放**唯一一份实现**
+   （`proteus-tools-policy.mjs`），bundle 侧的 `index.mjs` 变成薄再导出
+   （bundle 以 `link:` 指向本仓库，可以相对导入它）；
+3. 同一实现用 `role` 分工：`audit`（host 平面，只订阅事件）/ `policy`（preset 内，
+   只挂裁决）/ `both`（缺省，单挂载场景），**两条挂载点各司其职、不重复记录**。
+
+**修后实测（Web 路径，同一条命令）**：审批卡如期弹出，卡片正文就是我们的理由
+——"目标动作建议走内核工具（mcp__proteus__http_raw / mcp__proteus__pentest_run 等）：
+内核侧有目标白名单、模式闸门与证据链，宿主 shell 直连的结论不可机验"；点「允许一次」
+后命令执行返回 200，spool 里随即出现 `policy ask` 记录。
+
+**附带观察（persona 生效的直接证据）**：模型在被要求"用 pwsh"的同时**主动并行调了
+`mcp__proteus__http_probe` 做交叉验证**，并在结论里写明"你要求的 pwsh 这一步**不经
+内核校验**（宿主本地直连，仅作为你指定的执行方式）；上面 http_probe 那条才是进内核、
+可被证据链引用的记录"——把 persona 里"例外要说明理由并标注"这条字面执行了。
+
+> 教训与 F3/F4 同源：**DSH 的作用域与解析规则只能靠真机验证**。静态读文档得到的
+> "bundle 能挂工具事件"是对的，"能在 preset 会话里生效"是错的——差的那一步只有跑
+> 起来才看得见。
 

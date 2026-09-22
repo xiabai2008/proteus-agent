@@ -365,3 +365,34 @@ def test_policy_deny_mode_and_off_mode(tmp_path):
     off, off_records = _policy_call(tmp_path, "pwsh",
                                     "curl http://127.0.0.1:3000/", mode="off")
     assert off is None and off_records == []
+
+def test_role_audit_and_policy_register_separately(tmp_path):
+    """`role` 分工：audit 只订阅事件、policy 只挂裁决——两个挂载点不重复记录。
+
+    背景（2026-09-22 真机）：DSH 的工具派发是作用域过滤的，host 平面的
+    `tools/pre-execute` 收不到 preset 作用域内的调用，所以裁决行必须挂进
+    preset；审计（session/event）是全局事件，留在 host 平面。同一份实现由
+    `role` 分工，避免两条挂载点各记一份。
+    """
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("本机无 node，跳过宿主插件 role 测试")
+    for role, want_event, want_policy in (("audit", True, False),
+                                          ("policy", False, True),
+                                          ("both", True, True)):
+        spool = tmp_path / f"role-{role}.jsonl"
+        script = f"""
+import {{ apply }} from {json.dumps(PLUGIN.as_uri())};
+const seen = [];
+const ctx = {{ on: (e) => seen.push(e) }};
+apply(ctx, {{ spoolPath: {json.dumps(str(spool))}, role: {json.dumps(role)} }});
+console.log(JSON.stringify(seen));
+"""
+        proc = subprocess.run([node, "--input-type=module", "-e", script],
+                              capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr[:300]
+        registered = json.loads(proc.stdout.strip())
+        assert ("session/event" in registered) is want_event, role
+        assert ("tools/pre-execute" in registered) is want_policy, role
