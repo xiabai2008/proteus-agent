@@ -229,6 +229,88 @@ def test_live_check_skips_without_running_process(tmp_path, monkeypatch):
     assert dsh_install.live_check("web", tmp_path) == []
 
 
+def test_verify_launcher_flags_lf_only_cmd(tmp_path):
+    """LF-only 的 .cmd 会被 cmd.exe 拼错——这条把它钉成 CRLF。
+
+    实测（2026-09-23）：同内容 LF 下 11 行乱码报错（`'T_WS' 不是内部或外部命令`），
+    CRLF 下正常。用户看到的就是"双击了没反应"。
+    """
+    p = tmp_path / "x.cmd"
+    p.write_bytes(b"@echo off\nrem hi\necho ok\n")
+    problems = dsh_install.verify_launcher(p)
+    assert len(problems) == 1 and "CRLF" in problems[0]
+
+    p.write_bytes(b"@echo off\r\nrem hi\r\necho ok\r\n")
+    assert dsh_install.verify_launcher(p) == []
+
+
+def test_repo_launcher_is_crlf():
+    """仓库里那份必须过检——否则用户双击就是"没反应"。"""
+    assert dsh_install.verify_launcher() == []
+
+
+def test_env_file_value_and_workspace_root(tmp_path, monkeypatch):
+    """`.env` 回落：双击场景下环境变量可能没继承到，不能再强依赖它。"""
+    (tmp_path / ".env").write_text("PENTEST_WS=D:/ws\nPENTEST_PY312=D:/py\n",
+                                   encoding="utf-8")
+    monkeypatch.setattr(dsh_install, "REPO", tmp_path)
+    assert dsh_install._env_file_value("PENTEST_WS") == "D:/ws"
+    assert dsh_install._env_file_value("NOPE") == ""
+
+    monkeypatch.delenv("PENTEST_WS", raising=False)
+    assert dsh_install.workspace_root() == Path("D:/ws")
+    monkeypatch.setenv("PENTEST_WS", str(tmp_path / "env-wins"))
+    assert dsh_install.workspace_root() == tmp_path / "env-wins"
+
+
+def test_port_in_use_detects_listener():
+    import socket
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        assert dsh_install.port_in_use(port) is True
+    finally:
+        srv.close()
+    assert dsh_install.port_in_use(port) is False
+
+
+def test_port_owner_pids_parses_netstat(monkeypatch):
+    """端口占用者从 `netstat -ano` 解析（不依赖 PowerShell——它可能不在 PATH 上）。"""
+    sample = (
+        "  TCP    127.0.0.1:4080         0.0.0.0:0              LISTENING       48332\n"
+        "  TCP    127.0.0.1:9999         0.0.0.0:0              LISTENING       1234\n"
+        "  TCP    127.0.0.1:4080         127.0.0.1:5555         ESTABLISHED     48332\n")
+
+    class _Proc:
+        stdout = sample
+
+    monkeypatch.setattr(dsh_install, "_system_exe", lambda name, subdir="": "netstat")
+    monkeypatch.setattr(dsh_install.subprocess, "run", lambda *a, **k: _Proc())
+    assert dsh_install.port_owner_pids(4080) == [48332]
+
+
+def test_wait_port_free_times_out_when_still_listening(monkeypatch):
+    monkeypatch.setattr(dsh_install, "port_in_use",
+                        lambda port, host="127.0.0.1": True)
+    assert dsh_install.wait_port_free(4080, timeout=0.1) is False
+
+
+def test_system_exe_finds_node_without_path(monkeypatch, tmp_path):
+    """最小环境（PATH 里没有 node）也要能定位 node.exe。
+
+    实测：双击启动器的环境可能残缺，只靠 `shutil.which` 会拿到空串，
+    然后 subprocess 抛未捕获的 FileNotFoundError。
+    """
+    (tmp_path / "nodejs").mkdir()
+    (tmp_path / "nodejs" / "node.exe").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(dsh_install.shutil, "which", lambda name: None)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    assert dsh_install._system_exe("node").endswith("node.exe")
+
+
 def test_is_dsh_cmdline_accepts_both_launch_shapes():
     """两种启动姿势都要认——只认前一种会让运行态检查**静默跳过**。
 

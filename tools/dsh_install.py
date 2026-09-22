@@ -250,6 +250,106 @@ def roster_check(home: Path) -> tuple[list[str], str]:
 # ----------------------------------------------------------------------
 # 运行态：进程是否加载了当前安装的模块
 # ----------------------------------------------------------------------
+DEFAULT_WEB_PORT = 4080
+
+
+def _system_exe(name: str, subdir: str = "") -> str:
+    """系统 exe 的绝对路径——**不依赖 PATH**。
+
+    双击启动器时的环境可能是残缺的（实测：最小环境下 PATH 里既没有
+    `powershell` 也没有 `node`），于是进程枚举"静默返回空"、旧实例不会被关掉，
+    又要撞 EADDRINUSE。系统目录用 `%SystemRoot%` / `%ProgramFiles%` 拼，
+    不写死本机路径（硬规则 7）。
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    if os.name != "nt":
+        return ""
+    root = Path(os.environ.get("SystemRoot", "C:\\Windows"))
+    candidates = [root / "System32" / f"{name}.exe"]
+    if subdir:
+        candidates.insert(0, root / "System32" / subdir / f"{name}.exe")
+    if name == "node":
+        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+        candidates.append(Path(program_files) / "nodejs" / "node.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
+def _powershell() -> str:
+    found = shutil.which("powershell")
+    if found:
+        return found
+    if os.name != "nt":
+        return ""
+    exe = (Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32"
+           / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+    return str(exe) if exe.is_file() else ""
+
+
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """端口在听吗（纯 socket，不依赖任何外部命令）。"""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1.0)
+        return sock.connect_ex((host, port)) == 0
+
+
+def port_owner_pids(port: int) -> list[int]:
+    """谁占着这个端口（解析 `netstat -ano`；同样不依赖 PATH）。"""
+    netstat = _system_exe("netstat")
+    if not netstat:
+        return []
+    try:
+        proc = subprocess.run([netstat, "-ano"], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    pids: list[int] = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or "LISTENING" not in line.upper():
+            continue
+        if not parts[1].endswith(f":{port}"):
+            continue
+        if parts[-1].isdigit():
+            pids.append(int(parts[-1]))
+    return sorted(set(pids))
+
+
+def wait_port_free(port: int, timeout: float = 20.0) -> bool:
+    """等端口真的释放（不等就会又撞 EADDRINUSE）。"""
+    import time as _time
+
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if not port_in_use(port):
+            return True
+        _time.sleep(0.5)
+    return not port_in_use(port)
+
+
+def terminate_pids(pids: list[int]) -> list[str]:
+    """按 pid 结束进程（Windows 用 `taskkill /T`，连子进程一起）。"""
+    notes: list[str] = []
+    for pid in pids:
+        if os.name == "nt":
+            subprocess.run([_system_exe("taskkill") or "taskkill",
+                            "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, text=True, check=False)
+        else:
+            try:
+                os.kill(int(pid), 15)
+            except (OSError, ValueError):
+                pass
+        notes.append(f"已结束进程 pid={pid}")
+    return notes
+
+
 def _is_dsh_cmdline(cmd: str, profile: str) -> bool:
     """这条命令行是不是"这个 profile 的 DSH"。
 
@@ -280,8 +380,11 @@ def running_dsh(profile: str) -> list[dict]:
         "start = $_.CreationDate.ToString('o'); cmd = $_.CommandLine } } | "
         "ConvertTo-Json -Compress"
     )
+    shell = _powershell()
+    if not shell:
+        return []
     try:
-        proc = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+        proc = subprocess.run([shell, "-NoProfile", "-Command", ps],
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=60)
     except (OSError, subprocess.TimeoutExpired):
@@ -394,6 +497,100 @@ def wait_gone(procs: list[dict], profile: str = "web",
     return False
 
 
+def _env_file_value(key: str) -> str:
+    """从不入库的 `.env` 里取一个键（与 penagent/envcfg.py 同一约定）。
+
+    启动器不能再强依赖 `PENTEST_WS`：双击场景下环境变量可能没继承到
+    （setx 之后没重启 Explorer 就是这种），而 `.env` 就在仓库里、一定能读到。
+    """
+    env_file = REPO / ".env"
+    if not env_file.is_file():
+        return ""
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith(f"{key}="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def workspace_root() -> Path:
+    """工作区根：环境变量 → `.env` → 仓库的上一级（相邻布局）。"""
+    for candidate in (os.environ.get("PENTEST_WS", "").strip(),
+                      _env_file_value("PENTEST_WS")):
+        if candidate:
+            return Path(candidate)
+    return REPO.parent
+
+
+def verify_launcher(path: Path | None = None) -> list[str]:
+    """`start-proteus.cmd` 必须是 CRLF 行尾。
+
+    这条不是洁癖：**LF-only 的 .cmd 会被 cmd.exe 错误分行**——`rem` 后面的
+    中文与下一行被拼成一条命令去执行，窗口一闪就退，用户看到的就是"点了没反应"
+    （2026-09-23 实测：同一内容 LF 下 11 行乱码报错，CRLF 下正常）。
+    """
+    cmd = path or REPO / "dsh" / "start-proteus.cmd"
+    if not cmd.is_file():
+        return [f"启动器不存在：{cmd}"]
+    # **必须按字节读**：Path.read_text() 默认做通用换行转换（CRLF → LF），
+    # 那样永远看不到 CRLF，正确的文件也会被判成 LF-only（第一版就是这么错的）。
+    data = cmd.read_bytes()
+    bare_lf = data.count(b"\n") - data.count(b"\r\n")
+    if bare_lf > 0:
+        return [f"{cmd.name} 有 {bare_lf} 行是 LF 行尾（必须是 CRLF）——"
+                f"cmd.exe 会把这些行拼错，表现为双击后窗口一闪、什么都没发生"]
+    return []
+
+
+def launch(profile: str, dst: Path, port: int = DEFAULT_WEB_PORT) -> int:
+    """同步 + 关旧实例 + 启动 DSH（启动器调用的入口）。
+
+    逻辑放这里而不是 `.cmd` 里：cmd 的解析与引号是另一套语言，踩过一次就够
+    （LF 行尾）；Python 这边可单测、能给清楚的错误、还能回落到 `.env`。
+    """
+    for note in install(dst.parent.parent):
+        print(f"  - {note}")
+
+    # 旧实例按**端口**关，不按进程枚举：双击场景下 PATH 可能残缺，枚举会静默返回
+    # 空——那正是"新实例又撞 EADDRINUSE"的成因。端口判据不依赖任何外部命令。
+    if port_in_use(port):
+        pids = port_owner_pids(port)
+        print(f"检测到 {port} 端口被占用（pid={pids or '未知'}）——先关掉它再启动"
+              f"（否则新实例会以 EADDRINUSE 127.0.0.1:{port} 失败退出）。")
+        print("  注意：关掉它 = 当前 GUI 会话结束（对话本身是持久化的）。")
+        if pids:
+            for note in terminate_pids(pids):
+                print(f"  - {note}")
+        else:
+            print("  ! 查不到占用者 pid（netstat 不可用）——请手动结束它。")
+            return 1
+        if not wait_port_free(port):
+            print(f"  ! {port} 端口未在 20 秒内释放——请手动结束它再启动。")
+            return 1
+        print(f"  - {port} 端口已释放")
+
+    dsh_dir = workspace_root() / "deepseek-harness"
+    bin_js = dsh_dir / "apps" / "cli" / "lib" / "bin.js"
+    if not bin_js.is_file():
+        print(f"  ! 找不到 DSH 入口：{bin_js}")
+        print(f"    工作区根解析为 {workspace_root()}（可用 PENTEST_WS 或 .env 覆盖）")
+        return 1
+    node = _system_exe("node")
+    if not node:
+        print("  ! 找不到 node.exe（PATH 与 %ProgramFiles%\\nodejs 都没有）")
+        return 1
+    # 参数逐个内联成字面量列表、不经 shell（shell=False 是默认）：三个元素都来自
+    # 「已校验存在的绝对路径」或命令行选项，没有拼接进字符串再解释的环节。
+    print(f"  - 启动：{node} {bin_js} --profile {profile} --patch {PATCH}")
+    try:
+        return subprocess.run([node, str(bin_js), "--profile", profile,
+                               "--patch", str(PATCH)],
+                              cwd=dsh_dir, check=False).returncode
+    except OSError as exc:
+        print(f"  ! 启动失败：{exc}")
+        return 1
+
+
 def bridge_live_check(spool: Path) -> tuple[list[str], str]:
     """审计桥是不是在跑**当前**代码——判据：spool 最新记录有没有 `preset` 字段。
 
@@ -495,6 +692,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="宿主桥 spool 路径（缺省 <仓库>/data/dsh-events.jsonl）")
     ap.add_argument("--no-live", action="store_true",
                     help="跳过运行态检查（进程模块 / 审计桥代码是否为当前版本）")
+    ap.add_argument("--port", type=int, default=DEFAULT_WEB_PORT,
+                    help=f"web profile 的监听端口（缺省 {DEFAULT_WEB_PORT}）")
+    ap.add_argument("--launch", action="store_true",
+                    help="启动器用：同步 + 关旧实例 + 启动 DSH（逻辑在 Python 里，"
+                         "不依赖 cmd 解析与环境变量）")
     ap.add_argument("--restart", action="store_true",
                     help="启动器用：若已有实例在跑，先关掉它再继续"
                          "（否则新实例会以 EADDRINUSE 127.0.0.1:4080 失败退出）")
@@ -505,10 +707,21 @@ def main(argv: list[str] | None = None) -> int:
                     help="跳过审计桥的 profile 接线检查")
     args = ap.parse_args(argv)
 
+    # 控制台可能是 GBK（双击/普通 cmd），而输出里有中文与 · ✗ 这类字符——
+    # 不兜住就是 UnicodeEncodeError 崩栈，用户看到 traceback 而不是问题清单。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError):
+            pass
+
     home = dsh_home(args.home)
     dst = home / ".agent-presets" / "proteus"
     print(f"DSH home : {home}")
     print(f"preset   : {dst}")
+
+    if args.launch:
+        return launch(args.profile, dst, port=args.port)
 
     if not args.check:
         for note in install(home):
@@ -537,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
     problems += verify_preset(dst)
     problems += [f"与仓库不同步：{d}" for d in drift(dst)]
     problems += verify_patch()
+    problems += verify_launcher()
     if not args.no_bundle_check:
         problems += check_bundle(home, args.profile)
         problems += check_bridge_entry(home, args.profile)
