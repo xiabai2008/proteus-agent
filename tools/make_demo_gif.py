@@ -7,6 +7,7 @@
 运行：python tools/make_demo_gif.py
 输出：docs/assets/demo.gif（无限循环，约 12s）
 """
+import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -25,7 +26,8 @@ PURPLE = (188, 140, 255)
 RED = (248, 113, 113)
 CYAN = (86, 180, 196)
 
-FONT = "C:/Windows/Fonts/msyh.ttc"
+# 字体路径从系统环境取（Windows 由 WINDIR 给出），不写死本机路径
+FONT = str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "msyh.ttc")
 F = lambda size: ImageFont.truetype(FONT, size)
 
 LH = 26                     # 行高

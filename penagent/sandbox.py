@@ -65,7 +65,7 @@ def containerize_command(command: list[str]) -> list[str]:
     两类需要重写：
 
     1. **宿主解释器路径**——`ctf_tools.json` 的 `{python}` 在配置装载时展开为
-       `sys.executable`（如 `D:\\tools\\Python 3.12.9\\python.exe`）。容器里
+       `sys.executable`（如 `<PY312>\\python.exe`）。容器里
        那个路径不存在，镜像自带 python，用 `python`。
     2. **宿主工具二进制路径**——`external_tools.json` 写的
        `${PENTEST_TOOLS}/tools/nuclei.exe` 之类。镜像把这些工具的 Linux 版装到

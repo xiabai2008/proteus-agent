@@ -53,7 +53,7 @@ python -m pip install torch -i https://mirrors.aliyun.com/pypi/simple/ --dry-run
 
 ```
 Looking in indexes: https://mirrors.aliyun.com/pypi/simple/
-Requirement already satisfied: torch in d:\tools\python 3.12.9\lib\site-packages (2.8.0)
+Requirement already satisfied: torch in <PY312>\lib\site-packages (2.8.0)
 Requirement already satisfied: filelock ... (from torch) (3.17.0)
 Requirement already satisfied: typing-extensions>=4.10.0 ... (4.16.0)
 Requirement already satisfied: sympy>=1.13.3 ... (1.14.0)

@@ -8,8 +8,9 @@
 多模式渗透测试 Agent：同一套 Python 内核，通过 **ModeProfile（模式档案）** 在「常规渗透测试模式」「CTF 比赛模式」等场景间**机制性**切换。当前执行**方案 C（主线）+ 方案 D（宿主层）**：
 
 - 内核 = XPentest（已存在，fork 进本仓库），ReAct 循环 + 证据链反幻觉 + 记忆与技能进化
-- 工具层 = MCP 统一注册（RayScan / Chameleon 已有 MCP Server；poxiao / ruoyi-scan / LogicHunt / 本地二进制待接）
+- 工具层 = MCP 统一注册（RayScan / Chameleon / seckb 已声明，`--discover-mcp` 显式连接；poxiao / ruoyi-scan / LogicHunt 待接）
 - 宿主层 = 双入口：自有 CLI/SDK（必须可独立运行）+ deepseek-harness agent-preset（可选）
+- 宿主层现状（2026-09-22）：DSH 侧 = preset（工具面 + 目标动作裁决行）+ host 平面 bundle `dsh/proteus-bridge`（会话事件审计入链）；内核侧 = MCP server 暴露 40+ 工具。三步实施与真机证据见 `docs/DSH插件化与内核旁路治理.md`
 
 ## 2. 不可违反的硬规则（每次改动前自查）
 
@@ -33,6 +34,7 @@
 | `PENTEST_PY312` | Python 3.12 解释器路径 | DSH preset（容器外 CLI） |
 | `PENTEST_G07_ROOT` | 07 靶场（warfare 包）根 | conftest.py / 评测脚本 |
 | `PENTEST_DOCKER_IMAGE` | 沙箱容器镜像（缺省 python:3.12-slim） | penagent/sandbox.py |
+| `PENTEST_LLM_BASE_URL` / `PENTEST_LLM_API_KEY` / `PENTEST_LLM_MODEL` | OpenAI 兼容 LLM 端点 | penagent/llm.py / 评测脚本 |
 
 规则：配置 JSON 与入库文件写 `${VAR}`；`envcfg.expand_deep()` 在装载时展开，未设置的变量保持原样（运行时存在性校验会给出"未注册/不可用"，不崩溃）。新增路径类配置一律走这个机制，禁止回退到硬编码。
 
@@ -40,14 +42,15 @@
 
 - 语言/运行时：Python 3.12（现有 pyc 为 cpython-312）；Windows + bash；测试框架 pytest。
 - 内核来源：`<WS>\网安项目开发规划\10-pentest-agent`（fork 时只拷 `penagent/`、`tests/`（排除 `_tmp*`、`__pycache__`）、`pytest.ini`、`requirements.txt`；`.env` 不拷，另建 `.env.example`）。
-- 内核现有模块：`agent.py`（ReAct 循环 + Policy 护栏）、`evidence.py`、`memory.py`（missions/skills）、`reflect.py`、`tools.py` + `external_tools.json`、`llm.py`、`mcp.py`（10 工具）、`gaps.py`、`ppo.py`/`rl.py`、`adapters/`。
-- 已知重构点：`agent.py` 的 `Policy.authorize` 是硬编码布尔值、`SYSTEM_PROMPT` 是模块级常量——这两处是模式化的改造入口。
+- 内核现有模块（`penagent/`，28 文件 / 约 4300 行）：`agent.py`（ReAct 循环）、`modes.py`（ModeProfile 加载/合并/校验）、`policy_gate.py`（工具执行前裁决）、`evidence.py`（链式哈希）、`verifier.py`（可插拔判定器）、`memory.py` + `reflect.py` + `skill_seeds.py`（记忆分区 / 反思 / 预置技能）、`registry.py` + `tools.py` + `builtin_tools.py` + `external_tools.*` + `ctf_tools.*`（工具注册与三层工具面）、`mcp.py` + `mcp_client.py`、`sandbox.py`（分档 + 容器化）、`dsh_bridge.py`（宿主审计桥）、`envcfg.py`、`llm.py`、`gaps.py`、`ppo.py`/`rl.py`、`adapters/`。
+- 模式化改造已完成（原「已知重构点」）：`Policy.authorize` 的硬编码布尔值已换成 `PolicyGate` 的模式驱动裁决（禁用即拒绝，见 `tests/test_policy_mode.py`）；`SYSTEM_PROMPT` 已改为按模式装配（`modes/*.yaml` 的 persona + `prompts/*.md`）。
 - 模式雏形参考：`<WS>\dawnforge-pentest\config\modes.yaml`（tool_constraints 机制性禁用的做法直接借鉴）。
-- CTF 现状：`dawnforge-pentest/skills/pentest_skills/ctf-*` 只有 SKILL.md 文档，无实现；本地已有 rsactftool / jadx / x64dbg 等二进制（`<TOOLS_DIR>\bin`）。
+- CTF 现状：**已实现**——`penagent/ctf_tools.py` + `ctf_tools.json`（codec 解码链 / RsaCtfTool / python 一次性脚本）+ `modes/ctf-crypto.yaml`；题集 33 道（`examples/eval_ctf_solve.py` 声明式规格），pytest 与 `--suite ctf` 均实测 33/33（见 `docs/评测骨架.md`）。二进制仍在 `<TOOLS_DIR>\bin`。
 - RL 进化链路（`ppo.py` / `rl.py` + `examples/eval_evolution.py`、`eval_closed_loop.py`）：**已验证**（2026-09-18，命令与原始输出见 `docs/RL链路实测记录.md`）。
-  环境：pytest 解释器 `<PY312>\python.exe` 上装的是 `torch 2.8.0+cpu`；torch 保持**可选依赖**定位不变（硬规则 5，不进 `requirements.txt` 安装列表），屏蔽 torch 时 165 passed / 3 skipped，就位后 173 passed / 0 skipped。
+  环境：pytest 解释器 `<PY312>\python.exe` 上装的是 `torch 2.8.0+cpu`；torch 保持**可选依赖**定位不变（硬规则 5，不进 `requirements.txt` 安装列表），屏蔽 torch 时 RL 链路用例按环境跳过，其余全量必须通过。
   数据：`eval_evolution.py` 决策步数 6.0 → 3.0（下降 50%，与内核 README 声称一致）；`eval_closed_loop.py` 四层叠加为基线 4.28 → Q 学习 2.60（-39%）→ PPO 2.50（-42%），三次重跑逐位一致。
 - 外部依赖 **07 靶场**：两个评测脚本需要 `warfare` 仿真包，位于 `<WS>\网安项目开发规划\07-agent-war-range`（注意**不在** `<WS>\07-agent-war-range`）。`conftest.py` 按 `PENTEST_G07_ROOT` → 相邻布局 → 本机绝对路径的顺序解析并注入 `PYTHONPATH`（供测试用 subprocess 拉起的评测脚本继承）；直接跑脚本时须自行设 `PYTHONPATH`，否则报 `ModuleNotFoundError: No module named 'warfare'`。
+- 测试基线（2026-09-22 实测）：**375 passed / 0 failed / 0 skipped**（25 个测试文件、319 个测试函数）。CI 覆盖 Windows py3.12/3.13（必过）+ Linux（实验性），并在 pytest 之后跑 `python examples/benchmark.py --suite ctf` 作为**能力闸门**（33 题纯离线，约 5 秒；有失败即非零退出）。
 
 ## 4. ModeProfile 规范（阶段一的核心交付）
 
@@ -65,7 +68,7 @@
 | verifier.type / pattern / auto_retry | 成功判定器：`evidence_chain`（渗透）或 `flag_regex`（CTF） | 任务收口 |
 | skills | 本模式技能包 | 技能检索过滤 |
 | memory_namespace | 记忆/技能库分区（模式间不互串） | Memory 读写 |
-| sandbox | 隔离级别声明 | 阶段二实装，先落字段 |
+| sandbox | 隔离级别声明（none / local / docker） | 工具执行前裁决；容器不可用时**拒绝而非裸跑** |
 
 两个基准模式（照此落盘）：
 
@@ -85,7 +88,8 @@ permission:
   require_confirm: ["sqlmap", "ffuf", "hydra"]
   hard_deny: ["mimikatz", "ransomware_sim"]
 budget: {max_steps: 40, max_minutes: 180, max_cost_usd: 5.0, model_tier: {recon: cheap, reason: strong}}
-scope: {target_allowlist: required, network_egress: false}
+# R-16 决策（2026-09-21）：渗透必须触达目标，出网边界交 target_allowlist 硬校验
+scope: {target_allowlist: required, network_egress: true}
 verifier: {type: evidence_chain, require_poc: true}
 skills: [web-recon, sqli, ssrf, report-gen]
 memory_namespace: pentest-standard
@@ -117,6 +121,14 @@ sandbox: docker
 | 二 · 能力补齐 | MCP 注册中心统一接入 + CTF Crypto/Misc 工具 + 沙箱实装 | 新增工具不改内核代码；CTF 模式自动解出至少 3 道 Crypto/Misc 题 |
 | 三 · 宿主与界面 | DSH agent-preset 插件 + Web 控制台 + 多 agent 并行 | DSH 界面可选模式/下任务/看证据链 |
 
+三阶段**均已交付并通过真机验证**（证据：`docs/阶段一验收报告.md`、`docs/DSH宿主实测记录.md`、`docs/Web真内核实测记录.md`）。
+
+当前主线（第四阶段，进行中）：**能力度量 + 宿主旁路治理**。
+
+- 能力度量：`examples/benchmark.py` 统一评分卡（ctf / pentest / lab / agent-lab / g07 / dsh-session 六套件），结果落盘可跨版本对比——见 `docs/评测骨架.md`；
+- 宿主治理：内核补原始证据工具（`http_raw`）→ host 平面 bundle 把会话内每次工具调用审计入独立证据链 → preset 内 `pre-execute` 裁决目标动作（`ask`/`deny`/`off`）——见 `docs/DSH插件化与内核旁路治理.md`；
+- 六方向盘点与剩余优先级见 `docs/能力加强路线.md`，待修项（R-* 编号）见 `docs/修复待办清单.md`。
+
 ## 6. 工作约定
 
 - 接到任务先说 3 句以内的实现方案（改哪些文件、新增哪些），确认后动手；小改动可直接动手。
@@ -124,3 +136,4 @@ sandbox: docker
 - commit message 用中文一行式：`阶段一: Policy 升级为模式驱动裁决`。
 - 报错时贴完整 traceback 给你；你先定位根因再改，不做绕过式修补。
 - 文档与注释用简体中文；代码、标识符、YAML 键用英文；不使用 emoji。
+- 入库文件不得含本机绝对路径（硬规则 7）：`python tools/scrub_paths.py` 就地清洗、`--check` 只校验（有残留即非零退出）；`tests/test_path_hygiene.py` 在 pytest 里机制性把关。

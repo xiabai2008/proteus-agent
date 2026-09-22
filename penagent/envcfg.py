@@ -65,6 +65,62 @@ def expand_deep(obj):
 
 
 # ----------------------------------------------------------------------
+# 本机路径清单（硬规则 7：入库文件不得含本机绝对路径）
+#
+# 清洗工具（tools/scrub_paths.py）与回归用例（tests/test_path_hygiene.py）
+# 共用这一份解析——两处各写一遍必然漂移（与 resolve_g07 同款理由）。
+# ----------------------------------------------------------------------
+def local_needles() -> tuple[tuple[str, str], ...]:
+    """(本机绝对路径, 占位符) 列表，按路径长度降序。
+
+    来源：仓库根（运行时解析）、用户主目录、`.env` 里的 PENTEST_* 路径。
+    未配置的变量不产生条目——清洗与校验都不该依赖某台机器的配置。
+    长度降序是必要的：先替长的，父路径才不会把子路径截断成一半。
+    """
+    load_env_file()
+    pairs: list[tuple[str, str]] = [(str(PROJECT_ROOT), "<REPO>")]
+    home = Path.home()
+    if str(home) not in ("", "."):
+        pairs.append((str(home), "<USER_HOME>"))
+    for var, placeholder in (("PENTEST_WS", "<WS>"),
+                             ("PENTEST_TOOLS", "<TOOLS_DIR>"),
+                             ("PENTEST_PY312", "<PY312>"),
+                             ("PENTEST_G07_ROOT", "<G07_ROOT>")):
+        value = os.environ.get(var, "").strip()
+        if value:
+            pairs.append((value, placeholder))
+    unique: dict[str, str] = {}
+    for value, placeholder in pairs:
+        unique.setdefault(value, placeholder)
+    return tuple(sorted(unique.items(), key=lambda kv: len(kv[0]),
+                        reverse=True))
+
+
+def local_path_pattern(value: str) -> re.Pattern[str]:
+    """把一条本机路径编译成**分隔符无关、大小写不敏感**的匹配式。
+
+    Windows 路径在文档与命令输出里两种分隔符都有，大小写也常变（实测 pip
+    把整条路径输出成全小写）；文档里的转义写法还会出现**连续**分隔符。
+    只按原样匹配会漏——三种形态都要认。
+    """
+    segments = [re.escape(seg) for seg in re.split(r"[\\/]+", value) if seg]
+    return re.compile(r"[\\/]+".join(segments), re.IGNORECASE)
+
+
+def scrub_local_paths(text: str) -> str:
+    """把文本里的本机路径替换为占位符（未配置的路径天然不会命中）。"""
+    for value, placeholder in local_needles():
+        text = local_path_pattern(value).sub(placeholder, text)
+    return text
+
+
+def find_local_paths(text: str) -> list[str]:
+    """返回文本里出现的本机路径（按 needles 顺序，供 `--check` 与用例报错）。"""
+    return [value for value, _ in local_needles()
+            if local_path_pattern(value).search(text)]
+
+
+# ----------------------------------------------------------------------
 # 外部依赖：07 靶场（warfare 仿真包）
 #
 # 内核的回归评测脚本（examples/eval_evolution*.py / eval_closed_loop.py）与

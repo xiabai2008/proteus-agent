@@ -6,6 +6,7 @@
 - docker：需要隔离的工具进容器；容器不可用时**拒绝执行且绝不裸跑**
 - 模式接线：注册表按模式挂沙箱策略；模式声明非法档位被拒
 """
+import os
 import sys
 from pathlib import Path
 
@@ -405,9 +406,12 @@ def test_sandbox_image_runs_sqlmap_through_command_rewrite():
     **容器化链路本身**，故显式放开出网。
     """
     runner = _sandbox_image_or_skip()
+    # 工具路径从环境解析（本机路径不入库，硬规则 7）；未配置时用合成路径。
+    # 两者都必须是**绝对路径 + .exe**，否则测不到 containerize_command 的重写
+    tools_root = Path(os.environ.get("PENTEST_TOOLS") or r"C:\path\to\tools")
     spec = ToolSpec(name="sqlmap_probe", kind="cli", dangerous=True,
                     network=True, timeout=120, workdir=".",
-                    command=[r"C:\Tools\reasonix_sentou\tools\sqlmap.exe",
+                    command=[str(tools_root / "tools" / "sqlmap.exe"),
                              "--version"])
     registry = ToolRegistry(
         sandbox=build_sandbox("docker", runner=runner, egress=True))

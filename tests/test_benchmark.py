@@ -630,6 +630,47 @@ def test_lab_ground_truth_markers_are_observable():
                 f"在探测输出里看不到: {blob[:160]}")
 
 
+def test_lab_reachable_rejects_connect_without_http_response():
+    """端口能连上但 HTTP 不回话 = 不可达。
+
+    实测触发场景：Docker Desktop 被暂停后宿主 8080/3000/8081 仍接受 TCP
+    连接，但 HTTP 永不响应。只做 TCP 探测的 `reachable()` 会返回 True，
+    于是"靶场不在"被报成断言失败（本该跳过）。这条用一个"连上就不说话"
+    的真实监听套接字把判据钉住。
+    """
+    import socket
+    import threading
+    import time
+
+    from lab import reachable
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    held: list = []
+
+    def accept_and_silence() -> None:
+        try:
+            conn, _ = server.accept()
+            held.append(conn)          # 接受连接但一个字都不回
+            time.sleep(3)
+        except OSError:
+            pass
+
+    threading.Thread(target=accept_and_silence, daemon=True).start()
+    try:
+        assert reachable(f"http://127.0.0.1:{port}/", timeout=0.8) is False
+        # 协议边界：非 http(s) / 缺主机名一律不可达，绝不给 urlopen 直连
+        assert reachable("file:///etc/passwd", timeout=0.8) is False
+        assert reachable("http:///no-host", timeout=0.8) is False
+    finally:
+        server.close()
+        for conn in held:
+            conn.close()
+
+
 def test_agent_lab_registered_and_excluded_from_all():
     """套件已注册；`--suite all` 不含它（真 LLM 有花费，需显式点名）。"""
     from benchmark import ALL_SUITES_EXCLUDE, SUITES

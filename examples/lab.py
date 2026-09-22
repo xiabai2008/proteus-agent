@@ -222,16 +222,44 @@ def probe_lab(lab: LabTarget, base_url: str = "",
 
 
 def reachable(base_url: str, timeout: float = 1.5) -> bool:
-    """靶是否可达（TCP 层探测，不打 HTTP）。"""
-    import socket
+    """靶是否可达：HTTP 真的回话（连得上但不回包 = 不可达）。
+
+    只做 TCP 探测会误判：宿主端口代理 / Docker 半死时连接**能建立**但 HTTP
+    永不回包——实测 Docker Desktop 被暂停后 8080/3000/8081 全是这种状态，于是
+    "环境缺失"被报成"断言失败"（`test_lab_ground_truth_markers_are_observable`
+    就是这么红的，而该用例本意是"靶不在时跳过"）。
+
+    判据：任何 HTTP 状态码（含 401/403/500）都算在线，只有拿不到响应
+    （超时 / 连接重置 / URL 非法）才算不可达。
+
+    实现在 `http.client` 上，不用 `urlopen`：这里要的判据就是"服务端有没有
+    回话"（拿到状态行即在线，含 401/403/405/500），恰好是裸 HTTP 连接的语义。
+    地址仍先过 `validate_http_url`（仅 http/https 且必须带主机名）——与内核
+    其它出站调用点（`builtin_tools` / `mcp_client`）同一条边界。
+    """
+    import http.client
     import urllib.parse
+
+    from penagent.mcp_client import validate_http_url
+
+    if validate_http_url(base_url):
+        return False                     # 非 http(s) 或缺主机名：直接判不可达
 
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
+    target = parsed.path or "/"
+    if parsed.query:
+        target = f"{target}?{parsed.query}"
+    conn_cls = (http.client.HTTPSConnection if parsed.scheme == "https"
+                else http.client.HTTPConnection)
+    conn = conn_cls(host, port, timeout=timeout)
     try:
-        return s.connect_ex((host, port)) == 0
+        conn.request("GET", target)
+        resp = conn.getresponse()
+        resp.read(1)                     # 只取 1 字节：判在线即可，不拉正文
+        return True
+    except (OSError, http.client.HTTPException):
+        return False
     finally:
-        s.close()
+        conn.close()

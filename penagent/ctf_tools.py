@@ -1,7 +1,7 @@
 """CTF 解题工具（Crypto / Misc）：解码链与文件识别（纯 stdlib 实现）。
 
 为什么这几个是 function 工具而不是 CLI：本机 bin 目录里没有 base64 / xxd /
-file 这类独立二进制（实测 `C:\\Tools\\reasonix_sentou\\bin` 只有 rsactftool /
+file 这类独立二进制（实测 `<TOOLS_DIR>\\bin` 只有 rsactftool /
 stegoveritas / jadx / x64dbg 等），用 stdlib 实现既能离线确定性运行，也免去
 Windows 下的外部依赖。需要外部二进制的（RsaCtfTool、python 一次性脚本沙箱）
 仍以 CLI 形式登记，见 `ctf_tools.json`。

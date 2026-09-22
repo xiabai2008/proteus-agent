@@ -25,6 +25,10 @@ jobs:
       - name: Run tests
         # torch 为可选依赖：RL 进化链路用例自动跳过，其余全量必须通过
         run: python -m pytest tests -q -rs
+      - name: Capability gate (offline CTF suite)
+        # 机制测试全绿 != 能力没退化：ctf 套件 33 题纯离线（约 5 秒），
+        # 任一用例失败 benchmark.py 即以非零退出（docs/评测骨架.md）
+        run: python examples/benchmark.py --suite ctf
 
   test-linux:
     # Linux 为实验性信号（项目以 Windows 为主），不阻塞合并
