@@ -1,8 +1,8 @@
 # DSH 宿主接入指南（方案 D）
 
 > 把 Proteus 内核挂载为 deepseek-harness 的 agent-preset：**只配置，不改 DSH 核心代码**。
-> 适用 DSH 版本：`0.1.5-rc.2`（本机 `$DSH_HOME` = `<USER_HOME>\.dsh`）
-> 接入日期：2026-09-17
+> 适用 DSH 版本：`0.1.6-alpha.2`（preset 基座版本；本机 `$DSH_HOME` = `<USER_HOME>\.dsh`）
+> 接入日期：2026-09-17（2026-09-22 增补裁决层与审计层，见第八节第 8/9 条）
 
 ---
 
@@ -30,20 +30,44 @@ preset 里再挂一次，要么与根 realm 冲突（`provide()` 二次注册同
 ```
 proteus-agent/
 ├── dsh/
-│   ├── .agent-presets/proteus/
-│   │   ├── agent.cordis.yml        # preset 本体：persona + MCP 工具
-│   │   ├── proteus-persona.mjs     # 随 preset 的本地插件：读取人格文件并注册分区
-│   │   └── preset.yml              # 显示名/描述/排序
-│   └── proteus.cordis.patch.yml    # host 平面补丁：审批档位绑定
-└── prompts/dsh-persona.md          # 宿主侧人格提示词（persona 的唯一来源）
+│   ├── .agent-presets/proteus/          # preset（AGENT 平面）
+│   │   ├── agent.cordis.yml             # preset 本体：3 行 Proteus 专属内容
+│   │   ├── proteus-persona.mjs          # 本地插件：读人格文件并注册分区
+│   │   ├── proteus-tools-policy.mjs     # 本地插件：目标动作裁决 + 内核缺位守卫
+│   │   └── preset.yml                   # 显示名/描述/排序
+│   ├── proteus-bridge/                  # host 平面 bundle：会话事件审计入 spool
+│   └── proteus.cordis.patch.yml         # host 平面补丁：审批档位绑定
+├── prompts/dsh-persona.md               # 宿主侧人格提示词（persona 的唯一来源）
+└── tools/dsh_install.py                 # 安装 + 校验 + roster 健康检查
 ```
 
-安装到 DSH home（`$DSH_HOME` = `<USER_HOME>\.dsh`）：
+**安装（推荐）**——幂等，并把「会静默坏掉」的三处一起校验掉：
+
+```bash
+python tools/dsh_install.py          # 建目录链接（Windows 用 junction，无需管理员）
+python tools/dsh_install.py --check  # 只检查：preset 可解析 / 补丁完整 / 审计桥已接线
+```
+
+它做四件事：① 把 preset 目录**链接**进 `$DSH_HOME/.agent-presets/proteus`；
+② 逐行核对 preset 的相对 specifier 是否存在（少一个 `.mjs` 会让整份 preset
+**broken 并在选择器里静默消失**）；③ 拦掉 `!!js` 行里的 `": "`（YAML 会把它
+拆成映射键、求值成 `[object Object]`）；④ 跑一次 roster 健康检查。
+
+> **为什么必须链接而不是复制**：复制安装下「仓库改了、`$DSH_HOME` 里还是旧的」
+> 不会有任何提示——会话照常起得来，只是行为悄悄回到旧版。
+
+**手工安装（等价，仅在不能建链接时）**——注意是**四个**文件，漏一个即 broken：
 
 ```bash
 mkdir -p ~/.dsh/.agent-presets/proteus
-cp dsh/.agent-presets/proteus/{agent.cordis.yml,proteus-persona.mjs,preset.yml} \
+cp dsh/.agent-presets/proteus/{agent.cordis.yml,proteus-persona.mjs,proteus-tools-policy.mjs,preset.yml} \
    ~/.dsh/.agent-presets/proteus/
+```
+
+审计层（host 平面 bundle）另需装一次，装完**重启 DSH 进程**：
+
+```bash
+dsh plugin --profile web add <REPO>/dsh/proteus-bridge
 ```
 
 发现机制（`packages/preset/agent-presets/src/discovery.ts`）：
@@ -235,13 +259,16 @@ node verify-proteus.mjs && rm verify-proteus.mjs
 
 ## 六、工具清单与命名
 
-实测（本机）：**24 个工具**，公开名一律 `mcp__proteus__<原名>`。
+实测（本机 2026-09-22，用 5.2 的命令并加 `--discover-mcp`）：**45 个工具**，
+公开名一律 `mcp__proteus__<原名>`。
 
-| 类别 | 工具 |
-|---|---|
-| 高层能力（内核驱动） | `pentest_run` / `pentest_skills` / `pentest_missions` / `pentest_reflect` |
-| 内置被动侦察 | `port_scan` / `http_probe` / `http_raw` / `dns_lookup` / `robots_fetch` |
-| 外部 CLI（本机已安装的才注册） | `poxiao_scan` / `poxiao_recon` / `ruoyi_scan` / `nuclei_scan` / `httpx_probe` / `fscan_scan` / `subfinder_enum` / `dnsx_lookup` / `katana_crawl` / `naabu_scan` / `dalfox_xss` / `sqlmap_auto` / `gobuster_dir` / `ffuf_fuzz` / `ehole_finger` / `pocsuite_poc` |
+| 类别 | 数量 | 工具 |
+|---|---|---|
+| 高层能力（内核驱动） | 4 | `pentest_run` / `pentest_skills` / `pentest_missions` / `pentest_reflect` |
+| 内置被动侦察 | 5 | `port_scan` / `http_probe` / `http_raw` / `dns_lookup` / `robots_fetch` |
+| 外部 CLI（本机已安装的才注册） | 16 | `httpx_probe` / `nuclei_scan` / `sqlmap_auto` / `ffuf_fuzz` / `gobuster_dir` / `fscan_scan` / `naabu_scan` / `dalfox_xss` / `subfinder_enum` / `dnsx_lookup` / `katana_crawl` / `ehole_finger` / `pocsuite_poc` / `poxiao_scan` / `poxiao_recon` / `ruoyi_scan` |
+| 适配器（PacketForge） | 3 | `pf_nmap_scan` / `pf_nmap_services` / `pf_nmap_vuln` |
+| 外部 MCP（需 `--discover-mcp`） | 17 | chameleon 12（`chameleon_scrape_url` / `chameleon_crawl_site` 等）+ seckb 4（`seckb_kb_search` 等）+ rayscan 1（`rayscan_scan`） |
 
 工具清单来自内核的统一注册中心（`penagent/registry.py`）：新增工具改配置即可，
 内核与宿主两侧都不用改代码。
@@ -255,6 +282,7 @@ node verify-proteus.mjs && rm verify-proteus.mjs
 | 选择器里没有 proteus | 目录名不合法（须 `[a-z0-9][a-z0-9-]*`）或没放进 `$DSH_HOME/.agent-presets/`；跑 5.1 看 roster |
 | roster 显示 broken | composition 的 YAML 或行解析失败，`broken` 字段会写明是哪一行、哪个 specifier |
 | 会话里没有 `mcp__proteus__*` | 内核没起来。`failOnStartupError: false` 会让 preset 照常挂载，只是少这组工具——按 5.2 单独验证命令；常见原因是 `command` 里的 python 路径失效或 `cwd` 不对 |
+| preset 在选择器里消失 | 整份 composition broken（某行解析不到）。`python tools/dsh_install.py --check` 会指出是哪一行 |
 | `pentest_run` 报 LLM 相关错误 | 该工具会在内核里跑 LLM 决策循环，需要 `PENTEST_LLM_*`；preset 已从宿主环境透传这三个变量，缺失时内核走默认端点 |
 | 工具调用被审批挡住 | 当前会话的权限档位；用第三节的补丁切换 `proteus-ctf`（approval: never）或逐次批准 |
 
@@ -325,5 +353,34 @@ node verify-proteus.mjs && rm verify-proteus.mjs
      （见 `docs/修复待办清单.md` R-1）。
    - `--discover-mcp`：真正连接 `mcp_servers.json` 声明的外部 server。默认不连接是
      为避免启动被不可达的外部服务拖住，代价是这些能力悬空（R-14）。实测开启后
-     工具数 **20 → 41**（seckb 知识库 4 工具 + chameleon 12 工具），不可达的
-     server（如未启动的 RayScan）**优雅跳过**并记入 `summary().notes`，不抛异常。
+     外部 MCP 工具全部到位（chameleon 12 + seckb 4 + rayscan 1），工具总数 **45**
+     （分类见第六节）；不可达的 server 会**优雅跳过**并记入 `summary().notes`，不抛异常。
+
+8. **内核缺位守卫（2026-09-22 新增，fail-closed）**：`failOnStartupError: false`
+   意味着内核起不来时会话照常、只是**没有 `mcp__proteus__*`**，界面上没有任何提示。
+   那种会话里"对目标发请求"既无模式闸门也无证据链，放行等于"为能用而放弃保护"。
+   裁决行因此在动手前先看**调用方 agent 作用域里有没有内核工具**
+   （`ctx.tools.schemas(exec.agent)`）：
+
+   | 判定 | 行为 |
+   |---|---|
+   | `yes`（工具面里有内核工具） | 按 `mode` 正常裁决（缺省 `ask`） |
+   | `no` + `kernelGuard: deny`（缺省） | 目标动作**直接拒绝**，理由带排查命令 |
+   | `no` + `kernelGuard: warn` | 按原档位走，但理由注明"本次动作没有内核校验" |
+   | `unknown`（拿不到工具服务） | **按原档位走**——DSH 是 pre-stable，把"API 变了"误判成"内核没了"会把健康会话整片拒掉 |
+
+   判定结果一并写进 spool（`kernel: yes/no/unknown`），证据链里因此能区分
+   "被闸门拦下"与"内核根本没起来"。本地操作（读写文件、跑本地脚本）不受影响。
+
+9. **三层分工是实测结论，不是设计偏好**：`tools/pre-execute` 与 `tools.restrict`
+   都按**作用域**派发，而 `session/event` 是**全局**事件。于是：
+
+   | 层 | 放什么 | 为什么 |
+   |---|---|---|
+   | host 平面 bundle | 只做全局事件审计 | 作用域内的裁决监听在这里**收不到**调用 |
+   | preset 内本地插件行 | 裁决 + 工具面收敛（restrict） | 作用域过滤的机制只在这里生效 |
+   | MCP server | 工具能力本体 | 与 DSH 版本解耦，升级不 breaking |
+
+   > 这条违反直觉（直觉会想把所有东西塞进 host 平面）。2026-09-22 真机实测推翻过一次：
+   > 挂在 host 平面的裁决行在 web 会话里**完全收不到**工具调用，而同一份代码挂在
+   > 无 preset 的 headless profile 里能拦住。

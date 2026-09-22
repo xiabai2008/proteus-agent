@@ -289,8 +289,13 @@ def test_policy_event_becomes_observation(tmp_path):
 # ----------------------------------------------------------------------
 # 裁决层（预执行策略）：只针对"对目标发请求的宿主 shell 命令"
 # ----------------------------------------------------------------------
-def _policy_call(tmp_path, tool, command, **cfg):
-    """用桩 ctx 跑一次 pre-execute，返回 (裁决, spool 记录列表)。"""
+def _policy_call(tmp_path, tool, command, tool_names=None, **cfg):
+    """用桩 ctx 跑一次 pre-execute，返回 (裁决, spool 记录列表)。
+
+    `tool_names`：注入"该 agent 作用域里可见的工具名"。None = 拿不到工具服务
+    （守卫必须判为 unknown 并按原档位走）；传列表则模拟真实会话的工具面——
+    内核缺位就是"列表里没有任何 mcp__proteus__*"。
+    """
     node = shutil.which("node")
     if node is None:
         import pytest
@@ -301,13 +306,19 @@ def _policy_call(tmp_path, tool, command, **cfg):
 
     spool = tmp_path / f"policy-{uuid.uuid4().hex[:8]}.jsonl"
     config = {"spoolPath": str(spool), **cfg}
+    names_js = "null" if tool_names is None else json.dumps(tool_names)
     script = f"""
 import {{ apply }} from {json.dumps(PLUGIN.as_uri())};
 const listeners = {{}};
-const ctx = {{ on: (e, f) => {{ (listeners[e] ||= []).push(f); }} }};
+const names = {names_js};
+const tools = names === null
+  ? undefined
+  : {{ schemas: () => names.map((n) => ({{ name: n }})) }};
+const ctx = {{ on: (e, f) => {{ (listeners[e] ||= []).push(f); }}, tools }};
 apply(ctx, {json.dumps(config, ensure_ascii=False)});
 const hooks = listeners['tools/pre-execute'] || [];
-const exec = {{ name: {json.dumps(tool)}, arguments: {{ command: {json.dumps(command)} }} }};
+const exec = {{ name: {json.dumps(tool)}, arguments: {{ command: {json.dumps(command)} }},
+               agent: 'agent-stub' }};
 const out = [];
 for (const fn of hooks) {{
   const d = await fn(exec, async () => ({{ kind: 'allow' }}));
@@ -396,6 +407,98 @@ console.log(JSON.stringify(seen));
         registered = json.loads(proc.stdout.strip())
         assert ("session/event" in registered) is want_event, role
         assert ("tools/pre-execute" in registered) is want_policy, role
+
+# ----------------------------------------------------------------------
+# 内核缺位守卫：MCP 行没起来时，目标动作收紧（fail-closed）
+#
+# 为什么必须有：MCP 行配的是 failOnStartupError: false —— 内核起不来时 preset
+# 照常挂载、只是没有那组工具、且界面上没有任何提示。那种会话里"对目标发请求"
+# 既无模式闸门也无证据链，放行等于"为能用而放弃保护"。
+# ----------------------------------------------------------------------
+HOST_TOOLS = ["pwsh", "read", "write"]
+
+
+def test_kernel_guard_denies_target_action_when_kernel_missing(tmp_path):
+    """内核缺位 + 缺省档：直接拒绝，且理由给可操作的修复路径。"""
+    decision, records = _policy_call(
+        tmp_path, "pwsh", "curl http://127.0.0.1:3000/", tool_names=HOST_TOOLS)
+    assert decision["kind"] == "deny"
+    assert "内核工具未挂载" in decision["reason"]
+    assert "dsh_install.py --check" in decision["reason"]
+    assert records[-1]["decision"] == "deny" and records[-1]["kernel"] == "missing"
+
+
+def test_kernel_guard_keeps_normal_tier_when_kernel_present(tmp_path):
+    """内核在（工具面里有 mcp__proteus__*）→ 回到常规 ask 档。"""
+    decision, records = _policy_call(
+        tmp_path, "pwsh", "curl http://127.0.0.1:3000/",
+        tool_names=HOST_TOOLS + ["mcp__proteus__http_raw"])
+    assert decision["kind"] == "ask"
+    assert "内核工具未挂载" not in decision["reason"]
+    assert records[-1]["kernel"] == "yes"
+
+
+def test_kernel_guard_unknown_does_not_change_behavior(tmp_path):
+    """拿不到工具服务 → unknown → 按原档位走。
+
+    DSH 是 pre-stable：把"API 形状变了"误判成"内核没了"，会把健康会话整片
+    拒掉，比漏拦更糟。所以未知一律不参与裁决。
+    """
+    decision, records = _policy_call(tmp_path, "pwsh",
+                                     "curl http://127.0.0.1:3000/")
+    assert decision["kind"] == "ask"
+    assert records[-1]["kernel"] == "unknown"
+
+
+def test_kernel_guard_warn_mode_only_warns(tmp_path):
+    decision, records = _policy_call(
+        tmp_path, "pwsh", "curl http://127.0.0.1:3000/",
+        tool_names=HOST_TOOLS, kernelGuard="warn")
+    assert decision["kind"] == "ask"
+    assert "内核工具未挂载" in decision["reason"]
+    assert records[-1]["kernel"] == "missing"
+
+
+def test_kernel_guard_off_restores_plain_tier(tmp_path):
+    decision, _ = _policy_call(
+        tmp_path, "pwsh", "curl http://127.0.0.1:3000/",
+        tool_names=HOST_TOOLS, kernelGuard="off")
+    assert decision["kind"] == "ask"
+    assert "内核工具未挂载" not in decision["reason"]
+
+
+def test_kernel_guard_leaves_local_commands_alone(tmp_path):
+    """守卫只作用于"对目标发请求"的命令——内核缺位时本地操作照常。"""
+    decision, records = _policy_call(
+        tmp_path, "pwsh", "echo hi > out.txt", tool_names=HOST_TOOLS)
+    assert decision["kind"] == "allow" and records == []
+
+
+def test_kernel_guard_prefix_is_configurable(tmp_path):
+    """前缀可配：换 MCP serverName 时守卫要跟着走，不能写死。"""
+    decision, _ = _policy_call(
+        tmp_path, "pwsh", "curl http://127.0.0.1:3000/",
+        tool_names=HOST_TOOLS + ["mcp__other__x"],
+        kernelToolPrefix="mcp__other__")
+    assert decision["kind"] == "ask"
+
+
+def test_policy_kernel_field_reaches_the_chain(tmp_path):
+    """内核缺位标记要能进证据链——否则链上分不清"被闸门拦"与"内核没起来"。"""
+    chain = EvidenceChain(tmp_path / "chain.jsonl")
+    spool = tmp_path / "dsh-events.jsonl"
+    spool.write_text(json.dumps({
+        "ts": 1, "kind": "policy", "tool": "pwsh", "decision": "deny",
+        "hosts": ["127.0.0.1"], "outside": [], "kernel": "missing",
+        "reason": "目标动作已按 fail-closed 拒绝",
+        "command": "curl http://127.0.0.1:3000/",
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    import_spool(spool, chain=chain, state_path=None)
+    content = chain.load()[0].content
+    assert content["kernel"] == "missing"
+    assert content["decision"] == "deny"
+
 
 def test_path_spelling_does_not_duplicate(tmp_path, monkeypatch):
     """同一 spool 用相对/绝对两种写法调用，不能重复入链。

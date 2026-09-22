@@ -7,8 +7,7 @@
   "main": "index.mjs",
   "files": [
     "index.mjs",
-    "cordis.patch.yml",
-    "README.md"
+    "cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {

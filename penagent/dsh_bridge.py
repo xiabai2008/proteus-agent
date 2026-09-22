@@ -154,6 +154,9 @@ def import_spool(spool: str | Path = DEFAULT_SPOOL,
                 "outside": event.get("outside") or [],
                 "reason": str(event.get("reason") or "")[:500],
                 "command": str(event.get("command") or "")[:300],
+                # 内核当时在不在：缺位时目标动作会被 fail-closed 拒绝，这条字段
+                # 让链上能区分"被闸门拦下"与"内核根本没起来"（2026-09-22）
+                "kernel": str(event.get("kernel") or ""),
                 "ts": event.get("ts"),
             })
             appended += 1

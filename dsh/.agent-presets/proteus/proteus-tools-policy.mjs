@@ -13,6 +13,10 @@
  *    审计通道坏掉不该让任务失败；缺的痕迹在 `dsh-sync` 的统计里能看到。
  * 4. 载荷裁剪：args / output 各截断到 MAX_TEXT 字符——审计要的是"发生过什么"，
  *    不是把大正文灌进日志。
+ * 5. **内核缺位守卫**（2026-09-22 加）：MCP 行配的是 `failOnStartupError: false`，
+ *    内核起不来时 preset 照常挂载、只是**没有那组工具**。那种会话里"对目标发请求"
+ *    既没有模式闸门也没有证据链，放行就是"为能用而放弃保护"——所以内核缺位时
+ *    目标动作按 `kernelGuard` 收紧（缺省 deny，可 warn / off）。
  */
 
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -23,6 +27,9 @@ export const name = 'proteus-bridge'
 
 /** 单个字段的截断上限（字符）。 */
 const MAX_TEXT = 4000
+
+/** 内核工具前缀：MCP serverName=proteus → `mcp__proteus__<tool>`。 */
+const KERNEL_TOOL_PREFIX = 'mcp__proteus__'
 
 /** 不注入任何服务：只订阅事件，保持零依赖、零权限面。 */
 export const inject = []
@@ -160,6 +167,49 @@ function readStringArray(value, fallback) {
 }
 
 /**
+ * 内核工具是否已挂载——在**调用方 agent 的作用域**里看。
+ *
+ * 返回 `'yes'` / `'no'` / `'unknown'`。`unknown` 刻意不参与裁决：DSH 是
+ * pre-stable，工具服务或 `schemas()` 形状一变就宁可退回原档位——把"API 变了"
+ * 误判成"内核没了"，会把一个健康会话整片拒掉，比漏拦更糟。
+ *
+ * 为什么以"工具列表里有没有 `mcp__proteus__*`"为判据：`failOnStartupError:
+ * false` 时内核起不来，preset 照常挂载、只是**没有那组工具**，没有别的信号
+ * 能区分"内核在但没用"与"内核根本没起来"。
+ *
+ * @param {object} ctx - 插件上下文（工具服务可能未注入，访问会抛，故全部兜住）。
+ * @param {object} agent - 调用方 agent（`exec.agent`），作为作用域键。
+ * @param {string} prefix - 内核工具前缀。
+ * @returns {'yes'|'no'|'unknown'} 可用性。
+ */
+function kernelAvailability(ctx, agent, prefix) {
+  let tools
+  try {
+    tools = ctx?.tools
+  } catch {
+    tools = undefined
+  }
+  if (tools === undefined) {
+    try {
+      tools = ctx?.get?.('tools')
+    } catch {
+      tools = undefined
+    }
+  }
+  if (tools === undefined || typeof tools.schemas !== 'function') return 'unknown'
+  let schemas
+  try {
+    schemas = tools.schemas(agent)
+  } catch {
+    return 'unknown'
+  }
+  if (!Array.isArray(schemas) || schemas.length === 0) return 'unknown'
+  return schemas.some((s) => String(s?.name ?? '').startsWith(prefix))
+    ? 'yes'
+    : 'no'
+}
+
+/**
  * 插件入口：按 `role` 承担两件事（同一实现，两个挂载点）。
  *
  * **为什么必须分两个挂载点（真机实测 2026-09-22）**：DSH 的工具派发是
@@ -184,6 +234,15 @@ export function apply(ctx, config = {}) {
   const role = typeof config.role === 'string' ? config.role : 'both'
   const targets = readStringArray(config.targets, ['127.0.0.1', 'localhost'])
   const shellTools = readStringArray(config.shellTools, ['pwsh', 'bash'])
+  // 内核缺位时的档位：deny（缺省，fail-closed）/ warn（只提示）/ off
+  const kernelGuard = typeof config.kernelGuard === 'string'
+      && config.kernelGuard !== ''
+    ? config.kernelGuard
+    : 'deny'
+  const kernelPrefix = typeof config.kernelToolPrefix === 'string'
+      && config.kernelToolPrefix !== ''
+    ? config.kernelToolPrefix
+    : KERNEL_TOOL_PREFIX
   const wantAudit = role === 'both' || role === 'audit'
   const wantPolicy = role === 'both' || role === 'policy'
   if (spoolPath === '') {
@@ -252,25 +311,49 @@ export function apply(ctx, config = {}) {
 
     const hosts = targetsIn(command)
     const outside = hosts.filter((host) => !withinTargets(host, targets))
-    const reason = outside.length > 0
+    const kernel = kernelAvailability(ctx, exec?.agent, kernelPrefix)
+
+    // 留痕统一走这里：裁决结果与"当时内核在不在"一起落盘——审计链要能回答
+    // "这次动作有没有内核校验"，而不是让人事后猜。
+    const record = (decision, reason, extra = {}) => write({
+      ts: Date.now(),
+      kind: 'policy',
+      tool: name,
+      decision,
+      hosts,
+      outside,
+      reason: clip(reason, 500),
+      command: clip(command, 300),
+      kernel,
+      ...extra,
+    })
+
+    // 内核缺位 + deny 档：目标动作按 fail-closed 拒绝。此时会话没有模式闸门、
+    // 目标白名单与证据链，"能用"的代价是把保护整片放弃——宁可拒绝并给出修复路径。
+    if (kernel === 'no' && kernelGuard === 'deny') {
+      const reason = `目标动作已按 fail-closed 拒绝：内核工具未挂载（工具列表里`
+        + `没有任何 ${kernelPrefix}* 工具）。先修内核 MCP 行再重试——`
+        + '排查：python tools/dsh_install.py --check，'
+        + '见 docs/DSH宿主接入指南.md 第七节。'
+        + '本地操作（读写文件、跑本地脚本）不受影响。'
+      record('deny', reason, { kernel: 'missing' })
+      return { kind: 'deny', reason }
+    }
+
+    const base = outside.length > 0
       ? `目标 ${outside.join(', ')} 不在内核授权白名单（${targets.join(', ')}）内；`
         + '内核闸门不会放行这类目标，若确需访问请先显式授权。'
       : '目标动作建议走内核工具（mcp__proteus__http_raw / '
         + 'mcp__proteus__pentest_run 等）：内核侧有目标白名单、模式闸门与'
         + '证据链，宿主 shell 直连的结论不可机验。'
+    // warn 档：按原档位走，但把降级状态写进理由——不静默
+    const reason = kernel === 'no' && kernelGuard === 'warn'
+      ? base + '【注意】内核工具未挂载，本次动作没有内核校验与证据链。'
+      : base
     const decision = mode === 'deny'
       ? { kind: 'deny', reason }
       : { kind: 'ask', reason }
-    write({
-      ts: Date.now(),
-      kind: 'policy',
-      tool: name,
-      decision: decision.kind,
-      hosts,
-      outside,
-      reason: clip(reason, 500),
-      command: clip(command, 300),
-    })
+    record(decision.kind, reason, kernel === 'no' ? { kernel: 'missing' } : {})
     return decision
   })
 }
