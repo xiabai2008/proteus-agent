@@ -358,11 +358,14 @@ def _is_dsh_cmdline(cmd: str, profile: str) -> bool:
     `apps/cli/src/bin.ts "web"`。只认前一种会让运行态检查**静默跳过**
     ——看起来"通过"，其实什么都没查（实测就是这么漏过去的）。
     """
-    if "apps/cli/lib/bin.js" not in cmd and "apps/cli/src/bin.ts" not in cmd:
+    # 命令行里两种分隔符都会出现（Windows 实际是反斜杠：apps\cli\lib\bin.js），
+    # 只匹配正斜杠会让运行态检查**静默跳过**——真实命令行实测就是这么漏的。
+    text = cmd.replace("\\", "/")
+    if "apps/cli/lib/bin.js" not in text and "apps/cli/src/bin.ts" not in text:
         return False
-    if f"--profile {profile}" in cmd or f"--profile={profile}" in cmd:
+    if f"--profile {profile}" in text or f"--profile={profile}" in text:
         return True
-    return f'"{profile}"' in cmd or f" {profile}" in cmd
+    return f'"{profile}"' in text or f" {profile}" in text
 
 
 def running_dsh(profile: str) -> list[dict]:

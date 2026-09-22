@@ -323,6 +323,11 @@ def test_is_dsh_cmdline_accepts_both_launch_shapes():
     other_profile = ('node apps/cli/lib/bin.js --profile headless')
     other_dev = 'node --import tsx/esm apps/cli/src/bin.ts "headless"'
 
+    # 用合成路径：本用例也在 test_path_hygiene 的扫描范围内，不能写真实工作区路径
+    real = ('"C:\\Program Files\\nodejs\\node.EXE" '
+            'D:\\ws\\deepseek-harness\\apps\\cli\\lib\\bin.js '
+            '--profile web --patch D:\\ws\\proteus-agent\\dsh\\proteus.cordis.patch.yml')
+    assert dsh_install._is_dsh_cmdline(real, "web") is True      # 真实启动器的形态
     assert dsh_install._is_dsh_cmdline(launcher, "web") is True
     assert dsh_install._is_dsh_cmdline(devmode, "web") is True
     assert dsh_install._is_dsh_cmdline(other_profile, "web") is False
