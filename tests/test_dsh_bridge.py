@@ -396,3 +396,20 @@ console.log(JSON.stringify(seen));
         registered = json.loads(proc.stdout.strip())
         assert ("session/event" in registered) is want_event, role
         assert ("tools/pre-execute" in registered) is want_policy, role
+
+def test_path_spelling_does_not_duplicate(tmp_path, monkeypatch):
+    """同一 spool 用相对/绝对两种写法调用，不能重复入链。
+
+    2026-09-22 真机发现：CLI 传相对路径、评分卡套件传绝对路径，状态文件里
+    记的 `spool` 字符串对不上就从头重放——链上出现 16 个 call_id 各有两条记录。
+    修法是路径先 resolve() 再比较与存储。
+    """
+    chain = EvidenceChain(tmp_path / "chain.jsonl")
+    state = tmp_path / "state.json"
+    spool = _spool(tmp_path, [_call("p1"), _result("p1")])
+
+    monkeypatch.chdir(tmp_path)
+    first = import_spool("dsh-events.jsonl", chain=chain, state_path=state)
+    second = import_spool(str(spool.resolve()), chain=chain, state_path=state)
+    assert first["records"] == 1 and second["records"] == 0
+    assert len(chain.load()) == 1

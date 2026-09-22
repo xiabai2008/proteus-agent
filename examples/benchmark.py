@@ -539,11 +539,108 @@ def run_agent_lab_suite(root: Path, driver: str = "agent",
                 seed=seed, reset=reset, repeat=repeat, raw_tag=raw_tag)
 
 
+def _dsh_paths() -> tuple[Path, Path, Path]:
+    """宿主桥的三个文件（spool / 证据链 / 增量状态）——独立于内核任务链。"""
+    data_dir = ROOT / "data"
+    return (data_dir / "dsh-events.jsonl", data_dir / "dsh-chain.jsonl",
+            data_dir / "dsh-spool.state.json")
+
+
+def dsh_records_for_lab(records, base_url: str) -> list:
+    """挑出"打过某个靶"的证据记录：args 里出现该靶 base URL 的 tool_call。
+
+    纯函数（不碰文件、不碰网络），判定口径要能被单测钉住。
+    """
+    picked = []
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return picked
+    for rec in records:
+        if getattr(rec, "kind", "") != "tool_call":
+            continue
+        content = getattr(rec, "content", None) or {}
+        blob = json.dumps(content.get("args", ""), ensure_ascii=False)
+        if base in blob:
+            picked.append(rec)
+    return picked
+
+
+def run_dsh_session_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
+    """DSH 宿主会话套件：读宿主桥证据链，按靶场清单判定（不需要 LLM、靶场可离线）。
+
+    与 `agent-lab` 的分工：那个跑内核自己的 ReAct 循环；这个判定的是**宿主会话**
+    （DSH web / headless）里真实发生过的工具调用。两条路径共用同一套 ground truth
+    与同一个判定函数（`score_from_evidence`），靠 `python -m penagent dsh-sync`
+    把 spool 落进独立链——"旁路也留痕、痕迹能评分"就落在这一步。
+
+    链校验是硬门槛：链不过，命中一概不作数（与 agent-lab 同口径）。
+    """
+    examples = str(ROOT / "examples")
+    if examples not in sys.path:
+        sys.path.insert(0, examples)
+    from lab import DEFAULT_URLS, LABS                    # noqa: E402
+    from lab_agent import score_from_evidence             # noqa: E402
+    from penagent.dsh_bridge import import_spool          # noqa: E402
+    from penagent.evidence import EvidenceChain           # noqa: E402
+
+    spool, chain_path, state_path = _dsh_paths()
+    if not spool.exists() and not chain_path.exists():
+        return [CaseResult(
+            suite="dsh-session", case_id="__env__", category="env",
+            outcome="skipped", passed=False,
+            detail="宿主桥尚未产出（先跑一次 DSH 会话，再 "
+                   "python -m penagent dsh-sync）")]
+    try:
+        import_spool(spool=spool, chain_path=chain_path, state_path=state_path)
+    except Exception as exc:                              # noqa: BLE001
+        return [CaseResult(
+            suite="dsh-session", case_id="__env__", category="env",
+            outcome="failed", passed=False,
+            detail=f"导入 spool 失败: {type(exc).__name__}: {exc}")]
+
+    chain = EvidenceChain(chain_path)
+    records = chain.load()
+    verify = chain.verify()
+    chain_ok = bool(verify.get("ok"))
+    results = [CaseResult(
+        suite="dsh-session", case_id="chain-integrity", category="audit",
+        outcome="success" if chain_ok else "failed", passed=chain_ok,
+        steps=int(verify.get("length") or 0),
+        expected="宿主桥证据链校验通过（链式哈希）",
+        got=f"长度 {verify.get('length')}",
+        detail="" if chain_ok else
+               f"tampered={verify.get('tampered')} "
+               f"broken={verify.get('broken_links')}")]
+
+    for lab in LABS:
+        base = DEFAULT_URLS.get(lab.id, "")
+        picked = dsh_records_for_lab(records, base)
+        if not picked:
+            continue
+        hits = score_from_evidence(lab.findings, picked)
+        matched = sum(1 for v in hits.values() if v)
+        total = len(hits)
+        missed = [k for k, v in hits.items() if not v]
+        passed = total > 0 and matched == total and chain_ok
+        results.append(CaseResult(
+            suite="dsh-session", case_id=lab.id, category="recon-dsh",
+            outcome="success" if passed else "failed", passed=passed,
+            steps=len(picked),
+            expected=f"{total} 项预期发现（宿主会话内真实调用）",
+            got=f"{matched}/{total} 命中 · 调用 {len(picked)} 次"
+                f"（链上该靶的全部会话累计）",
+            detail="" if passed else
+                   (f"未探到: {', '.join(missed)}" if missed
+                    else "证据链校验未通过")))
+    return results
+
+
 SUITES: dict[str, Callable[..., list[CaseResult]]] = {
     "ctf": run_ctf_suite,
     "pentest": run_pentest_suite,
     "lab": run_lab_suite,
     "agent-lab": run_agent_lab_suite,
+    "dsh-session": run_dsh_session_suite,
     "g07": run_g07_suite,
 }
 

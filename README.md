@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
-![Tests](https://img.shields.io/badge/tests-367%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-373%20passed-brightgreen)
 
 > **一个内核，千种面孔。**
 > Proteus（普罗透斯）：希腊神话中的海上老人，可随心变换任意形态——多模式切换的完美隐喻。
@@ -62,6 +62,7 @@ python -m penagent dsh-sync --data data --flush-open   # 会话结束后冲刷�
 python examples/benchmark.py --suite all          # CTF 33 题 + 演示靶 + 真实靶场 + 07 套件
 python examples/benchmark.py --suite lab          # 真实靶场基线（DVWA / Juice Shop / sw-secure-lab）
 python examples/benchmark.py --suite agent-lab    # agent 自主侦察真实靶场（真 LLM，分钟级，须显式点名）
+python examples/benchmark.py --suite dsh-session  # 判定 DSH 宿主会话（读宿主桥证据链，离线）
 python examples/benchmark.py --compare data/benchmark/baseline.json
 ```
 
@@ -102,7 +103,7 @@ python -m penagent mcp --targets 127.0.0.1
 模式层 · ModeProfile（一等公民，本次新建的核心）
   persona / capability / permission / budget / scope / verifier / skills / sandbox
         │
-内核层 · XPentest（已 fork 入仓 `penagent/` 包 · 367 测试）
+内核层 · XPentest（已 fork 入仓 `penagent/` 包 · 373 测试）
   ReAct 决策循环 · 证据链反幻觉 · 记忆与技能进化
         │
 工具层 · MCP 统一注册（新增能力不改内核）
@@ -162,7 +163,7 @@ proteus-agent/
 ├── dsh/                                       DSH agent-preset（proteus 挂载包 + 一键启动器）
 ├── web/                                       Web 控制台（真内核 / scripted 双驱动）
 ├── examples/                                  评测与演示脚本（mode_switch / ctf_solve / RL 进化 / 靶场）
-├── tests/                                     pytest 全量（367 例）
+├── tests/                                     pytest 全量（373 例）
 ├── tools/                                     文档与维护脚本（md2html / GIF 生成器 / 路径脱敏）
 ├── data/                                      运行时数据（作战记录 / 技能库 / 评测产物，gitignore）
 └── docs/                                      调研、设计与实测记录（见下）
@@ -220,7 +221,7 @@ proteus-agent/
 | 二 · 能力补齐 | 完成 | MCP 统一注册中心 + CTF Crypto/Misc 工具链 + 沙箱分级（无容器时拒绝而非裸跑） |
 | 三 · 宿主与界面 | 完成 | DSH agent-preset（24 工具挂载）+ Web 控制台三视图（真内核 / scripted 双驱动） |
 
-**测试**：367 passed（本机 torch 2.8.0+cpu 就位；torch 保持可选依赖定位，屏蔽时 RL 链路用例按环境跳过）。
+**测试**：373 passed（本机 torch 2.8.0+cpu 就位；torch 保持可选依赖定位，屏蔽时 RL 链路用例按环境跳过）。
 
 **三链路真机实测**（记录见 docs/）：DSH 宿主（preset 发现 / stdio 拉起 / mcp-client 真实调用）· Web 真内核（LLM 决策 + SSE 步骤流 + 证据链 integrity）· RL 进化（步数 6.0→3.0，-50%；闭环评测 Q 层 -39% / PPO 层 -42%）。
 

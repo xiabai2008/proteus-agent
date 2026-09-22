@@ -113,7 +113,68 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _clean_headers(headers, cookie: str = "") -> tuple[dict, list[str]]:
+    """规整请求头：字段名/值逐条校验，返回 (干净的头, 问题列表)。
+
+    三条边界（不是洁癖，是安全）：
+    - **拒绝 CR/LF**：请求头注入（CRLF injection）是最经典的绕过面，值里带
+      换行等于让调用方拼出额外请求；
+    - 头名只允许 RFC 7230 的 tchar，值限长 2000、总数限 20；
+    - 失败**逐条丢弃并报告**，不静默吞掉（调用方要能看出哪条没生效）。
+    """
+    import re
+
+    token_re = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+    clean: dict[str, str] = {}
+    problems: list[str] = []
+
+    raw = headers
+    if isinstance(raw, str):
+        import json as _json
+
+        try:
+            raw = _json.loads(raw) if raw.strip() else {}
+        except _json.JSONDecodeError as exc:
+            return {}, [f"headers 不是合法 JSON: {exc}"]
+    if raw is not None and not isinstance(raw, dict):
+        return {}, ["headers 必须是对象（{名称: 值}）"]
+
+    items = list((raw or {}).items())
+    if cookie:
+        items.append(("Cookie", str(cookie)))
+    for name, value in items:
+        key = str(name).strip()
+        val = "" if value is None else str(value)
+        if not token_re.match(key):
+            problems.append(f"头名非法: {key!r}")
+            continue
+        if "\r" in val or "\n" in val:
+            problems.append(f"头值含换行（请求头注入）已拒绝: {key}")
+            continue
+        if len(val) > 2000:
+            problems.append(f"头值过长（>2000）: {key}")
+            continue
+        if len(clean) >= 20:
+            problems.append("请求头超过 20 条，其余丢弃")
+            break
+        clean[key] = val
+    return clean, problems
+
+
+def _mask_headers(headers: dict) -> list[list[str]]:
+    """证据里记录请求头时，对凭据类头脱敏（只留前 8 位与长度）。"""
+    secret = {"cookie", "authorization", "x-api-key", "x-auth-token"}
+    out = []
+    for k, v in headers.items():
+        if k.lower() in secret and len(v) > 8:
+            out.append([k, f"{v[:8]}…（已脱敏，共 {len(v)} 字符）"])
+        else:
+            out.append([k, v])
+    return out
+
+
 def http_raw(url: str, method: str = "GET", body: str = "",
+             headers=None, cookie: str = "",
              timeout: float = 10.0, max_body: int = 4000) -> dict:
     """HTTP 原始探测（本地直连）：状态行 + 完整响应头 + 正文片段 + 耗时。
 
@@ -122,6 +183,11 @@ def http_raw(url: str, method: str = "GET", body: str = "",
     改用宿主 shell 的理由之一正是"`http_probe` 的固化输出给不了原始响应头与
     正文，做不了精细判读"（判 `Server`/`X-Powered-By` 是否真缺失、用
     `Content-Type` 甄别 SPA 兜底页、看 3xx 的 `Location`）。
+
+    `headers` / `cookie`（2026-09-22 补）：支持带认证态的请求——需要登录的
+    靶场（先 POST 登录拿 Set-Cookie，再把 cookie 带进后续请求）此前在核心里
+    做不了。头值里的 CR/LF 一律拒绝（请求头注入），凭据类头在**返回的请求头
+    记录里脱敏**（证据留痕但不落明文凭据）。
 
     三个刻意的行为：
     - **不跟随重定向**（3xx 原样返回，带 `location`）；
@@ -143,12 +209,17 @@ def http_raw(url: str, method: str = "GET", body: str = "",
         cap = max(256, min(int(max_body or 4000), 20000))
     except (TypeError, ValueError):
         cap = 4000
+    send_headers, header_problems = _clean_headers(headers, cookie)
     data = body.encode("utf-8") if (method == "POST" and body) else None
+    if data is not None and not any(k.lower() == "content-type"
+                                    for k in send_headers):
+        send_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     try:
         req = urllib.request.Request(
             _allow_http_url(url), data=data, method=method,
-            headers={"User-Agent": "XPentest/0.1 (authorized test)"})
+            headers={"User-Agent": "XPentest/0.1 (authorized test)",
+                     **send_headers})
         opener = urllib.request.build_opener(_NoRedirect)
         started = _time.perf_counter()
         try:
@@ -171,7 +242,10 @@ def http_raw(url: str, method: str = "GET", body: str = "",
                 "body": raw[:cap].decode("utf-8", errors="replace"),
                 "truncated": truncated,
                 "elapsed_ms": elapsed_ms,
+                "request_headers": _mask_headers(send_headers),
             }
+            if header_problems:
+                result["header_problems"] = header_problems
         finally:
             try:
                 resp.close()
@@ -179,7 +253,11 @@ def http_raw(url: str, method: str = "GET", body: str = "",
                 pass
         return result
     except Exception as exc:             # noqa: BLE001
-        return {"url": url, "method": method, "error": str(exc)[:300]}
+        # 失败也要留痕"我们发了什么"——"尝试过但连不上"与"没试过"是两回事
+        return {"url": url, "method": method, "error": str(exc)[:300],
+                "request_headers": _mask_headers(send_headers),
+                **({"header_problems": header_problems}
+                   if header_problems else {})}
 
 
 def register_builtins(registry) -> None:
@@ -206,12 +284,15 @@ def register_builtins(registry) -> None:
                  fn=robots_fetch),
         ToolSpec(name="http_raw",
                  description=("HTTP 原始探测（本地直连）：状态行 + 完整响应头 + "
-                              "正文片段 + 耗时；不跟随重定向（3xx 带 location）、"
+                              "正文片段 + 耗时；可带头/Cookie（注：CRLF 拒绝、凭据脱敏）；"
+                              "不跟随重定向（3xx 带 location）、"
                               "4xx/5xx 按响应返回。用于精细判读——SPA 兜底页甄别、"
                               "响应头缺失判读、跳转链取证"),
                  parameters={"url": {"type": "string"},
                              "method": {"type": "string"},
                              "body": {"type": "string"},
+                             "headers": {"type": "object"},
+                             "cookie": {"type": "string"},
                              "timeout": {"type": "number"},
                              "max_body": {"type": "number"}},
                  fn=http_raw),

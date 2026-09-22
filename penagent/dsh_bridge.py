@@ -103,7 +103,11 @@ def import_spool(spool: str | Path = DEFAULT_SPOOL,
       记账会产生"同一次调用两条记录"的假象。`flush_open=True` 才把挂起项
       按 `ok=None` 落链（用于会话已结束、结果永远不来的场景）。
     """
-    spool_path = Path(spool)
+    # **路径必须先归一**：CLI 传相对路径、评分卡传绝对路径，同一个 spool 会因
+    # 字符串不同而被当成两个文件 → 状态里的偏移失效 → 从头重放、链上出现
+    # 同一次调用的两条记录（2026-09-22 真机发现，链上 16 个 call_id 重复）
+    spool_path = Path(spool).resolve()
+    chain_path = Path(chain_path).resolve()
     result = {"spool": str(spool_path), "lines": 0, "records": 0,
               "open_calls": 0, "bad_lines": 0, "chain": "", "chain_ok": None,
               "flushed": 0}

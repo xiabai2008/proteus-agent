@@ -86,8 +86,26 @@ def raw_server():
                 self._send(500, b'{"error":"boom"}', "application/json")
             elif self.path == "/big":
                 self._send(200, b"x" * 5000)
+            elif self.path == "/echo":
+                self._echo()
             else:
                 self._send(200, b'{"ok":true}', "application/json")
+
+        def do_POST(self):
+            self._echo()
+
+        def _echo(self):
+            """回显请求方法与收到的头/正文（验证自定义头与 Cookie 真发出去了）。"""
+            import json as _json
+
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+            blob = _json.dumps({
+                "method": self.command,
+                "headers": {k: v for k, v in self.headers.items()},
+                "body": payload,
+            }, ensure_ascii=False).encode()
+            self._send(200, blob, "application/json")
 
         def log_message(self, *args):
             pass
@@ -148,3 +166,96 @@ def test_http_raw_visible_in_registry_and_mcp():
     reg = ToolRegistry()
     register_builtins(reg)
     assert "http_raw" in reg.names()
+
+def test_http_raw_sends_custom_headers_and_cookie(raw_server):
+    """自定义头与 Cookie 能发出去（认证场景的最小能力）。"""
+    result = http_raw(f"{raw_server}/echo", headers={"X-Token": "abc123"},
+                      cookie="SID=deadbeef")
+    echo = result["body"]
+    assert "X-Token" in echo and "abc123" in echo
+    assert "SID=deadbeef" in echo
+    # 证据里记录请求头，但凭据类只留前 8 位
+    sent = dict(result["request_headers"])
+    assert sent["X-Token"] == "abc123"
+    assert "deadbeef" not in sent["Cookie"] and "已脱敏" in sent["Cookie"]
+
+
+def test_http_raw_posts_form_body(raw_server):
+    result = http_raw(f"{raw_server}/echo", method="POST",
+                      body="username=admin&password=password")
+    echo = result["body"]
+    assert "username=admin" in echo
+    assert "application/x-www-form-urlencoded" in echo
+
+
+def test_http_raw_rejects_header_injection():
+    """头值含 CR/LF 一律拒绝——请求头注入是最经典的绕过面。"""
+    result = http_raw("http://127.0.0.1:1/", headers={"X-Bad": "ok" + chr(13) + chr(10) + "Evil: 1"})
+    problems = result.get("header_problems") or []
+    assert any("请求头注入" in p for p in problems), result
+    assert all("X-Bad" != k for k, _ in result.get("request_headers", []))
+
+
+def test_http_raw_rejects_bad_header_names_and_caps():
+    """头名非法逐条拒绝并报告（不是整批失败），合法头照常发出。"""
+    result = http_raw("http://127.0.0.1:1/",
+                      headers={"Bad Name": "x", "Good-One": "y"})
+    assert any("头名非法" in p for p in result.get("header_problems", []))
+    assert dict(result.get("request_headers", [])).get("Good-One") == "y"
+
+# ----------------------------------------------------------------------
+# 认证场景（2026-09-22 补 headers/cookie 能力）：DVWA 需 CSRF token + 会话
+# ----------------------------------------------------------------------
+def _dvwa_available() -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 8080), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def test_http_raw_authenticated_flow_against_dvwa():
+    """带认证访问 DVWA 受保护页：取 token -> 带会话登录 -> 带 Cookie 取页面。
+
+    这条覆盖 2026-09-22 补的自定义头/Cookie 能力——此前内核只能做匿名探测，
+    需要登录的靶场（认证后才有漏洞模块）完全够不到。靶场不在或数据库未初始化
+    时跳过（环境缺失不等于能力不足）。
+    """
+    import re
+
+    if not _dvwa_available():
+        import pytest
+
+        pytest.skip("DVWA 未运行（docker run -p 8080:80 vulnerables/web-dvwa）")
+    base = "http://127.0.0.1:8080"
+
+    page = http_raw(f"{base}/login.php", max_body=20000)
+    token = re.search(r"name=['\"]user_token['\"]\s+value=['\"]([^'\"]+)",
+                      page.get("body", ""))
+    if token is None:
+        import pytest
+
+        pytest.skip("登录页没有 CSRF token（版本不同或已初始化流程未完成）")
+    session = "; ".join(v.split(";")[0] for k, v in page.get("headers", [])
+                        if k.lower() == "set-cookie")
+    assert session, "登录页应下发会话 cookie"
+
+    login = http_raw(f"{base}/login.php", method="POST",
+                     body=f"username=admin&password=password&Login=Login"
+                          f"&user_token={token.group(1)}",
+                     cookie=session, headers={"Referer": f"{base}/login.php"})
+    if login.get("location") != "index.php":
+        import pytest
+
+        pytest.skip(f"登录未成功（数据库可能未初始化）: {login.get('location')!r}")
+
+    protected = http_raw(f"{base}/vulnerabilities/sqli/?id=1&Submit=Submit",
+                         cookie=session, max_body=8000,
+                         headers={"Referer": f"{base}/vulnerabilities/sqli/"})
+    assert protected["status"] == 200, protected.get("error")
+    assert "SQL Injection" in protected["body"], "受保护页未返回（Cookie 没生效？）"
+    # 证据留痕但凭据脱敏
+    sent = dict(protected["request_headers"])
+    assert "已脱敏" in sent["Cookie"] and "PHPSESSID" not in sent["Cookie"]
