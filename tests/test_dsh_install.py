@@ -244,8 +244,8 @@ def _stub_running(monkeypatch, procs):
     monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: procs)
 
 
-def test_restart_aborts_when_declined(tmp_path, monkeypatch, capsys):
-    """没确认就不能关进程；但必须明说"什么都没做"，不能悄悄起第二实例。"""
+def test_restart_aborts_when_ask_declined(tmp_path, monkeypatch, capsys):
+    """`--ask` 且拿不到确认时不能关进程；但必须明说"什么都没做"。"""
     import io
 
     home = tmp_path / "dsh"
@@ -256,11 +256,35 @@ def test_restart_aborts_when_declined(tmp_path, monkeypatch, capsys):
                         lambda procs: killed.append(procs) or [])
     monkeypatch.setattr(dsh_install.sys, "stdin", io.StringIO(""))  # isatty() = False
 
-    rc = dsh_install.main(["--home", str(home), "--restart", "--no-roster",
-                           "--no-bundle-check", "--no-live"])
+    rc = dsh_install.main(["--home", str(home), "--restart", "--ask",
+                           "--no-roster", "--no-bundle-check", "--no-live"])
     out = capsys.readouterr().out
     assert rc == 1 and killed == []
     assert "EADDRINUSE" in out and "已取消" in out
+
+
+def test_confirm_never_raises_on_broken_stdin(monkeypatch):
+    """stdin 读不到时必须返回 False，而不是把启动流程崩掉。
+
+    实测教训：双击启动器那次就是 `input()` 抛 EOFError、整个流程崩栈——
+    重启没发生，人还以为发生了。
+    """
+    import io
+
+    monkeypatch.setattr(dsh_install.sys, "stdin", io.StringIO(""))
+    assert dsh_install._confirm() is False
+
+    class _Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(dsh_install.sys, "stdin", _Tty())
+
+    def _boom(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _boom)
+    assert dsh_install._confirm() is False
 
 
 def test_restart_kills_then_continues(tmp_path, monkeypatch, capsys):
@@ -273,7 +297,8 @@ def test_restart_kills_then_continues(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(dsh_install, "wait_gone",
                         lambda procs, profile="web", timeout=15.0: True)
 
-    rc = dsh_install.main(["--home", str(home), "--restart", "--yes",
+    # 默认**不问**：双击启动器就是"启动"的明确意图，问一句只会多一个失败点
+    rc = dsh_install.main(["--home", str(home), "--restart",
                            "--no-roster", "--no-bundle-check", "--no-live"])
     out = capsys.readouterr().out
     assert rc == 0 and len(killed) == 1
@@ -302,7 +327,7 @@ def test_restart_stops_if_process_survives(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(dsh_install, "wait_gone",
                         lambda procs, profile="web", timeout=15.0: False)
 
-    rc = dsh_install.main(["--home", str(home), "--restart", "--yes",
+    rc = dsh_install.main(["--home", str(home), "--restart",
                            "--no-roster", "--no-bundle-check", "--no-live"])
     out = capsys.readouterr().out
     assert rc == 1 and "未在 15 秒内退出" in out

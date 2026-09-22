@@ -131,7 +131,16 @@ dsh --profile web --patch <仓库>/dsh/proteus.cordis.patch.yml
 <REPO>\dsh\start-proteus.cmd
 ```
 
-启动器做三件事：校验环境变量 → 切到 harness 目录 → 带 host 补丁启动 web profile。启动后终端打印带 token 的地址，在会话的 preset 选择器里选 **「Proteus 千面」（order: 5）**，新会话即挂载本 preset。
+启动器做四件事：校验环境变量 → **同步并校验 preset** → **若已有实例在跑就先关掉它**
+→ 带 host 补丁启动 web profile。启动后终端打印带 token 的地址，在会话的 preset 选择器里选
+**「Proteus 千面」（order: 5）**，新会话即挂载本 preset。
+
+> **为什么必须先关旧实例**（2026-09-22 实测两次踩中）：4080 被占时新实例会
+> `dsh: startup failed: webserver (required) listen EADDRINUSE 127.0.0.1:4080`
+> **启动失败并退出**——而双击的人只看到窗口一闪，以为重启成功了。
+> 启动器因此**默认直接关掉旧实例再启动**（不问：双击启动器本身就是明确的启动意图，
+> 多问一句只是多一个失败点；要问用 `--ask`）。关掉旧实例 = 当前 GUI 会话结束，
+> 但**对话是持久化的，不会丢**。只想看检查结果、不想关任何进程：`python tools/dsh_install.py --check`。
 
 **手动启动（等价）**：
 
@@ -299,7 +308,7 @@ node verify-proteus.mjs && rm verify-proteus.mjs
 | roster 显示 broken | composition 的 YAML 或行解析失败，`broken` 字段会写明是哪一行、哪个 specifier |
 | 会话里没有 `mcp__proteus__*` | 内核没起来。`failOnStartupError: false` 会让 preset 照常挂载，只是少这组工具——按 5.2 单独验证命令；常见原因是 `command` 里的 python 路径失效或 `cwd` 不对 |
 | preset 在选择器里消失 | 整份 composition broken（某行解析不到），**或目录是链接**（发现机制不跟随 reparse point）。`python tools/dsh_install.py --check` 会指出原因 |
-| 双击启动器后"好像没重启" | 旧实例还占着 4080，新实例以 `EADDRINUSE: address already in use 127.0.0.1:4080` **启动失败并退出**（窗口一闪就没了，看不到报错）。启动器现在会检测到在跑的实例并问一句"关闭它并继续启动？"——回答 y 才会真的重启 |
+| 双击启动器后"好像没重启" | 旧实例还占着 4080，新实例以 `EADDRINUSE: address already in use 127.0.0.1:4080` **启动失败并退出**（窗口一闪，看不到报错）。启动器现在**默认直接关掉旧实例再启动**；若它仍失败，手动兜底：任务管理器结束 `node.exe`（命令行含 `--profile web`）后双击启动器 |
 | 改了仓库，会话行为没变 | 两种原因，`--check` 分别报得出来：① 安装副本过期 →"与仓库不同步"，跑不带 `--check` 即同步（启动器每次启动前也会同步）；② **副本是新的、但进程还在跑旧模块**（Node 的 ESM 缓存不重启不更新，见 5.1）→ 报"DSH 进程 pid=… 启动于 …，早于安装文件的最新改动"。后者只能重启 |
 | 审计层像是旧版本 | `node_modules/dsh-proteus-bridge` 是普通目录而非链接（旧副本）。`--check` 会报；按 §二 用 `dsh plugin add` 重装 |
 | `dsh plugin add` 报 `ERR_PNPM_UNEXPECTED_STORE` | pnpm 11 不再读项目 `.npmrc` 的 `store-dir`；在 profile 的 `pnpm-workspace.yaml` 里加 `storeDir` 指向 `node_modules` 实际链自的那个 store（见 §二 的实测前提） |

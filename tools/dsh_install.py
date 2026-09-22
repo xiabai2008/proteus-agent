@@ -328,6 +328,21 @@ def live_check(profile: str, dst: Path) -> list[str]:
     return problems
 
 
+def _confirm() -> bool:
+    """交互确认；stdin 不是终端、读不到、被打断——一律当"否"（安全默认）。
+
+    **不要依赖它**：实测在重定向/异常 stdin 下 `input()` 会抛 `EOFError` 把整个
+    启动流程崩掉（双击启动器那次就是这么失败的）。所以它只在 `--ask` 下用，
+    默认路径根本不问。
+    """
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return input("  关闭它并继续启动？[y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def terminate_dsh(procs: list[dict]) -> list[str]:
     """结束这些 DSH 进程（Windows 用 `taskkill /T`，连子进程一起）。"""
     notes: list[str] = []
@@ -437,8 +452,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--restart", action="store_true",
                     help="启动器用：若已有实例在跑，先关掉它再继续"
                          "（否则新实例会以 EADDRINUSE 127.0.0.1:4080 失败退出）")
-    ap.add_argument("--yes", action="store_true",
-                    help="配合 --restart：不问，直接关")
+    ap.add_argument("--ask", action="store_true",
+                    help="配合 --restart：关之前问一句（默认不问——双击启动器"
+                         "已经是明确的启动意图，而问一句会多一个失败点）")
     ap.add_argument("--no-bundle-check", action="store_true",
                     help="跳过审计桥的 profile 接线检查")
     args = ap.parse_args(argv)
@@ -460,10 +476,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"\n  EADDRINUSE: address already in use 127.0.0.1:4080 失败退出"
                   f"\n  ——而双击启动器的人只会看到窗口一闪。")
             print("  注意：关掉它 = 当前 GUI 会话结束（对话本身是持久化的）。")
-            agreed = args.yes
-            if not agreed and sys.stdin.isatty():
-                answer = input("  关闭它并继续启动？[y/N] ").strip().lower()
-                agreed = answer in ("y", "yes")
+            agreed = True if not args.ask else _confirm()
             if not agreed:
                 print("已取消：既没有关闭正在跑的实例，也没有启动新实例。")
                 return 1
