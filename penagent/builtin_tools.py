@@ -173,9 +173,41 @@ def _mask_headers(headers: dict) -> list[list[str]]:
     return out
 
 
+#: grep 的扫描上限（字符）：够覆盖常见目录列表/HTML 页，又不至于把内存吃满
+GREP_SCAN_CAP = 65536
+
+
+def _grep_body(text: str, pattern: str,
+               max_matches: int = 20, max_lines: int = 10) -> dict:
+    """在正文（扫描缓冲）里按正则提取：逐匹配 + 命中行两路返回。
+
+    为什么要"逐匹配"：真实的目录列表页（如 Juice Shop 的 /ftp）把多个
+    `<li><a href=...>` 挤在同一行，按行提取只会得到一条被截断的长行，模型
+    仍然看不到清单。逐匹配则一个个给出。
+    返回 {"pattern", "count", "matches": [...], "lines": [...]}；正则非法时
+    返回 error 说明而不抛异常——工具的错误要能被模型读到并自我纠正。
+    """
+    import re as _re
+
+    try:
+        rx = _re.compile(pattern)
+    except _re.error as exc:
+        return {"pattern": pattern, "error": f"正则非法: {exc}"}
+
+    matches = [m.group(0).strip()[:300] for m in rx.finditer(text)]
+    lines = []
+    for line in text.splitlines():
+        if rx.search(line):
+            lines.append(line.strip()[:300])
+            if len(lines) >= max_lines:
+                break
+    return {"pattern": pattern, "count": len(matches),
+            "matches": matches[:max_matches], "lines": lines}
+
+
 def http_raw(url: str, method: str = "GET", body: str = "",
-             headers=None, cookie: str = "",
-             timeout: float = 10.0, max_body: int = 4000) -> dict:
+             headers=None, cookie: str = "", grep: str = "",
+             timeout: float = 10.0, max_body: int = 1200) -> dict:
     """HTTP 原始探测（本地直连）：状态行 + 完整响应头 + 正文片段 + 耗时。
 
     与 `http_probe` 的分工：那个只给**结论性字段**（状态码/标题/Server），
@@ -188,6 +220,13 @@ def http_raw(url: str, method: str = "GET", body: str = "",
     靶场（先 POST 登录拿 Set-Cookie，再把 cookie 带进后续请求）此前在核心里
     做不了。头值里的 CR/LF 一律拒绝（请求头注入），凭据类头在**返回的请求头
     记录里脱敏**（证据留痕但不落明文凭据）。
+
+    `grep`（2026-09-22 补，来自真机教训）：正文太长时**别再加大 `max_body`**——
+    内核把工具结果回灌给模型时按 2500 字符截断（`penagent/agent.py:477`），
+    加大正文既看不见又烧步数。需要从长页面里取特定内容（目录列表里的文件名、
+    表单 action、JS 里的接口路径）时用 `grep` 给正则，工具在**服务端**做提取、
+    只把命中行回给你。实测场景：Juice Shop 的 `/ftp` 目录列表页内联 CSS 很长，
+    文件清单在截断线之后，模型连续 13 步重试同一个请求——白烧一轮预算。
 
     三个刻意的行为：
     - **不跟随重定向**（3xx 原样返回，带 `location`）；
@@ -206,9 +245,9 @@ def http_raw(url: str, method: str = "GET", body: str = "",
         return {"url": url, "method": method,
                 "error": f"不支持的方法: {method}（仅 GET/HEAD/POST）"}
     try:
-        cap = max(256, min(int(max_body or 4000), 20000))
+        cap = max(256, min(int(max_body or 1200), 20000))
     except (TypeError, ValueError):
-        cap = 4000
+        cap = 1200
     send_headers, header_problems = _clean_headers(headers, cookie)
     data = body.encode("utf-8") if (method == "POST" and body) else None
     if data is not None and not any(k.lower() == "content-type"
@@ -227,9 +266,14 @@ def http_raw(url: str, method: str = "GET", body: str = "",
         except urllib.error.HTTPError as exc:
             resp = exc            # 3xx 不跟随；4xx/5xx 也按响应返回
         try:
-            raw = b"" if method == "HEAD" else resp.read(cap + 1)
+            # 扫描缓冲比回给模型的正文大得多：grep 要在**完整页面**上做提取，
+            # 否则"绕过截断"就没意义了（第一版就犯了这个错，测试当场抓住）
+            scan = max(cap, GREP_SCAN_CAP)
+            raw = b"" if method == "HEAD" else resp.read(scan + 1)
             elapsed_ms = round((_time.perf_counter() - started) * 1000, 1)
             truncated = len(raw) > cap
+            text_body = raw[:cap].decode("utf-8", errors="replace")
+            scan_text = raw[:scan].decode("utf-8", errors="replace")
             result = {
                 "url": getattr(resp, "url", url),
                 "method": method,
@@ -239,11 +283,19 @@ def http_raw(url: str, method: str = "GET", body: str = "",
                 "headers": [[k, str(v)[:300]]
                             for k, v in list(resp.headers.items())],
                 "location": resp.headers.get("Location", ""),
-                "body": raw[:cap].decode("utf-8", errors="replace"),
+                "body": text_body,
                 "truncated": truncated,
                 "elapsed_ms": elapsed_ms,
                 "request_headers": _mask_headers(send_headers),
             }
+            if truncated:
+                result["note"] = (
+                    "正文已截断——不要再加大 max_body（内核回灌给模型时按 2500"
+                    " 字符截断，加大也看不见）。要从长页面取特定内容，改用 grep"
+                    " 参数给正则，例如从目录列表页里取文件链接。")
+            if grep:
+                result["grep"] = _grep_body(scan_text, grep)
+                result["grep"]["scanned_chars"] = len(scan_text)
             if header_problems:
                 result["header_problems"] = header_problems
         finally:
@@ -284,7 +336,8 @@ def register_builtins(registry) -> None:
                  fn=robots_fetch),
         ToolSpec(name="http_raw",
                  description=("HTTP 原始探测（本地直连）：状态行 + 完整响应头 + "
-                              "正文片段 + 耗时；可带头/Cookie（注：CRLF 拒绝、凭据脱敏）；"
+                              "正文片段 + 耗时；可带头/Cookie（CRLF 拒绝、凭据脱敏）；"
+                              "长页面用 grep 在服务端做定向提取；"
                               "不跟随重定向（3xx 带 location）、"
                               "4xx/5xx 按响应返回。用于精细判读——SPA 兜底页甄别、"
                               "响应头缺失判读、跳转链取证"),
@@ -293,6 +346,7 @@ def register_builtins(registry) -> None:
                              "body": {"type": "string"},
                              "headers": {"type": "object"},
                              "cookie": {"type": "string"},
+                             "grep": {"type": "string"},
                              "timeout": {"type": "number"},
                              "max_body": {"type": "number"}},
                  fn=http_raw),

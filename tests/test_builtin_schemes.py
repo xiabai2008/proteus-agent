@@ -88,6 +88,12 @@ def raw_server():
                 self._send(200, b"x" * 5000)
             elif self.path == "/echo":
                 self._echo()
+            elif self.path == "/listing":
+                pad = "<style>" + ("/* padding */" * 200) + "</style>"
+                links = "".join(f'<li><a href="ftp/f{i}.md">f{i}.md</a></li>'
+                                for i in range(5))
+                self._send(200, (pad + "<ul>" + links + "</ul>").encode(),
+                           "text/html")
             else:
                 self._send(200, b'{"ok":true}', "application/json")
 
@@ -259,3 +265,29 @@ def test_http_raw_authenticated_flow_against_dvwa():
     # 证据留痕但凭据脱敏
     sent = dict(protected["request_headers"])
     assert "已脱敏" in sent["Cookie"] and "PHPSESSID" not in sent["Cookie"]
+
+def test_http_raw_grep_extracts_from_long_page(raw_server):
+    """长页面用 grep 在服务端提取——复刻真机踩坑：/ftp 列表在内联 CSS 之后。
+
+    2026-09-22 真机：Juice Shop 的 /ftp 页内联 CSS 很长，文件清单落在内核
+    回灌截断线（2500 字符）之后，模型连试 13 步不肯换招、白烧一轮预算。
+    修法是给出定向提取：grep 在服务端做，只把命中行回给模型。
+    """
+    import re as _re
+
+    small = http_raw(f"{raw_server}/listing", max_body=200)
+    assert small["truncated"] is True
+    assert "grep" in small.get("note", "")           # 截断必须给出下一步指引
+    assert "ftp/f0.md" not in small["body"]          # 目标内容确实在截断线之后
+
+    hit = http_raw(f"{raw_server}/listing", max_body=200,
+                   grep=r'href="ftp/[^"]+')
+    # 同一行里的多个链接要逐个给出（按行提取只会得到一条被截断的长行）
+    assert hit["grep"]["count"] == 5
+    assert any("ftp/f4.md" in m for m in hit["grep"]["matches"])
+    assert hit["grep"]["scanned_chars"] > 200        # 提取在完整页面上做，不是截断后
+
+
+def test_http_raw_grep_invalid_regex_is_reported(raw_server):
+    result = http_raw(f"{raw_server}/ok", grep="[unclosed")
+    assert "正则非法" in result["grep"]["error"]
