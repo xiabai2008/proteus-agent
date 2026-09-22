@@ -671,6 +671,38 @@ def test_lab_reachable_rejects_connect_without_http_response():
             conn.close()
 
 
+def test_dsh_records_for_lab_filters_by_preset():
+    """R-22：`session/event` 是全局事件，评分必须能按 preset 归属过滤。
+
+    不过滤的话，"这个靶拿了多少分"算的是**整个 DSH 进程**的动作合集——
+    别的会话碰过同一个靶就会给它加分。
+    """
+    from benchmark import dsh_records_for_lab
+
+    class _Rec:
+        def __init__(self, args, preset):
+            self.kind = "tool_call"
+            self.content = {"args": args, "preset": preset}
+
+    base = "http://127.0.0.1:3000"
+    records = [
+        _Rec({"url": base + "/"}, "proteus"),
+        _Rec({"url": base + "/ftp"}, "liangshen"),   # 别的 preset：不算
+        _Rec({"url": base + "/api"}, ""),            # 归属未知：保留（老链兼容）
+        _Rec({"url": "http://127.0.0.1:8080/"}, "proteus"),  # 别的靶：不算
+    ]
+
+    picked = dsh_records_for_lab(records, base, preset="proteus")
+    assert [r.content["args"]["url"] for r in picked] == [base + "/", base + "/api"]
+
+    # 空 preset = 不过滤（兼容 2026-09-22 之前没有归属字段的老链）
+    unfiltered = dsh_records_for_lab(records, base, preset="")
+    assert len(unfiltered) == 3
+
+    # 靶地址为空时一律不挑（避免把所有记录都算给一个空靶）
+    assert dsh_records_for_lab(records, "") == []
+
+
 def test_agent_lab_registered_and_excluded_from_all():
     """套件已注册；`--suite all` 不含它（真 LLM 有花费，需显式点名）。"""
     from benchmark import ALL_SUITES_EXCLUDE, SUITES

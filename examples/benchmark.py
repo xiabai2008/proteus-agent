@@ -546,8 +546,15 @@ def _dsh_paths() -> tuple[Path, Path, Path]:
             data_dir / "dsh-spool.state.json")
 
 
-def dsh_records_for_lab(records, base_url: str) -> list:
+def dsh_records_for_lab(records, base_url: str, preset: str = "") -> list:
     """挑出"打过某个靶"的证据记录：args 里出现该靶 base URL 的 tool_call。
+
+    `preset` 非空时按 preset 归属过滤（R-22）：`session/event` 是**全局**事件，
+    同一个 DSH 进程里所有会话的调用都会进 spool——不过滤的话"这个靶拿了多少分"
+    算的是整个进程的动作合集，不是这次 Proteus 任务的。
+
+    **归属未知（''）不过滤**：字段是 2026-09-22 才加的，老链上没有它；按未知
+    保留比按未知丢弃安全（丢数据是静默的，多留是可查的）。
 
     纯函数（不碰文件、不碰网络），判定口径要能被单测钉住。
     """
@@ -559,13 +566,17 @@ def dsh_records_for_lab(records, base_url: str) -> list:
         if getattr(rec, "kind", "") != "tool_call":
             continue
         content = getattr(rec, "content", None) or {}
+        owner = str(content.get("preset") or "")
+        if preset and owner and owner != preset:
+            continue
         blob = json.dumps(content.get("args", ""), ensure_ascii=False)
         if base in blob:
             picked.append(rec)
     return picked
 
 
-def run_dsh_session_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
+def run_dsh_session_suite(root: Path, driver: str = "scripted",
+                          preset: str = "proteus") -> list[CaseResult]:
     """DSH 宿主会话套件：读宿主桥证据链，按靶场清单判定（不需要 LLM、靶场可离线）。
 
     与 `agent-lab` 的分工：那个跑内核自己的 ReAct 循环；这个判定的是**宿主会话**
@@ -574,6 +585,9 @@ def run_dsh_session_suite(root: Path, driver: str = "scripted") -> list[CaseResu
     把 spool 落进独立链——"旁路也留痕、痕迹能评分"就落在这一步。
 
     链校验是硬门槛：链不过，命中一概不作数（与 agent-lab 同口径）。
+
+    `preset`：只算属于该 preset 的会话记录（缺省 `proteus`；传空串 = 不过滤，
+    兼容 2026-09-22 之前没有归属字段的老链）。
     """
     examples = str(ROOT / "examples")
     if examples not in sys.path:
@@ -614,7 +628,7 @@ def run_dsh_session_suite(root: Path, driver: str = "scripted") -> list[CaseResu
 
     for lab in LABS:
         base = DEFAULT_URLS.get(lab.id, "")
-        picked = dsh_records_for_lab(records, base)
+        picked = dsh_records_for_lab(records, base, preset=preset)
         if not picked:
             continue
         hits = score_from_evidence(lab.findings, picked)
@@ -628,7 +642,7 @@ def run_dsh_session_suite(root: Path, driver: str = "scripted") -> list[CaseResu
             steps=len(picked),
             expected=f"{total} 项预期发现（宿主会话内真实调用）",
             got=f"{matched}/{total} 命中 · 调用 {len(picked)} 次"
-                f"（链上该靶的全部会话累计）",
+                f"（{('preset=' + preset) if preset else '全部 preset'} 的会话累计）",
             detail="" if passed else
                    (f"未探到: {', '.join(missed)}" if missed
                     else "证据链校验未通过")))
@@ -661,7 +675,8 @@ def run(suites: list[str], driver: str = "scripted",
         agent_seed: bool = False,
         agent_reset: bool = False,
         agent_repeat: int = 1,
-        agent_raw_tag: str = "") -> Scorecard:
+        agent_raw_tag: str = "",
+        dsh_preset: str = "proteus") -> Scorecard:
     """跑指定套件，汇总为一张评分卡。
 
     渗透套件的靶地址可传（`--target` / `--port`），否则本机 8080 被别的服务
@@ -688,6 +703,9 @@ def run(suites: list[str], driver: str = "scripted",
                                        reset=agent_reset,
                                        repeat=agent_repeat,
                                        raw_tag=agent_raw_tag))
+        elif name == "dsh-session":
+            card.results.extend(runner(base / name, driver=driver,
+                                       preset=dsh_preset))
         else:
             card.results.extend(runner(base / name, driver=driver))
     return card
@@ -737,6 +755,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="agent-lab 跑前清空该靶的评测沙箱记忆"
                              "（只动 data/benchmark/agent-lab/<靶>/mem，"
                              "不碰生产记忆库）；测对照组时需要")
+    parser.add_argument("--preset", default="proteus",
+                        help="dsh-session 套件只算该 preset 的会话记录"
+                             "（默认 proteus；空串 = 不过滤，兼容老链）")
     parser.add_argument("--repeat", type=int, default=1,
                         help="agent-lab 每靶重复轮数（温度 0.3 下用来看稳定性；"
                              "每轮一条用例，case_id 带 #序号）")
@@ -753,7 +774,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                pentest_port=args.port, agent_max_steps=args.max_steps,
                agent_labs=labs, agent_seed=args.seed_skills,
                agent_reset=args.reset_memory, agent_repeat=args.repeat,
-               agent_raw_tag=Path(args.out).stem if args.out else "")
+               agent_raw_tag=Path(args.out).stem if args.out else "",
+               dsh_preset=args.preset)
     print(card.render())
 
     out = Path(args.out) if args.out else DEFAULT_OUT / "run.json"

@@ -43,3 +43,6 @@
         spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
         # 本行只做审计：裁决必须挂在 preset 作用域（见 docs/DSH插件化与内核旁路治理.md）
         role: audit
+        # 只记这些 preset 的会话（缺省空 = 全记但打标，由消费端按归属过滤；
+        # 归属未知的会话一律保留——静默丢审计比多留危险）。见接入指南第八节第 11 条。
+        # presets: ['proteus']

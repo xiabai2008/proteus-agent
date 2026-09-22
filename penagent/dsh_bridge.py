@@ -157,6 +157,9 @@ def import_spool(spool: str | Path = DEFAULT_SPOOL,
                 # 内核当时在不在：缺位时目标动作会被 fail-closed 拒绝，这条字段
                 # 让链上能区分"被闸门拦下"与"内核根本没起来"（2026-09-22）
                 "kernel": str(event.get("kernel") or ""),
+                # preset 归属（R-22）：session/event 是全局事件，同一进程里所有
+                # 会话的调用都会进 spool；空串 = 归属未知，消费端不得据此丢弃
+                "preset": str(event.get("preset") or ""),
                 "ts": event.get("ts"),
             })
             appended += 1
@@ -170,6 +173,9 @@ def import_spool(spool: str | Path = DEFAULT_SPOOL,
         call, matched_key = _pair_result(pending, event, call_id)
         chain.append("tool_call", {
             "tool": str((call or {}).get("tool") or event.get("tool") or ""),
+            # 归属取 call 侧（result 事件不带）；空串 = 未知
+            "preset": str((call or {}).get("preset")
+                          or event.get("preset") or ""),
             "args": _parse_args((call or {}).get("args")),
             "ok": None if event.get("isError") is None
                   else (not event.get("isError")),

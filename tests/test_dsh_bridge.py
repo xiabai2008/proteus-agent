@@ -409,6 +409,108 @@ console.log(JSON.stringify(seen));
         assert ("tools/pre-execute" in registered) is want_policy, role
 
 # ----------------------------------------------------------------------
+# preset 归属（R-22）：session/event 是全局事件，必须能分辨"这条链是谁的"
+# ----------------------------------------------------------------------
+def _audit_call(tmp_path, session, event, **cfg):
+    """用桩 ctx 跑一次 session/event，返回 spool 记录列表。"""
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("本机无 node，跳过宿主插件审计测试")
+    import uuid
+
+    spool = tmp_path / f"audit-{uuid.uuid4().hex[:8]}.jsonl"
+    config = {"spoolPath": str(spool), "role": "audit", **cfg}
+    script = f"""
+import {{ apply }} from {json.dumps(PLUGIN.as_uri())};
+const listeners = {{}};
+const ctx = {{ on: (e, f) => {{ (listeners[e] ||= []).push(f); }} }};
+apply(ctx, {json.dumps(config, ensure_ascii=False)});
+for (const fn of (listeners['session/event'] || [])) {{
+  fn({json.dumps(session, ensure_ascii=False)}, {json.dumps(event, ensure_ascii=False)});
+}}
+console.log('ok');
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:400]
+    if not spool.exists():
+        return []
+    return [json.loads(ln)
+            for ln in spool.read_text(encoding="utf-8").splitlines()
+            if ln.strip()]
+
+
+def _call_event(call_id="c1", tool="http_raw", url="http://127.0.0.1:3000/"):
+    return {"type": "tool/call", "time": 1,
+            "data": {"turn": 1, "step": 1, "callId": call_id, "name": tool,
+                     "arguments": json.dumps({"url": url})}}
+
+
+def test_audit_records_carry_preset_ownership(tmp_path):
+    """每条审计记录都带 preset 归属（取 SessionHeader.agentPreset）。"""
+    records = _audit_call(
+        tmp_path, {"header": {"id": "s1", "agentPreset": "proteus"}},
+        _call_event())
+    assert len(records) == 1
+    assert records[0]["preset"] == "proteus"
+    assert records[0]["session"] == "s1" and records[0]["kind"] == "call"
+
+
+def test_audit_preset_filter_skips_other_presets(tmp_path):
+    """`presets: ['proteus']`：别的 preset 的会话不进 spool。"""
+    skipped = _audit_call(
+        tmp_path, {"header": {"id": "s2", "agentPreset": "liangshen"}},
+        _call_event(), presets=["proteus"])
+    assert skipped == []
+
+    kept = _audit_call(
+        tmp_path, {"header": {"id": "s1", "agentPreset": "proteus"}},
+        _call_event(), presets=["proteus"])
+    assert len(kept) == 1 and kept[0]["preset"] == "proteus"
+
+
+def test_audit_preset_filter_keeps_unknown_ownership(tmp_path):
+    """归属未知（会话头没这个字段）**必须保留**——静默丢审计比多留危险得多。"""
+    records = _audit_call(
+        tmp_path, {"header": {"id": "s3"}}, _call_event(), presets=["proteus"])
+    assert len(records) == 1
+    assert records[0]["preset"] == ""
+
+
+def test_policy_record_includes_preset_field(tmp_path):
+    """裁决记录也带 preset 字段（pre-execute 载荷里没有 session，取不到就是 ''）。"""
+    _, records = _policy_call(tmp_path, "pwsh", "curl http://127.0.0.1:3000/")
+    assert "preset" in records[-1]
+
+
+def test_importer_carries_preset_into_chain(tmp_path):
+    """归属要进证据链，否则消费端没法按 preset 过滤。"""
+    chain = EvidenceChain(tmp_path / "chain.jsonl")
+    spool = _spool(tmp_path, [
+        _call(call_id="p1", tool="http_raw", preset="proteus"),
+        _result(call_id="p1", output="200"),
+    ])
+    import_spool(spool, chain=chain, state_path=None)
+    assert chain.load()[0].content["preset"] == "proteus"
+
+
+def test_importer_policy_preset_reaches_the_chain(tmp_path):
+    chain = EvidenceChain(tmp_path / "chain.jsonl")
+    spool = tmp_path / "dsh-events.jsonl"
+    spool.write_text(json.dumps({
+        "ts": 1, "kind": "policy", "tool": "pwsh", "decision": "ask",
+        "hosts": ["127.0.0.1"], "outside": [], "kernel": "yes",
+        "preset": "proteus", "reason": "目标动作建议走内核工具",
+        "command": "curl http://127.0.0.1:3000/",
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    import_spool(spool, chain=chain, state_path=None)
+    assert chain.load()[0].content["preset"] == "proteus"
+
+
+# ----------------------------------------------------------------------
 # 内核缺位守卫：MCP 行没起来时，目标动作收紧（fail-closed）
 #
 # 为什么必须有：MCP 行配的是 failOnStartupError: false —— 内核起不来时 preset

@@ -13,6 +13,11 @@
  *    审计通道坏掉不该让任务失败；缺的痕迹在 `dsh-sync` 的统计里能看到。
  * 4. 载荷裁剪：args / output 各截断到 MAX_TEXT 字符——审计要的是"发生过什么"，
  *    不是把大正文灌进日志。
+ * 6. **preset 归属**（2026-09-22 加，对应待办 R-22）：`session/event` 是**全局**
+ *    事件——同一进程里所有会话的调用都会进 spool。每条记录因此带上
+ *    `preset`（取 `SessionHeader.agentPreset`），消费端（评分卡）按归属过滤；
+ *    归属未知（''）**不丢记录**，只是标成未知——审计宁可多留。
+ *    `presets: ['proteus']` 可让插件侧直接只记指定 preset。
  * 5. **内核缺位守卫**（2026-09-22 加）：MCP 行配的是 `failOnStartupError: false`，
  *    内核起不来时 preset 照常挂载、只是**没有那组工具**。那种会话里"对目标发请求"
  *    既没有模式闸门也没有证据链，放行就是"为能用而放弃保护"——所以内核缺位时
@@ -167,6 +172,34 @@ function readStringArray(value, fallback) {
 }
 
 /**
+ * 会话属于哪个 preset（`SessionHeader.agentPreset`，类型见 dsh-session）。
+ *
+ * 拿不到就返回 ''（= 归属未知）。**未知不等于"不是我们的"**：调用方必须把
+ * 未知当作"保留"，否则一次形状变化就会让审计静默丢数据。
+ *
+ * @param {object} session - `session/event` 的第一个参数。
+ * @returns {string} preset id，未知时为空串。
+ */
+function presetOf(session) {
+  const value = session?.header?.agentPreset
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * 从 `tools/pre-execute` 的调用方 agent 推 preset 归属。
+ *
+ * 该事件载荷里没有 session，只能顺着 agent 摸；摸不到就是 ''。审计记录由
+ * `session/event` 那条路给出权威归属，这里只是尽力而为。
+ *
+ * @param {object} agent - `exec.agent`。
+ * @returns {string} preset id，未知时为空串。
+ */
+function presetOfAgent(agent) {
+  const value = agent?.session?.header?.agentPreset
+  return typeof value === 'string' ? value : ''
+}
+
+/**
  * 内核工具是否已挂载——在**调用方 agent 的作用域**里看。
  *
  * 返回 `'yes'` / `'no'` / `'unknown'`。`unknown` 刻意不参与裁决：DSH 是
@@ -234,6 +267,8 @@ export function apply(ctx, config = {}) {
   const role = typeof config.role === 'string' ? config.role : 'both'
   const targets = readStringArray(config.targets, ['127.0.0.1', 'localhost'])
   const shellTools = readStringArray(config.shellTools, ['pwsh', 'bash'])
+  // 只记这些 preset 的会话（空 = 全记但打标）；归属未知的会话一律保留
+  const presets = readStringArray(config.presets, [])
   // 内核缺位时的档位：deny（缺省，fail-closed）/ warn（只提示）/ off
   const kernelGuard = typeof config.kernelGuard === 'string'
       && config.kernelGuard !== ''
@@ -273,10 +308,14 @@ export function apply(ctx, config = {}) {
     ctx.on('session/event', (session, event) => {
       const type = event?.type
       if (type !== 'tool/call' && type !== 'tool/result') return
+      const preset = presetOf(session)
+      // 归属未知（''）不参与过滤：宁可多留，也不要在形状变化时静默丢审计
+      if (presets.length > 0 && preset !== '' && !presets.includes(preset)) return
       const data = event?.data ?? {}
       const base = {
         ts: typeof event?.time === 'number' ? event.time : Date.now(),
         session: session?.header?.id ?? '',
+        preset,
         kind: type === 'tool/call' ? 'call' : 'result',
         turn: data.turn,
         step: data.step,
@@ -325,6 +364,7 @@ export function apply(ctx, config = {}) {
       reason: clip(reason, 500),
       command: clip(command, 300),
       kernel,
+      preset: presetOfAgent(exec?.agent),
       ...extra,
     })
 

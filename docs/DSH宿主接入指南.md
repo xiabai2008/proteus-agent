@@ -404,6 +404,21 @@ node verify-proteus.mjs && rm verify-proteus.mjs
    > 挂在 host 平面的裁决行在 web 会话里**完全收不到**工具调用，而同一份代码挂在
    > 无 preset 的 headless profile 里能拦住。
 
+11. **审计链的 preset 归属**（2026-09-22 加，对应待办 R-22）：`session/event` 是
+    **全局**事件，同一个 DSH 进程里**所有会话**的调用都会进 spool。所以每条审计
+    记录都带 `preset`（取 `SessionHeader.agentPreset`），`--suite dsh-session`
+    默认只算 `preset=proteus` 的记录（`--preset ''` 关掉过滤）。
+
+    | 情形 | 行为 |
+    |---|---|
+    | 有归属且等于目标 preset | 计入 |
+    | 有归属但不是目标 preset | **不计入**（别的会话碰过同一个靶，不再给它加分） |
+    | **归属未知**（`''`，老链或形状变化） | **计入**——静默丢审计比多留危险得多 |
+
+    插件侧也可直接过滤：`presets: ['proteus']`（缺省空 = 全记但打标；归属未知的
+    会话仍会记录）。`tools/pre-execute` 载荷里没有 session，所以**裁决记录**的
+    `preset` 是尽力而为（取不到就是 `''`）；权威归属来自 `session/event` 那条路。
+
 10. **preset 目录不能用链接**（2026-09-22 实测）：发现机制**不跟随 reparse point**，
     把 preset 目录建成 junction 后它就从选择器里静默消失了（`discoverPresets`
     返回数 2 → 1）。所以 preset 是"真实目录 + 启动前同步 + 漂移校验"，备份也要放在
