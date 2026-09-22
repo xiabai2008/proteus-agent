@@ -27,6 +27,11 @@ LEVELS = ("none", "local", "docker")
 DEFAULT_IMAGE = "python:3.12-slim"
 # 容器内的工作目录（固定 Linux 路径）：宿主路径不能直接作 -w，见 DockerRunner.wrap
 CONTAINER_WORKDIR = "/work"
+# 宿主数据目录在容器内的只读挂载点（R-15 剩余覆盖）：
+#   $PENTEST_TOOLS                → /opt/host-tools        （字典 / PoC / 工具目录）
+#   <用户主目录>/nuclei-templates → /root/nuclei-templates （nuclei 的默认模板目录）
+CONTAINER_TOOLS_DIR = "/opt/host-tools"
+CONTAINER_TEMPLATES_DIR = "/root/nuclei-templates"
 
 
 def tool_needs_isolation(spec) -> bool:
@@ -59,7 +64,31 @@ def _basename_no_exe(text: str) -> str:
     return base[:-4]
 
 
-def containerize_command(command: list[str]) -> list[str]:
+def host_data_mounts() -> list[tuple[str, str]]:
+    """需要只读挂进容器的宿主数据目录：`[(宿主路径, 容器路径)]`。
+
+    为什么是挂载而不是打进镜像：nuclei 要模板、ffuf / gobuster 要字典、
+    pocsuite 要 PoC——这些数据体积大、更新频繁、且每台机器不一样，而工具 spec
+    里写的本来就是宿主路径（`${PENTEST_TOOLS}/config/dictionaries/...`）。
+    只读挂载 + 在容器化时**按根重写**（见 `containerize_command`），spec 因此
+    仍然只有一份，宿主与容器共用。
+
+    nuclei 那条特意挂到它的**默认**模板目录：这样不必给 spec 加 `-t`，宿主侧
+    行为完全不变。
+    """
+    from pathlib import Path
+
+    mounts: list[tuple[str, str]] = []
+    tools = os.environ.get("PENTEST_TOOLS", "").strip()
+    if tools and Path(tools).is_dir():
+        mounts.append((tools, CONTAINER_TOOLS_DIR))
+    templates = Path.home() / "nuclei-templates"
+    if templates.is_dir():
+        mounts.append((str(templates), CONTAINER_TEMPLATES_DIR))
+    return mounts
+
+
+def containerize_command(command: list[str], data_root: str = "") -> list[str]:
     """把命令里的**宿主路径**重写为容器内可解析的形式（R-15）。
 
     两类需要重写：
@@ -71,18 +100,44 @@ def containerize_command(command: list[str]) -> list[str]:
        `${PENTEST_TOOLS}/tools/nuclei.exe` 之类。镜像把这些工具的 Linux 版装到
        `/usr/local/bin`，容器内直接用**工具名**（靠 PATH 解析）。
 
-    其它参数（目标、选项）原样保留——不做通用路径替换，那会把"镜像里没装
-    这个工具"的错误藏起来，而它本该以 `command not found` 的形式暴露。
+    3. **宿主数据路径**（R-15 剩余覆盖）——spec 里的
+       `${PENTEST_TOOLS}/config/dictionaries/10k-most-common.txt` 这类参数。
+       数据目录已由 `host_data_mounts()` 只读挂到 `CONTAINER_TOOLS_DIR`，
+       所以这里只需把 `data_root` 前缀换成那个挂载点。
+
+    **只重写"声明的数据根之下的路径"**：其它参数（目标、选项、任意其它路径）
+    原样保留——做通用路径替换会把"镜像里没装这个工具"或"数据文件真缺"这类
+    错误藏起来，而它们本该以工具自己的报错暴露出来。
     """
+    from pathlib import Path
+
     host_python = os.path.normcase(os.path.normpath(sys.executable))
+    root = os.path.normpath(data_root) if data_root else ""
+    root_key = os.path.normcase(root) if root else ""
     out = []
     for part in command:
         text = str(part)
         if os.path.normcase(os.path.normpath(text)) == host_python:
             out.append("python")
             continue
+        # **工具二进制先判**：`${PENTEST_TOOLS}/tools/nuclei.exe` 也在数据根之下，
+        # 若先按数据根重写会得到 `/opt/host-tools/tools/nuclei.exe`——那是 Windows
+        # 二进制，在 Linux 容器里跑不起来（而且错误信息会很费解）。
         tool = _basename_no_exe(text)
-        out.append(tool or text)
+        if tool:
+            out.append(tool)
+            continue
+        if root_key:
+            norm = os.path.normpath(text)
+            key = os.path.normcase(norm)
+            if key == root_key:
+                out.append(CONTAINER_TOOLS_DIR)
+                continue
+            if key.startswith(root_key + os.sep):
+                rel = Path(norm[len(root) + 1:]).as_posix()
+                out.append(f"{CONTAINER_TOOLS_DIR}/{rel}")
+                continue
+        out.append(text)
     return out
 
 
@@ -132,11 +187,18 @@ class DockerRunner:
         这里；Docker 恢复后才暴露（见 docs/修复待办清单.md R-11 复核）。
         """
         host_dir = str(getattr(spec, "workdir", "") or "") or os.getcwd()
+        # 宿主数据目录只读挂进来（字典 / PoC / nuclei 模板）：nuclei 要模板、
+        # ffuf/gobuster 要字典，而这些数据不打进镜像（体积大、更新频繁、逐机不同）。
+        mounts: list[str] = ["-v", f"{host_dir}:{CONTAINER_WORKDIR}"]
+        for host_path, container_path in host_data_mounts():
+            mounts += ["-v", f"{host_path}:{container_path}:ro"]
         return [shutil.which("docker") or "docker", "run", "--rm", "-i",
                 "--network", self.network_mode(spec),
-                "-v", f"{host_dir}:{CONTAINER_WORKDIR}",
+                *mounts,
                 "-w", CONTAINER_WORKDIR,
-                self.image, *containerize_command(command)]
+                self.image,
+                *containerize_command(
+                    command, data_root=os.environ.get("PENTEST_TOOLS", ""))]
 
     def network_mode(self, spec) -> str:
         """默认断网；工具显式声明需要出网时才给 bridge。"""

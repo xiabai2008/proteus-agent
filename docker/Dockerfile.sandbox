@@ -142,3 +142,89 @@ RUN naabu -version 2>&1 | grep -q "Current Version" \
  && dalfox version 2>&1 | grep -qi "Dalfox" \
  && fscan 2>&1 | grep -q "Fscan ${FSCAN_VERSION}"
 
+# ----------------------------------------------------------------------
+# 渗透工具 · 需要模板/字典的那些（R-15 第四轮）
+#
+# 前三轮只纳入"零配置依赖"的工具；nuclei / ffuf / gobuster 一直被排除，理由是
+# 它们要模板或字典文件，容器里没有（装了也跑不起来）。本轮的解法**不是把数据
+# 打进镜像**（体积大、更新频繁、逐机不同），而是**只读挂载宿主的数据目录**
+# （见 penagent/sandbox.py 的 host_data_mounts / containerize_command）：
+#
+#   ${PENTEST_TOOLS}              → /opt/host-tools
+#       spec 里的 `${PENTEST_TOOLS}/config/dictionaries/10k-most-common.txt`
+#       在容器化时按根重写为 `/opt/host-tools/config/dictionaries/...`
+#   <用户主目录>/nuclei-templates → /root/nuclei-templates
+#       nuclei 的**默认**模板目录，故 spec 不必加 `-t`
+#
+# 两处挂载都不存在时容器照样起得来，只是对应工具会以**自己的报错**暴露缺数据
+# （不静默降级）。PoC 同理：pocsuite 不带 -r 时用自带的 poc 目录，零数据即可跑。
+#
+# 版本 + 官方 sha256 双钉（取自各 release 的 checksums.txt）；不匹配即构建失败。
+ARG TOOLS_BASE=https://gh-proxy.com/https://github.com
+ARG NUCLEI_VERSION=3.11.1
+ARG NUCLEI_SHA256_AMD64=ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6
+ARG NUCLEI_SHA256_ARM64=8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07
+ARG FFUF_VERSION=2.3.0
+ARG FFUF_SHA256_AMD64=b2a3c725fcb9da175159682f54d6e9149f2905b00d84d155e7efc5d599975ceb
+ARG FFUF_SHA256_ARM64=e2d712615d53da797ee929006e41f2df5a7960a5353133db9c150ddaa22ae4e8
+ARG GOBUSTER_VERSION=3.8.2
+ARG GOBUSTER_SHA256_AMD64=c8a8c6a966eeb011d682a0ef2305a3e3a86b8b3fabe744350c00a766cc0f8021
+ARG GOBUSTER_SHA256_ARM64=84b175ae5ae770efddb3e675b0e24e56ef0f484a0d751beff0b0629e52c7f4da
+
+RUN python - <<'PY'
+import hashlib, os, tarfile, urllib.request, zipfile
+from io import BytesIO
+
+base = os.environ["TOOLS_BASE"]
+arch = os.environ.get("TARGETARCH", "amd64")
+if arch not in ("amd64", "arm64"):
+    raise SystemExit(f"未映射的架构: {arch}")
+up = arch.upper()
+nv = os.environ["NUCLEI_VERSION"]
+fv = os.environ["FFUF_VERSION"]
+gv = os.environ["GOBUSTER_VERSION"]
+g_arch = "x86_64" if arch == "amd64" else "arm64"
+assets = {
+    "nuclei": (f"projectdiscovery/nuclei/releases/download/v{nv}/"
+               f"nuclei_{nv}_linux_{arch}.zip",
+               os.environ[f"NUCLEI_SHA256_{up}"], "nuclei"),
+    "ffuf": (f"ffuf/ffuf/releases/download/v{fv}/"
+             f"ffuf_{fv}_linux_{arch}.tar.gz",
+             os.environ[f"FFUF_SHA256_{up}"], "ffuf"),
+    "gobuster": (f"OJ/gobuster/releases/download/v{gv}/"
+                 f"gobuster_Linux_{g_arch}.tar.gz",
+                 os.environ[f"GOBUSTER_SHA256_{up}"], "gobuster"),
+}
+
+for name, (path, want, member) in assets.items():
+    blob = urllib.request.urlopen(f"{base}/{path}", timeout=300).read()
+    got = hashlib.sha256(blob).hexdigest()
+    if got != want:
+        raise SystemExit(f"{name}: sha256 不匹配\n  期望 {want}\n"
+                         f"  实得 {got}\n  来源 {path}")
+    if path.endswith(".zip"):
+        with zipfile.ZipFile(BytesIO(blob)) as z:
+            data = next(z.read(n) for n in z.namelist()
+                        if os.path.basename(n) == member)
+    else:
+        with tarfile.open(fileobj=BytesIO(blob), mode="r:gz") as t:
+            # gobuster 的 tarball 是**裸文件**（无目录前缀），故按 basename 找成员
+            data = next(t.extractfile(m).read() for m in t.getmembers()
+                        if os.path.basename(m.name) == member)
+    dest = os.path.join("/usr/local/bin", name)
+    with open(dest, "wb") as fh:
+        fh.write(data)
+    os.chmod(dest, 0o755)
+    print(f"{name} ready ({len(data)} bytes, sha256 {got[:12]}...)")
+PY
+
+# pocsuite3：PoC 验证框架（零数据依赖即可跑自带 PoC）。
+RUN pip install --no-cache-dir pocsuite3
+
+# 构建期自检：装上了、能报版本（"真的能扫"的证据在 tests/test_sandbox.py）。
+# gobuster 的 version 子命令只打印版本号本身，故按版本串判定。
+RUN nuclei -version 2>&1 | grep -qi nuclei \
+ && ffuf -V 2>&1 | grep -qi ffuf \
+ && gobuster version 2>&1 | grep -q "${GOBUSTER_VERSION}" \
+ && python -c "import pocsuite3; print('pocsuite3', pocsuite3.__version__)"
+

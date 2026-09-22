@@ -691,3 +691,231 @@ def test_egress_off_blocks_networked_tool_before_container():
     result = registry.execute("net_tool", {})
     assert not result.ok
     assert "网络出口" in result.error
+
+# ----------------------------------------------------------------------
+# R-15 第四轮：宿主数据目录只读挂载 + 容器化时按根重写
+#
+# 背景：nuclei 要模板、ffuf / gobuster 要字典、pocsuite 要 PoC。这些数据**不打进
+# 镜像**（体积大、更新频繁、逐机不同），而是把宿主目录只读挂进来，并把 spec 里的
+# 宿主路径重写成挂载点。下面先钉住重写规则（纯函数，不需要 Docker），再用真容器
+# 验证"挂载 + 重写 + 二进制"三者一起能跑。
+# ----------------------------------------------------------------------
+def test_containerize_rewrites_tool_binary_before_data_path():
+    """工具二进制先按"取工具名"重写，再轮到数据路径。
+
+    顺序反了的后果很具体：`${PENTEST_TOOLS}/tools/nuclei.exe` 会被当成数据文件
+    重写成 `/opt/host-tools/tools/nuclei.exe`——那是 Windows 二进制，在 Linux
+    容器里跑不起来，而且报错会非常费解。
+    """
+    from penagent.sandbox import CONTAINER_TOOLS_DIR, containerize_command
+
+    root = r"C:\Tools\dt"
+    cmd = containerize_command([rf"{root}\tools\nuclei.exe", "-u", "http://x",
+                                "-silent"], data_root=root)
+    assert cmd == ["nuclei", "-u", "http://x", "-silent"]
+
+    data = containerize_command(
+        [rf"{root}\config\dictionaries\10k-most-common.txt"], data_root=root)
+    assert data == [f"{CONTAINER_TOOLS_DIR}/config/dictionaries/10k-most-common.txt"]
+
+
+def test_containerize_leaves_paths_outside_root_alone():
+    """根之外的路径一律不动——通用替换会把"数据真缺"这类错误藏起来。"""
+    from penagent.sandbox import containerize_command
+
+    root = r"C:\Tools\dt"
+    cmd = containerize_command(["ffuf", "-u", "http://x/FUZZ", "-w",
+                                r"C:\dicts\10k.txt"], data_root=root)
+    assert cmd == ["ffuf", "-u", "http://x/FUZZ", "-w", r"C:\dicts\10k.txt"]
+    # 不传根时连根之下的路径也不动（旧调用方只有一个参数，行为必须不变）
+    assert containerize_command([rf"{root}\config\10k.txt"]) == \
+        [rf"{root}\config\10k.txt"]
+
+
+def test_wrap_mounts_host_data_readonly(monkeypatch, tmp_path):
+    """数据目录以 **ro** 挂进来；工作目录那条仍是第一个 `-v`（既有约定）。"""
+    from penagent.sandbox import (CONTAINER_TOOLS_DIR, CONTAINER_WORKDIR,
+                                  DockerRunner)
+
+    root = tmp_path / "tools"
+    root.mkdir()
+    monkeypatch.setattr("penagent.sandbox.host_data_mounts",
+                        lambda: [(str(root), CONTAINER_TOOLS_DIR)])
+    spec = ToolSpec(name="t", kind="cli", workdir=str(tmp_path))
+    cmd = DockerRunner().wrap(["echo", "x"], spec)
+
+    assert f"{root}:{CONTAINER_TOOLS_DIR}:ro" in cmd
+    assert cmd[cmd.index("-v") + 1] == f"{tmp_path}:{CONTAINER_WORKDIR}"
+
+
+def test_host_data_mounts_skips_missing_dirs(monkeypatch, tmp_path):
+    """目录不存在就不挂——挂一个不存在的宿主路径会让 docker 直接起不来。"""
+    import pathlib
+
+    from penagent.sandbox import CONTAINER_TOOLS_DIR, host_data_mounts
+
+    monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)   # 无 nuclei-templates
+    monkeypatch.setenv("PENTEST_TOOLS", str(tmp_path / "nope"))
+    assert host_data_mounts() == []
+
+    real = tmp_path / "tools"
+    real.mkdir()
+    monkeypatch.setenv("PENTEST_TOOLS", str(real))
+    assert host_data_mounts() == [(str(real), CONTAINER_TOOLS_DIR)]
+
+
+@pytest.fixture
+def hidden_path_target():
+    """只对 `/admin` / `/secret` 返 200、其余 404 的宿主靶页。
+
+    不用 `reflector_target`：那个对**任意**路径都返 200，fuzz 工具找不到差异，
+    "发现了隐藏路径"就无从判定。返回容器可达的 IP 与端口。
+    """
+    import http.server
+    import subprocess
+    import threading
+
+    runner = _sandbox_image_or_skip()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hit = self.path.split("?")[0].rstrip("/") in ("/admin", "/secret")
+            body = (f"<html><body>found {self.path}</body></html>" if hit
+                    else "<html><body>nope</body></html>").encode()
+            self.send_response(200 if hit else 404)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        probe = subprocess.run(
+            ["docker", "run", "--rm", "--network", "bridge", runner.image,
+             "python", "-c",
+             "import socket,sys;"
+             "ip = socket.gethostbyname('host.docker.internal');"
+             "socket.create_connection((ip, int(sys.argv[1])), 5);"
+             "print('reachable', ip)", str(port)],
+            capture_output=True, text=True, timeout=60)
+        if "reachable" not in probe.stdout:
+            pytest.skip(f"容器访问不到宿主靶页（{probe.stdout.strip()[:80]}）")
+        yield probe.stdout.split()[-1], port
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _words(tmp_path) -> None:
+    (tmp_path / "words.txt").write_text("index\nadmin\nrobots\n", encoding="utf-8")
+
+
+def test_sandbox_ffuf_real_fuzz_finds_hidden_path(tmp_path, hidden_path_target):
+    """ffuf 在容器内真 fuzz：字典放工作目录（不依赖宿主字典目录也能验证二进制）。"""
+    ip, port = hidden_path_target
+    runner = _sandbox_image_or_skip()
+    _words(tmp_path)
+    spec = ToolSpec(name="ffuf_probe", kind="cli", dangerous=True, network=True,
+                    timeout=180, workdir=str(tmp_path),
+                    command=["ffuf", "-u", f"http://{ip}:{port}/FUZZ",
+                             "-w", "/work/words.txt", "-t", "5", "-s"])
+    registry = ToolRegistry(
+        sandbox=build_sandbox("docker", runner=runner, egress=True))
+    registry.register(spec)
+
+    result = registry.execute("ffuf_probe", {})
+    out = str(result.output)
+    assert "admin" in out, f"ffuf 未发现隐藏路径: {out[:200]}"
+
+
+def test_sandbox_gobuster_real_scan_finds_hidden_path(tmp_path, hidden_path_target):
+    """gobuster 在容器内真扫目录：同上，字典走工作目录。"""
+    ip, port = hidden_path_target
+    runner = _sandbox_image_or_skip()
+    _words(tmp_path)
+    spec = ToolSpec(name="gobuster_probe", kind="cli", dangerous=True,
+                    network=True, timeout=180, workdir=str(tmp_path),
+                    command=["gobuster", "dir", "-u", f"http://{ip}:{port}",
+                             "-w", "/work/words.txt", "-t", "5", "-q"])
+    registry = ToolRegistry(
+        sandbox=build_sandbox("docker", runner=runner, egress=True))
+    registry.register(spec)
+
+    result = registry.execute("gobuster_probe", {})
+    out = str(result.output)
+    assert "admin" in out, f"gobuster 未发现隐藏路径: {out[:200]}"
+
+
+def test_sandbox_nuclei_real_scan_with_workdir_template(tmp_path, hidden_path_target):
+    """nuclei 在容器内真扫：模板写在**工作目录**（不依赖模板仓库即可验证）。"""
+    ip, port = hidden_path_target
+    runner = _sandbox_image_or_skip()
+    (tmp_path / "t.yaml").write_text(
+        "id: proteus-fixture\n"
+        "info:\n  name: fixture\n  author: proteus\n  severity: info\n"
+        "http:\n"
+        "  - method: GET\n"
+        "    path:\n      - \"{{BaseURL}}/admin\"\n"
+        "    matchers:\n      - type: status\n        status:\n          - 200\n",
+        encoding="utf-8")
+    spec = ToolSpec(name="nuclei_probe", kind="cli", dangerous=True, network=True,
+                    timeout=300, workdir=str(tmp_path),
+                    command=["nuclei", "-u", f"http://{ip}:{port}",
+                             "-t", "/work/t.yaml", "-silent", "-no-color"])
+    registry = ToolRegistry(
+        sandbox=build_sandbox("docker", runner=runner, egress=True))
+    registry.register(spec)
+
+    result = registry.execute("nuclei_probe", {})
+    out = str(result.output)
+    assert "proteus-fixture" in out, \
+        f"nuclei 未命中工作目录模板: {out[:300]}{str(result.error)[:200]}"
+
+
+def test_sandbox_nuclei_template_dir_mounted():
+    """nuclei 的**默认**模板目录在容器内可见（宿主有才跑，没有则跳过）。
+
+    这条覆盖"挂载点选在默认目录"这个设计：spec 不必加 `-t`，宿主侧行为不变。
+    """
+    runner = _sandbox_image_or_skip()
+    templates = Path.home() / "nuclei-templates"
+    if not templates.is_dir() or not any(templates.iterdir()):
+        pytest.skip("宿主没有 ~/nuclei-templates（先在有网的机器上更新一次模板）")
+
+    spec = ToolSpec(name="tpl_probe", kind="cli", dangerous=True, timeout=120,
+                    workdir=".",
+                    command=["sh", "-c", "ls /root/nuclei-templates | head -3"])
+    registry = ToolRegistry(sandbox=build_sandbox("docker", runner=runner))
+    registry.register(spec)
+
+    result = registry.execute("tpl_probe", {})
+    assert result.ok, f"容器内看不到模板目录: {str(result.error)[:200]}"
+    assert str(result.output).strip(), "模板目录是空的"
+
+
+def test_sandbox_host_dictionary_visible_at_mount_point():
+    """宿主字典经只读挂载 + 路径重写后，在容器内**按重写后的路径可读**。
+
+    一条用例同时验证三件事：`host_data_mounts` 真的加了挂载、
+    `containerize_command` 真的重写了参数、容器内那个路径真的有文件。
+    """
+    root = os.environ.get("PENTEST_TOOLS", "").strip()
+    dict_path = Path(root) / "config" / "dictionaries" / "10k-most-common.txt"
+    if not root or not dict_path.is_file():
+        pytest.skip("宿主没有 PENTEST_TOOLS/config/dictionaries/10k-most-common.txt")
+
+    runner = _sandbox_image_or_skip()
+    spec = ToolSpec(name="dict_probe", kind="cli", dangerous=True, timeout=120,
+                    workdir=".", command=["head", "-n", "1", str(dict_path)])
+    registry = ToolRegistry(sandbox=build_sandbox("docker", runner=runner))
+    registry.register(spec)
+
+    result = registry.execute("dict_probe", {})
+    assert result.ok, f"容器内读宿主字典失败: {str(result.error)[:200]}"
+    assert str(result.output).strip(), "字典内容是空的"
+
