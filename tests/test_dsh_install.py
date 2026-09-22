@@ -471,6 +471,52 @@ def test_restart_stops_if_process_survives(tmp_path, monkeypatch, capsys):
 # ----------------------------------------------------------------------
 # 审计桥接线
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# R-13：内层 ask 档被抬起时，外层必须还有"会问人"的档位
+# ----------------------------------------------------------------------
+def _preset_with_args(tmp_path, args: list[str]) -> Path:
+    p = tmp_path / "agent.cordis.yml"
+    p.write_text("- id: mcp-proteus\n  name: '@deepseek-ai/dsh-mcp-client'\n"
+                 f"  config:\n    args: {args}\n".replace("'", "'"),
+                 encoding="utf-8")
+    return p
+
+
+def test_gate_consistency_flags_lifted_ask_without_human_gate(tmp_path):
+    """`--authorize` + 三档全 never = DSH 会话没有任何人工确认环节。"""
+    preset = _preset_with_args(
+        tmp_path, ["-m", "penagent", "mcp", "--authorize", "--default-mode",
+                   "pentest-standard"])
+    patch = tmp_path / "patch.yml"
+    patch.write_text("proteus-safe:\n  sandbox: read-only\n  approval: never\n"
+                     "proteus-standard:\n  approval: never\n",
+                     encoding="utf-8")
+
+    problems = dsh_install.verify_gate_consistency(preset, patch)
+    assert len(problems) == 1 and "approval: ask" in problems[0]
+
+
+def test_gate_consistency_ok_when_one_tier_asks(tmp_path):
+    preset = _preset_with_args(tmp_path, ["--authorize"])
+    patch = tmp_path / "patch.yml"
+    patch.write_text("proteus-safe:\n  approval: ask\n"
+                     "proteus-ctf:\n  approval: never\n", encoding="utf-8")
+    assert dsh_install.verify_gate_consistency(preset, patch) == []
+
+
+def test_gate_consistency_ignores_preset_without_authorize(tmp_path):
+    """没抬起内层 ask 档时，外层怎么配都不归这条管。"""
+    preset = _preset_with_args(tmp_path, ["-m", "penagent", "mcp"])
+    patch = tmp_path / "patch.yml"
+    patch.write_text("approval: never\n", encoding="utf-8")
+    assert dsh_install.verify_gate_consistency(preset, patch) == []
+
+
+def test_repo_gate_consistency_holds():
+    """仓库当前状态必须过检（回归锁）：preset 带 --authorize，补丁里三档含 ask。"""
+    assert dsh_install.verify_gate_consistency() == []
+
+
 def test_check_bundle_reports_missing_wiring(tmp_path):
     home = tmp_path / "dsh"
     web = home / "profiles" / "web"

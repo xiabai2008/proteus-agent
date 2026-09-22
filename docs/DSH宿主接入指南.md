@@ -310,7 +310,6 @@ node verify-proteus.mjs && rm verify-proteus.mjs
 | preset 在选择器里消失 | 整份 composition broken（某行解析不到），**或目录是链接**（发现机制不跟随 reparse point）。`python tools/dsh_install.py --check` 会指出原因 |
 | 双击启动器后"好像没重启" | 旧实例还占着 4080，新实例以 `EADDRINUSE: address already in use 127.0.0.1:4080` **启动失败并退出**（窗口一闪，看不到报错）。启动器现在**默认直接关掉旧实例再启动**；若它仍失败，手动兜底：任务管理器结束 `node.exe`（命令行含 `--profile web`）后双击启动器 |
 | 改了仓库，会话行为没变 | 两种原因，`--check` 分别报得出来：① 安装副本过期 →"与仓库不同步"，跑不带 `--check` 即同步（启动器每次启动前也会同步）；② **副本是新的、但进程还在跑旧模块**（Node 的 ESM 缓存不重启不更新，见 5.1）→ 两条判据：进程那条报"DSH 进程 pid=… 启动于 …，早于安装文件的最新改动"；**spool 那条**报"审计桥仍在跑旧代码：最新记录没有 `preset` 字段"。后者与"怎么启动的"无关，最可靠。两种都只能重启 |
-
 | 审计层像是旧版本 | `node_modules/dsh-proteus-bridge` 是普通目录而非链接（旧副本）。`--check` 会报；按 §二 用 `dsh plugin add` 重装 |
 | `dsh plugin add` 报 `ERR_PNPM_UNEXPECTED_STORE` | pnpm 11 不再读项目 `.npmrc` 的 `store-dir`；在 profile 的 `pnpm-workspace.yaml` 里加 `storeDir` 指向 `node_modules` 实际链自的那个 store（见 §二 的实测前提） |
 | `pentest_run` 报 LLM 相关错误 | 该工具会在内核里跑 LLM 决策循环，需要 `PENTEST_LLM_*`；preset 已从宿主环境透传这三个变量，缺失时内核走默认端点 |
@@ -415,6 +414,13 @@ node verify-proteus.mjs && rm verify-proteus.mjs
    > 挂在 host 平面的裁决行在 web 会话里**完全收不到**工具调用，而同一份代码挂在
    > 无 preset 的 headless profile 里能拦住。
 
+10. **preset 目录不能用链接**（2026-09-22 实测）：发现机制**不跟随 reparse point**，
+    把 preset 目录建成 junction 后它就从选择器里静默消失了（`discoverPresets`
+    返回数 2 → 1）。所以 preset 是"真实目录 + 启动前同步 + 漂移校验"，备份也要放在
+    preset 根之外。**bundle 层不受此限**——它由 Node 的模块解析从 `node_modules`
+    加载，官方 `link:` 依赖 + junction 正是正确形态。与第 9 条同源：DSH 的行为
+    只能靠真机验证，静态读文档会得到"链接更干净"这种看起来对、实际会坏的结论。
+
 11. **审计链的 preset 归属**（2026-09-22 加，对应待办 R-22）：`session/event` 是
     **全局**事件，同一个 DSH 进程里**所有会话**的调用都会进 spool。所以每条审计
     记录都带 `preset`（取 `SessionHeader.agentPreset`），`--suite dsh-session`
@@ -430,9 +436,27 @@ node verify-proteus.mjs && rm verify-proteus.mjs
     会话仍会记录）。`tools/pre-execute` 载荷里没有 session，所以**裁决记录**的
     `preset` 是尽力而为（取不到就是 `''`）；权威归属来自 `session/event` 那条路。
 
-10. **preset 目录不能用链接**（2026-09-22 实测）：发现机制**不跟随 reparse point**，
-    把 preset 目录建成 junction 后它就从选择器里静默消失了（`discoverPresets`
-    返回数 2 → 1）。所以 preset 是"真实目录 + 启动前同步 + 漂移校验"，备份也要放在
-    preset 根之外。**bundle 层不受此限**——它由 Node 的模块解析从 `node_modules`
-    加载，官方 `link:` 依赖 + junction 正是正确形态。与第 9 条同源：DSH 的行为
-    只能靠真机验证，静态读文档会得到"链接更干净"这种看起来对、实际会坏的结论。
+12. **DSH 路径上到底靠哪一道闸**（2026-09-23 收口待办 R-13）：MCP 是**非交互**通道，
+    内核的 `ask` 档**没有可以被问的人**——`penagent/agent.py` 的 `Policy.check` 对
+    `ask` 与 `dangerous` 一律 `return False`（**是拒绝，不是弹窗**）。所以 preset 的
+    MCP 行必须在服务端启动时就带 `--authorize`：不带的话 sqlmap / nuclei / ffuf 这类
+    工具**全部不可用**，模型只能转回宿主 shell——正是 R-1 与 R-11 那个"为了能用而
+    放弃保护"的恶性循环。
+
+    代价与边界：`--authorize` 抬起的是**内核的 ask 档与 dangerous 标记**，它
+    **抬不动**下面这些（都不看 `authorize`）：
+
+    | 仍在内核侧生效 | 说明 |
+    |---|---|
+    | `capability.deny` / `permission.hard_deny` | 模式禁用与硬拒绝，任何开关都不放行 |
+    | `capability.constraints` | 参数冻结照旧追加 |
+    | `scope.target_allowlist` | 目标白名单（硬规则 3） |
+    | `scope.network_egress` | 出网闸门（Policy + 沙箱两层） |
+    | 协议白名单（http/https） | `PolicyGate` 的 scheme 检查 |
+
+    于是 DSH 会话里的**人**那道闸是：**DSH 的 `approval` 档位**（host 平面）+
+    **目标动作裁决**（preset 平面，`ask`/deny，见第 8 条与待办 R-22）。
+
+    **这条不变量已机检**（`tools/dsh_install.py` 的 `verify_gate_consistency`，
+    `--check` 默认跑）：**抬起了内核 ask 档 ⇒ host 补丁里至少要有一个
+    `approval: ask` 的档位**；三档全 `never` 会被直接报出来。

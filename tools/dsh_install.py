@@ -172,6 +172,53 @@ def verify_patch(path: Path = PATCH) -> list[str]:
             if tier not in text]
 
 
+def verify_gate_consistency(preset: Path | None = None,
+                            patch: Path | None = None) -> list[str]:
+    """内核的 ask 档被 `--authorize` 抬起时，宿主侧必须仍有一个"会问人"的档位。
+
+    **为什么需要这条（R-13 收口）**：MCP 是**非交互**通道，内核的 `ask` 档没有
+    可以被问的人——`Policy.check` 对 ask / dangerous 一律 `return False`
+    （是**拒绝**，不是弹窗）。所以 preset 的 MCP 行必须在服务端启动时就
+    `--authorize`，否则 sqlmap / nuclei / ffuf 这类工具全部不可用，模型只能转而
+    用宿主 shell——正是 R-1 与 R-11 那个"为了能用而放弃保护"的恶性循环。
+
+    代价是：DTO 会话里内核的 ask 档**不再是人的闸门**。于是"人"那道闸只剩 DSH 的
+    `approval` 档位。本条把这件事变成**可机检的不变量**：
+
+        抬起了内层 ask  ⇒  host 补丁里至少要有一个 `approval: ask` 的档位
+
+    三档全 `never`（无人值守最宽姿态）会被直接报出来。
+    """
+    cfg = preset or (SRC / "agent.cordis.yml")
+    patch_path = patch or PATCH
+    if not cfg.is_file() or not patch_path.is_file():
+        return []
+
+    uses_authorize = False
+    try:
+        rows = _yaml_rows(cfg)
+    except Exception:                             # noqa: BLE001 - 解析问题另有检查
+        return []
+    for row in rows:
+        # 真实 preset 里 `args` 在行的 `config` 之下（不是行顶层）
+        block = row.get("config")
+        args = block.get("args") if isinstance(block, dict) else None
+        if isinstance(args, str):
+            args = [args]
+        if isinstance(args, list) and "--authorize" in [str(a) for a in args]:
+            uses_authorize = True
+            break
+    if not uses_authorize:
+        return []
+
+    if "approval: ask" not in patch_path.read_text(encoding="utf-8"):
+        return ["preset 的 MCP 行抬起了内核 ask 档（--authorize），但 host 补丁里"
+                "**没有任何 approval: ask 的档位**——DSH 会话将完全没有人工确认"
+                "环节。要么给某个档位恢复 approval: ask，要么去掉 --authorize"
+                "（代价见 docs/修复待办清单.md R-13）"]
+    return []
+
+
 def check_bundle(home: Path, profile: str) -> list[str]:
     """审计层是否接进 profile（依赖 + 组合包选择，两处都要有）。"""
     pkg = home / "profiles" / profile / "package.json"
@@ -753,6 +800,7 @@ def main(argv: list[str] | None = None) -> int:
     problems += verify_preset(dst)
     problems += [f"与仓库不同步：{d}" for d in drift(dst)]
     problems += verify_patch()
+    problems += verify_gate_consistency()
     problems += verify_launcher()
     if not args.no_bundle_check:
         problems += check_bundle(home, args.profile)
