@@ -328,6 +328,40 @@ def live_check(profile: str, dst: Path) -> list[str]:
     return problems
 
 
+def terminate_dsh(procs: list[dict]) -> list[str]:
+    """结束这些 DSH 进程（Windows 用 `taskkill /T`，连子进程一起）。"""
+    notes: list[str] = []
+    for proc in procs:
+        pid = proc.get("pid")
+        if not pid:
+            continue
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, text=True, check=False)
+        else:
+            try:
+                os.kill(int(pid), 15)
+            except (OSError, ValueError):
+                pass
+        notes.append(f"已结束 DSH 进程 pid={pid}")
+    return notes
+
+
+def wait_gone(procs: list[dict], profile: str = "web",
+              timeout: float = 15.0) -> bool:
+    """等这些进程真的退出（端口释放需要一点时间，不等就会又撞 EADDRINUSE）。"""
+    import time as _time
+
+    pids = {str(p.get("pid")) for p in procs if p.get("pid")}
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        alive = {str(p.get("pid")) for p in running_dsh(profile)}
+        if not (pids & alive):
+            return True
+        _time.sleep(0.5)
+    return False
+
+
 # ----------------------------------------------------------------------
 # 同步
 # ----------------------------------------------------------------------
@@ -400,6 +434,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-roster", action="store_true", help="跳过 roster 健康检查")
     ap.add_argument("--no-live", action="store_true",
                     help="跳过运行态检查（正在跑的进程是否加载了当前模块）")
+    ap.add_argument("--restart", action="store_true",
+                    help="启动器用：若已有实例在跑，先关掉它再继续"
+                         "（否则新实例会以 EADDRINUSE 127.0.0.1:4080 失败退出）")
+    ap.add_argument("--yes", action="store_true",
+                    help="配合 --restart：不问，直接关")
     ap.add_argument("--no-bundle-check", action="store_true",
                     help="跳过审计桥的 profile 接线检查")
     args = ap.parse_args(argv)
@@ -412,6 +451,28 @@ def main(argv: list[str] | None = None) -> int:
     if not args.check:
         for note in install(home):
             print(f"  - {note}")
+
+    if args.restart:
+        procs = running_dsh(args.profile)
+        if procs:
+            pids = ", ".join(str(p.get("pid")) for p in procs)
+            print(f"检测到已有 DSH 实例在跑（pid={pids}）。不先关掉它，新实例会以"
+                  f"\n  EADDRINUSE: address already in use 127.0.0.1:4080 失败退出"
+                  f"\n  ——而双击启动器的人只会看到窗口一闪。")
+            print("  注意：关掉它 = 当前 GUI 会话结束（对话本身是持久化的）。")
+            agreed = args.yes
+            if not agreed and sys.stdin.isatty():
+                answer = input("  关闭它并继续启动？[y/N] ").strip().lower()
+                agreed = answer in ("y", "yes")
+            if not agreed:
+                print("已取消：既没有关闭正在跑的实例，也没有启动新实例。")
+                return 1
+            for note in terminate_dsh(procs):
+                print(f"  - {note}")
+            if not wait_gone(procs, args.profile):
+                print("  ! 进程未在 15 秒内退出——请手动结束它再启动。")
+                return 1
+            print("  - 端口已释放，可以启动新实例")
 
     problems: list[str] = []
     problems += verify_preset(dst)

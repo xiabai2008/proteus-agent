@@ -238,6 +238,77 @@ def test_parse_start_handles_net_and_garbage():
 
 
 # ----------------------------------------------------------------------
+# --restart：已有实例在跑时，双击启动器必须真的重启（而不是起一个注定失败的第二实例）
+# ----------------------------------------------------------------------
+def _stub_running(monkeypatch, procs):
+    monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: procs)
+
+
+def test_restart_aborts_when_declined(tmp_path, monkeypatch, capsys):
+    """没确认就不能关进程；但必须明说"什么都没做"，不能悄悄起第二实例。"""
+    import io
+
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    _stub_running(monkeypatch, [{"pid": 25904, "start": "", "cmd": ""}])
+    killed: list = []
+    monkeypatch.setattr(dsh_install, "terminate_dsh",
+                        lambda procs: killed.append(procs) or [])
+    monkeypatch.setattr(dsh_install.sys, "stdin", io.StringIO(""))  # isatty() = False
+
+    rc = dsh_install.main(["--home", str(home), "--restart", "--no-roster",
+                           "--no-bundle-check", "--no-live"])
+    out = capsys.readouterr().out
+    assert rc == 1 and killed == []
+    assert "EADDRINUSE" in out and "已取消" in out
+
+
+def test_restart_kills_then_continues(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    _stub_running(monkeypatch, [{"pid": 1, "start": "", "cmd": ""}])
+    killed: list = []
+    monkeypatch.setattr(dsh_install, "terminate_dsh",
+                        lambda procs: killed.append(procs) or ["已结束 DSH 进程 pid=1"])
+    monkeypatch.setattr(dsh_install, "wait_gone",
+                        lambda procs, profile="web", timeout=15.0: True)
+
+    rc = dsh_install.main(["--home", str(home), "--restart", "--yes",
+                           "--no-roster", "--no-bundle-check", "--no-live"])
+    out = capsys.readouterr().out
+    assert rc == 0 and len(killed) == 1
+    assert "端口已释放" in out
+
+
+def test_restart_is_noop_without_running_instance(tmp_path, monkeypatch):
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    _stub_running(monkeypatch, [])
+    killed: list = []
+    monkeypatch.setattr(dsh_install, "terminate_dsh",
+                        lambda procs: killed.append(procs) or [])
+
+    rc = dsh_install.main(["--home", str(home), "--restart", "--no-roster",
+                           "--no-bundle-check", "--no-live"])
+    assert rc == 0 and killed == []
+
+
+def test_restart_stops_if_process_survives(tmp_path, monkeypatch, capsys):
+    """杀了但没退出：必须停住报错，绝不能接着起第二个实例（又会撞端口）。"""
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    _stub_running(monkeypatch, [{"pid": 1, "start": "", "cmd": ""}])
+    monkeypatch.setattr(dsh_install, "terminate_dsh", lambda procs: ["killed"])
+    monkeypatch.setattr(dsh_install, "wait_gone",
+                        lambda procs, profile="web", timeout=15.0: False)
+
+    rc = dsh_install.main(["--home", str(home), "--restart", "--yes",
+                           "--no-roster", "--no-bundle-check", "--no-live"])
+    out = capsys.readouterr().out
+    assert rc == 1 and "未在 15 秒内退出" in out
+
+
+# ----------------------------------------------------------------------
 # 审计桥接线
 # ----------------------------------------------------------------------
 def test_check_bundle_reports_missing_wiring(tmp_path):
