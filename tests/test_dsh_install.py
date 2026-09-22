@@ -1,11 +1,14 @@
-"""DSH 接入安装器测试：机制性校验的每一条都要能独立触发。
+"""DSH 接入同步器测试：每一条校验都要能独立触发。
 
-为什么值得测：这三条校验挡的都是**静默失效**——preset 少一个文件就整份从
-选择器里消失、`!!js` 写错就求值成 `[object Object]`、审计桥没接线就"旁路
-不留痕"。它们坏掉时不会有人报错，只会有人以为一切正常。
+为什么值得测：这几条挡的都是**静默失效**——preset 少一个文件就整份从选择器里
+消失、安装副本过期就"跑旧代码"而毫无提示（实测踩中过：当天下午写的守卫因为
+副本停在上午而根本没上线）、`!!js` 写错就求值成 `[object Object]`、审计桥是
+普通目录副本就说明它不是仓库当前代码。它们坏掉时不会有人报错。
 """
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,7 +24,6 @@ _spec.loader.exec_module(dsh_install)
 
 
 def _preset_dir(tmp_path: Path, body: str) -> Path:
-    """造一个最小 preset 目录：agent.cordis.yml + preset.yml。"""
     dst = tmp_path / "proteus"
     dst.mkdir(parents=True, exist_ok=True)
     (dst / "agent.cordis.yml").write_text(body, encoding="utf-8")
@@ -29,6 +31,18 @@ def _preset_dir(tmp_path: Path, body: str) -> Path:
     return dst
 
 
+def _junction(link: Path, target: Path) -> bool:
+    """建 Windows junction（测试用；非 Windows 或无权限时返回 False）。"""
+    if sys.platform != "win32":
+        return False
+    proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                          capture_output=True, text=True, check=False)
+    return proc.returncode == 0 and link.exists()
+
+
+# ----------------------------------------------------------------------
+# 结构校验
+# ----------------------------------------------------------------------
 def test_verify_accepts_installed_package_rows(tmp_path):
     """包名行（@deepseek-ai/…）不做本地存在性检查——那是 roster 的活。"""
     dst = _preset_dir(tmp_path, "- id: a\n  name: '@deepseek-ai/dsh-persona'\n")
@@ -36,7 +50,7 @@ def test_verify_accepts_installed_package_rows(tmp_path):
 
 
 def test_verify_flags_missing_relative_plugin(tmp_path):
-    """相对 specifier 解析不到 = 整份 preset broken（这是最贵的一种静默失效）。"""
+    """相对 specifier 解析不到 = 整份 preset broken（最贵的一种静默失效）。"""
     dst = _preset_dir(
         tmp_path,
         "- id: policy\n  name: './proteus-tools-policy.mjs'\n  config:\n    role: policy\n")
@@ -44,7 +58,6 @@ def test_verify_flags_missing_relative_plugin(tmp_path):
     assert any("相对 specifier" in p and "proteus-tools-policy.mjs" in p
                for p in problems), problems
 
-    # 文件补齐后必须转干净——否则校验会变成"永远报错"的噪音
     (dst / "proteus-tools-policy.mjs").write_text("export function apply() {}\n",
                                                   encoding="utf-8")
     assert dsh_install.verify_preset(dst) == []
@@ -89,6 +102,103 @@ def test_verify_patch_requires_all_three_tiers(tmp_path):
     assert dsh_install.verify_patch(patch) == []
 
 
+# ----------------------------------------------------------------------
+# 漂移：跑旧代码的唯一可靠判据
+# ----------------------------------------------------------------------
+def test_drift_detects_stale_and_missing_files(tmp_path):
+    dst = tmp_path / "installed"
+    dst.mkdir()
+    for name in ("agent.cordis.yml", "preset.yml"):
+        (dst / name).write_text("old\n", encoding="utf-8")
+
+    problems = dsh_install.drift(dst)
+    # 四个源文件全都不一致：两个内容不同、两个缺失
+    assert len(problems) == 4, problems
+    assert any("已过期" in p for p in problems)
+    assert any("缺少" in p for p in problems)
+
+
+def test_drift_reports_missing_directory(tmp_path):
+    assert "不存在" in dsh_install.drift(tmp_path / "nope")[0]
+
+
+def test_install_syncs_and_is_idempotent(tmp_path):
+    home = tmp_path / "dsh"
+    notes = dsh_install.install(home)
+    assert any("已同步" in n for n in notes), notes
+    dst = home / ".agent-presets" / "proteus"
+    assert dsh_install.drift(dst) == []
+    assert dsh_install.verify_preset(dst) == []
+
+    again = dsh_install.install(home)
+    assert any("已是最新" in n for n in again), again
+
+
+def test_install_replaces_a_link_with_a_real_directory(tmp_path):
+    """链接必须被摘掉：DSH 的发现机制不跟随 reparse point（实测 COUNT 2→1）。
+
+    摘链接用 `cmd rmdir`——PowerShell / Path.unlink 对 junction 有递归删目标的风险，
+    所以这条同时断言**目标文件还在**。
+    """
+    home = tmp_path / "dsh"
+    dst = home / ".agent-presets" / "proteus"
+    dst.parent.mkdir(parents=True)
+    src = tmp_path / "real"
+    src.mkdir()
+    (src / "keep.txt").write_text("target must survive\n", encoding="utf-8")
+    if not _junction(dst, src):
+        pytest.skip("本机建不了 junction，跳过链接替换用例")
+
+    notes = dsh_install.install(home)
+    assert any("移除原有链接" in n for n in notes), notes
+    assert not dsh_install._is_reparse_point(dst)
+    assert (src / "keep.txt").is_file(), "摘链接时把目标内容删了"
+    assert dsh_install.drift(dst) == []
+
+
+def test_backup_lives_outside_the_preset_root(tmp_path):
+    """备份不能放在 preset 根目录里——那会被发现机制当成一个 preset。"""
+    home = tmp_path / "dsh"
+    dst = home / ".agent-presets" / "proteus"
+    dst.mkdir(parents=True)
+    (dst / "agent.cordis.yml").write_text("stale\n", encoding="utf-8")
+    (dst / "preset.yml").write_text("stale\n", encoding="utf-8")
+
+    dsh_install.install(home)
+    backups = list((home / "backups").glob("preset-proteus-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "agent.cordis.yml").read_text(encoding="utf-8") == "stale\n"
+    # preset 根里只应有 proteus 这一个目录
+    assert [p.name for p in (home / ".agent-presets").iterdir()] == ["proteus"]
+
+
+def test_backup_keeps_only_the_newest_three(tmp_path):
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    dst = home / ".agent-presets" / "proteus"
+    for i in range(5):
+        (dst / "preset.yml").write_text(f"v{i}\n", encoding="utf-8")
+        dsh_install.install(home)
+    assert len(list((home / "backups").glob("preset-proteus-*"))) <= 3
+
+
+def test_check_fails_on_drift(tmp_path, capsys):
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    dst = home / ".agent-presets" / "proteus"
+    (dst / "proteus-tools-policy.mjs").write_text("// stale\n", encoding="utf-8")
+
+    rc = dsh_install.main(["--home", str(home), "--check", "--no-roster",
+                           "--no-bundle-check"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "与仓库不同步" in out and "已过期" in out
+    assert "python tools/dsh_install.py" in out      # 给出修复命令
+
+
+# ----------------------------------------------------------------------
+# 审计桥接线
+# ----------------------------------------------------------------------
 def test_check_bundle_reports_missing_wiring(tmp_path):
     home = tmp_path / "dsh"
     web = home / "profiles" / "web"
@@ -98,6 +208,7 @@ def test_check_bundle_reports_missing_wiring(tmp_path):
     problems = dsh_install.check_bundle(home, "web")
     assert any("依赖里没有" in p for p in problems)
     assert any("bundles 里没有" in p for p in problems)
+    assert any("dsh plugin" in p for p in problems)   # 给官方装法
 
     (web / "package.json").write_text(json.dumps({
         "dependencies": {dsh_install.BRIDGE_NAME: "link:..."},
@@ -110,73 +221,26 @@ def test_check_bundle_reports_missing_profile(tmp_path):
     assert dsh_install.check_bundle(tmp_path / "dsh", "web")
 
 
-def test_install_links_then_check_is_clean(tmp_path):
-    """装完即可通过 `--check`；再装一次是幂等（不重复备份、不重指向）。"""
+def test_check_bridge_entry_flags_plain_directory(tmp_path):
+    """普通目录 = 旧副本（实测：09-21 的副本让审计层跑了两天前的代码）。"""
     home = tmp_path / "dsh"
-    try:
-        notes = dsh_install.install(home, copy=False)
-    except RuntimeError as exc:                  # 既建不了 symlink 也建不了 junction
-        pytest.skip(f"本机建不了目录链接：{exc}")
-    assert any("已建" in n for n in notes), notes
-
-    dst = home / ".agent-presets" / "proteus"
-    assert (dst / "agent.cordis.yml").is_file()   # 经链接能读到真源
-    assert dsh_install.verify_preset(dst) == []
-
-    again = dsh_install.install(home, copy=False)
-    assert any("无需改动" in n for n in again), again
-    assert list(dst.parent.glob("proteus.bak-*")) == []
+    entry = home / "profiles" / "web" / "node_modules" / dsh_install.BRIDGE_NAME
+    entry.mkdir(parents=True)
+    problems = dsh_install.check_bridge_entry(home, "web")
+    assert any("普通目录" in p for p in problems), problems
 
 
-def test_install_backs_up_existing_real_directory(tmp_path):
-    """已存在的真实目录（旧的手工复制版）先备份再链接，不静默覆盖。"""
+def test_check_bridge_entry_accepts_link(tmp_path):
     home = tmp_path / "dsh"
-    dst = home / ".agent-presets" / "proteus"
-    dst.mkdir(parents=True)
-    (dst / "agent.cordis.yml").write_text("# 旧副本\n", encoding="utf-8")
-
-    try:
-        notes = dsh_install.install(home, copy=False)
-    except RuntimeError as exc:
-        pytest.skip(f"本机建不了目录链接：{exc}")
-    assert any("已备份" in n for n in notes), notes
-    backups = list(dst.parent.glob("proteus.bak-*"))
-    assert len(backups) == 1
-    assert (backups[0] / "agent.cordis.yml").read_text(encoding="utf-8") == "# 旧副本\n"
+    entry = home / "profiles" / "web" / "node_modules" / dsh_install.BRIDGE_NAME
+    entry.parent.mkdir(parents=True)
+    src = tmp_path / "bridge-src"
+    src.mkdir()
+    if not _junction(entry, src):
+        pytest.skip("本机建不了 junction，跳过链接用例")
+    assert dsh_install.check_bridge_entry(home, "web") == []
 
 
-def test_check_notes_copy_install_as_drift_risk(tmp_path, capsys):
-    """`--check` 必须能看出"复制安装"——这正是漂移的根因。
-
-    复制不是错误（可能是有意为之），所以不失败；但**必须看得见**，否则
-    "仓库改了、装的那份还是旧的"会一直是静默的。
-    """
-    home = tmp_path / "dsh"
-    dsh_install.install(home, copy=True)
-    rc = dsh_install.main(["--home", str(home), "--check", "--no-roster",
-                           "--no-bundle-check"])
-    out = capsys.readouterr().out
-    assert "复制安装" in out
-    assert rc == 0
-
-
-def test_check_does_not_warn_for_link_install(tmp_path, capsys):
-    home = tmp_path / "dsh"
-    try:
-        dsh_install.install(home, copy=False)
-    except RuntimeError as exc:
-        pytest.skip(f"本机建不了目录链接：{exc}")
-    rc = dsh_install.main(["--home", str(home), "--check", "--no-roster",
-                           "--no-bundle-check"])
-    out = capsys.readouterr().out
-    assert "复制安装" not in out
-    assert rc == 0
-
-
-def test_install_copy_mode_materializes_files(tmp_path):
-    home = tmp_path / "dsh"
-    notes = dsh_install.install(home, copy=True)
-    dst = home / ".agent-presets" / "proteus"
-    assert any("已复制" in n for n in notes), notes
-    assert dsh_install.verify_preset(dst) == []
-    assert not (dsh_install.os.path.islink(dst) or dsh_install._is_reparse_point(dst))
+def test_check_bridge_entry_reports_missing(tmp_path):
+    problems = dsh_install.check_bridge_entry(tmp_path / "dsh", "web")
+    assert any("不存在" in p for p in problems)

@@ -10,7 +10,7 @@
 - 内核 = XPentest（已存在，fork 进本仓库），ReAct 循环 + 证据链反幻觉 + 记忆与技能进化
 - 工具层 = MCP 统一注册（RayScan / Chameleon / seckb 已声明，`--discover-mcp` 显式连接；poxiao / ruoyi-scan / LogicHunt 待接）
 - 宿主层 = 双入口：自有 CLI/SDK（必须可独立运行）+ deepseek-harness agent-preset（可选）
-- 宿主层现状（2026-09-22）：DSH 侧 = preset（工具面 + 目标动作裁决行 + 内核缺位守卫）+ host 平面 bundle `dsh/proteus-bridge`（会话事件审计入链）；内核侧 = MCP server 实测暴露 45 个工具。安装与校验用 `python tools/dsh_install.py`（默认**目录链接**，仓库即真源；`--check` 只校验并指出 broken 行）。
+- 宿主层现状（2026-09-22）：DSH 侧 = preset（工具面 + 目标动作裁决行 + 内核缺位守卫）+ host 平面 bundle `dsh/proteus-bridge`（会话事件审计入链）；内核侧 = MCP server 实测暴露 45 个工具。同步与校验用 `python tools/dsh_install.py`（**复制 + 启动前同步 + 漂移校验**——preset 目录不能用链接：DSH 发现机制不跟随 reparse point，链接会让 preset 从选择器里静默消失；bundle 层反之必须用官方 `link:` 依赖）。
 - **DSH 三层分工（实测结论，别凭直觉改）**：`tools/pre-execute` 与 `tools.restrict` 按**作用域**派发 → 裁决与工具面收敛必须写在 **preset 内**；`session/event` 是全局事件 → 审计留在 **host 平面 bundle**；工具能力本体留在 **MCP server**（与 DSH 版本解耦）。真机证据见 `docs/DSH插件化与内核旁路治理.md` 与接入指南第八节第 9 条。
 
 ## 2. 不可违反的硬规则（每次改动前自查）

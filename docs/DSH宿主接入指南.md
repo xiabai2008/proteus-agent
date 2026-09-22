@@ -38,25 +38,29 @@ proteus-agent/
 │   ├── proteus-bridge/                  # host 平面 bundle：会话事件审计入 spool
 │   └── proteus.cordis.patch.yml         # host 平面补丁：审批档位绑定
 ├── prompts/dsh-persona.md               # 宿主侧人格提示词（persona 的唯一来源）
-└── tools/dsh_install.py                 # 安装 + 校验 + roster 健康检查
+└── tools/dsh_install.py                 # 同步 + 漂移校验 + roster 健康检查
 ```
 
-**安装（推荐）**——幂等，并把「会静默坏掉」的三处一起校验掉：
+**同步（推荐）**——幂等；`--check` 只校验不改动：
 
 ```bash
-python tools/dsh_install.py          # 建目录链接（Windows 用 junction，无需管理员）
-python tools/dsh_install.py --check  # 只检查：preset 可解析 / 补丁完整 / 审计桥已接线
+python tools/dsh_install.py          # 同步 preset 到 $DSH_HOME，并校验
+python tools/dsh_install.py --check  # 只检查：与仓库是否同步 / 补丁 / 审计桥接线
 ```
 
-它做四件事：① 把 preset 目录**链接**进 `$DSH_HOME/.agent-presets/proteus`；
-② 逐行核对 preset 的相对 specifier 是否存在（少一个 `.mjs` 会让整份 preset
-**broken 并在选择器里静默消失**）；③ 拦掉 `!!js` 行里的 `": "`（YAML 会把它
-拆成映射键、求值成 `[object Object]`）；④ 跑一次 roster 健康检查。
+它挡四类**静默失效**：① **跑旧代码**——逐文件比对哈希，安装副本落后于仓库即报
+（启动器 [start-proteus.cmd](start-proteus.cmd) 会在每次启动前同步）；② **漏拷文件**
+——逐行核对相对 specifier（少一个 `.mjs` 会让整份 preset **broken 并在选择器里
+静默消失**）；③ `!!js` 行里的 `": "`（YAML 会把它拆成映射键、求值成
+`[object Object]`）；④ roster 健康检查。
 
-> **为什么必须链接而不是复制**：复制安装下「仓库改了、`$DSH_HOME` 里还是旧的」
-> 不会有任何提示——会话照常起得来，只是行为悄悄回到旧版。
+> **preset 目录不能用链接代替复制**（2026-09-22 实测）：DSH 的 preset 发现机制
+> **不跟随 reparse point**。把 `$DSH_HOME/.agent-presets/proteus` 建成 junction 后，
+> `discoverPresets` 的返回从 2 个 preset 变成 1 个——proteus **直接从选择器里
+> 消失且无任何提示**。所以只能是真实目录 + "启动前同步"。备份也必须放在 preset
+> 根**之外**（`$DSH_HOME/backups/`），否则会被发现机制当成一个 preset。
 
-**手工安装（等价，仅在不能建链接时）**——注意是**四个**文件，漏一个即 broken：
+**手工同步（等价，仅在不能跑脚本时）**——注意是**四个**文件，漏一个即 broken：
 
 ```bash
 mkdir -p ~/.dsh/.agent-presets/proteus
@@ -64,11 +68,23 @@ cp dsh/.agent-presets/proteus/{agent.cordis.yml,proteus-persona.mjs,proteus-tool
    ~/.dsh/.agent-presets/proteus/
 ```
 
-审计层（host 平面 bundle）另需装一次，装完**重启 DSH 进程**：
+**审计层（host 平面 bundle）走官方安装路径**，装完**重启 DSH 进程**：
 
 ```bash
 dsh plugin --profile web add <REPO>/dsh/proteus-bridge
 ```
+
+> **本机实测的两个前提**（2026-09-22，解释了 09-21 为什么"官方路径失败、只能手工登记"）：
+>
+> 1. **pnpm 11 不再从项目 `.npmrc` 读 `store-dir`**——它必须写在
+>    `pnpm-workspace.yaml` 的 `storeDir`（pnpm 10+ 的设置新家）。缺了它，
+>    `pnpm add` 会以 `ERR_PNPM_UNEXPECTED_STORE` 失败：profile 的
+>    `node_modules` 链自 `~/.pnpm-store\v11`，而 pnpm 想用默认的
+>    `%LOCALAPPDATA%\pnpm\store\v11`。
+> 2. **装完 `node_modules/dsh-proteus-bridge` 必须是链接**（junction，可用
+>    `fsutil reparsepoint query` 验）。若是普通目录，说明它是**旧副本**：实测踩中过
+>    ——09-21 的手工兜底留下普通目录副本，而仓库里的桥 09-22 已重构成薄再导出，
+>    审计层因此跑了两天前的代码且毫无提示。`--check` 会报这一条。
 
 发现机制（`packages/preset/agent-presets/src/discovery.ts`）：
 根目录 = `$DSH_HOME/.agent-presets`（用户可写，随包发布的 preset 另有一个只读 system 根）；
@@ -282,7 +298,10 @@ node verify-proteus.mjs && rm verify-proteus.mjs
 | 选择器里没有 proteus | 目录名不合法（须 `[a-z0-9][a-z0-9-]*`）或没放进 `$DSH_HOME/.agent-presets/`；跑 5.1 看 roster |
 | roster 显示 broken | composition 的 YAML 或行解析失败，`broken` 字段会写明是哪一行、哪个 specifier |
 | 会话里没有 `mcp__proteus__*` | 内核没起来。`failOnStartupError: false` 会让 preset 照常挂载，只是少这组工具——按 5.2 单独验证命令；常见原因是 `command` 里的 python 路径失效或 `cwd` 不对 |
-| preset 在选择器里消失 | 整份 composition broken（某行解析不到）。`python tools/dsh_install.py --check` 会指出是哪一行 |
+| preset 在选择器里消失 | 整份 composition broken（某行解析不到），**或目录是链接**（发现机制不跟随 reparse point）。`python tools/dsh_install.py --check` 会指出原因 |
+| 改了仓库，会话行为没变 | 安装副本过期。`python tools/dsh_install.py --check` 报"与仓库不同步"；跑不带 `--check` 即同步（启动器每次启动前也会同步） |
+| 审计层像是旧版本 | `node_modules/dsh-proteus-bridge` 是普通目录而非链接（旧副本）。`--check` 会报；按 §二 用 `dsh plugin add` 重装 |
+| `dsh plugin add` 报 `ERR_PNPM_UNEXPECTED_STORE` | pnpm 11 不再读项目 `.npmrc` 的 `store-dir`；在 profile 的 `pnpm-workspace.yaml` 里加 `storeDir` 指向 `node_modules` 实际链自的那个 store（见 §二 的实测前提） |
 | `pentest_run` 报 LLM 相关错误 | 该工具会在内核里跑 LLM 决策循环，需要 `PENTEST_LLM_*`；preset 已从宿主环境透传这三个变量，缺失时内核走默认端点 |
 | 工具调用被审批挡住 | 当前会话的权限档位；用第三节的补丁切换 `proteus-ctf`（approval: never）或逐次批准 |
 
@@ -384,3 +403,10 @@ node verify-proteus.mjs && rm verify-proteus.mjs
    > 这条违反直觉（直觉会想把所有东西塞进 host 平面）。2026-09-22 真机实测推翻过一次：
    > 挂在 host 平面的裁决行在 web 会话里**完全收不到**工具调用，而同一份代码挂在
    > 无 preset 的 headless profile 里能拦住。
+
+10. **preset 目录不能用链接**（2026-09-22 实测）：发现机制**不跟随 reparse point**，
+    把 preset 目录建成 junction 后它就从选择器里静默消失了（`discoverPresets`
+    返回数 2 → 1）。所以 preset 是"真实目录 + 启动前同步 + 漂移校验"，备份也要放在
+    preset 根之外。**bundle 层不受此限**——它由 Node 的模块解析从 `node_modules`
+    加载，官方 `link:` 依赖 + junction 正是正确形态。与第 9 条同源：DSH 的行为
+    只能靠真机验证，静态读文档会得到"链接更干净"这种看起来对、实际会坏的结论。
