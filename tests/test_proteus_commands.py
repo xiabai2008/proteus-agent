@@ -1,7 +1,8 @@
-"""proteus-commands.mjs 端到端测试（F2/F3）。
+"""proteus-commands.mjs 端到端测试（F2/F3/F4/F5）。
 
 用 node 真正加载插件模块并调用命令 handler——覆盖：注册名、模式查询/设置/
-拒绝、证据命令的 spawn 链路（假工作区 + 桩 penagent 包，不打真实数据）。
+拒绝、证据命令 spawn 链路、技能导出 spawn 链路、审计快览
+（假工作区 + 桩 penagent 包 + 审计桩，不打真实数据）。
 """
 import json
 import os
@@ -24,14 +25,15 @@ RUNNER = textwrap.dedent("""
     const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href)
     const captured = []
     mod.apply({ commands: { register: (d) => captured.push(d) } })
-    const mode = captured.find((c) => c.name === 'proteus-mode')
-    const ev = captured.find((c) => c.name === 'proteus-evidence')
+    const get = (name) => captured.find((c) => c.name === name)
     const out = {
       names: captured.map((c) => c.name),
-      show: mode.handler({ rawInput: '' }),
-      set: mode.handler({ rawInput: 'ctf-web' }),
-      bad: mode.handler({ rawInput: 'ghost-mode' }),
-      evidence: await ev.handler({ rawInput: '' }),
+      show: get('proteus-mode').handler({ rawInput: '' }),
+      set: get('proteus-mode').handler({ rawInput: 'ctf-web' }),
+      bad: get('proteus-mode').handler({ rawInput: 'ghost-mode' }),
+      evidence: await get('proteus-evidence').handler({ rawInput: '' }),
+      skills: await get('proteus-skills').handler({ rawInput: '' }),
+      audit: get('proteus-audit').handler({}),
     }
     console.log(JSON.stringify(out))
 """)
@@ -39,7 +41,7 @@ RUNNER = textwrap.dedent("""
 
 @pytest.fixture()
 def fake_ws(tmp_path: Path) -> Path:
-    """假工作区：<ws>/proteus-agent = 仓库根（modes/ + 桩 penagent 包）。"""
+    """假工作区：<ws>/proteus-agent = 仓库根（modes/ + 桩 penagent 包 + 审计桩）。"""
     root = tmp_path / "ws" / "proteus-agent"
     (root / "modes").mkdir(parents=True)
     for mid in ("base", "ctf-web", "ctf-crypto", "pentest-standard"):
@@ -48,12 +50,29 @@ def fake_ws(tmp_path: Path) -> Path:
     pkg.mkdir()
     (pkg / "__init__.py").write_text("", encoding="utf-8")
     (pkg / "__main__.py").write_text(
-        "import sys\n"
-        "if sys.argv[1:2] == ['evidence']:\n"
+        "import sys, os\n"
+        "argv = sys.argv[1:]\n"
+        "if argv[:1] == ['evidence']:\n"
         "    print('证据链：桩 · 校验 通过')\n"
+        "elif argv[:1] == ['skills'] and '--export' in argv:\n"
+        "    out = argv[argv.index('--out') + 1]\n"
+        "    os.makedirs(out, exist_ok=True)\n"
+        "    print(f'技能导出: 2 条 → {out}')\n"
+        "    print('  - pentest-standard-stub01.md')\n"
         "else:\n"
-        "    raise SystemExit(f'未知子命令: {sys.argv[1:]}')\n",
+        "    raise SystemExit(f'未知子命令: {argv}')\n",
         encoding="utf-8")
+    # 审计桩：spool 2 条 + dsh-sync 状态 + 独立证据链 1 行
+    data = root / "data"
+    data.mkdir()
+    (data / "dsh-events.jsonl").write_text(
+        '{"ts":"2026-09-23T10:00:00","tool":"pwsh","ok":true,"preset":"proteus"}\n'
+        '{"ts":"2026-09-23T10:01:00","tool":"mcp__proteus__pentest_run","ok":true,'
+        '"preset":"proteus"}\n', encoding="utf-8")
+    (data / "dsh-spool.state.json").write_text(
+        json.dumps({"offset": 2, "updated_at": "2026-09-23T10:02:00"}),
+        encoding="utf-8")
+    (data / "dsh-chain.jsonl").write_text('{"seq":1}\n', encoding="utf-8")
     return tmp_path / "ws"
 
 
@@ -78,10 +97,13 @@ def _run_plugin(ws: Path) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def test_commands_registered_and_mode_flow(fake_ws):
-    result = _run_plugin(fake_ws)
+def test_commands_registered(fake_ws):
+    assert _run_plugin(fake_ws)["names"] == [
+        "proteus-mode", "proteus-evidence", "proteus-skills", "proteus-audit"]
 
-    assert result["names"] == ["proteus-mode", "proteus-evidence"]
+
+def test_mode_flow(fake_ws):
+    result = _run_plugin(fake_ws)
 
     assert result["show"]["kind"] == "success"
     assert "当前会话模式" in result["show"]["text"]
@@ -95,7 +117,23 @@ def test_commands_registered_and_mode_flow(fake_ws):
 
 
 def test_evidence_command_spawns_kernel_cli(fake_ws):
-    result = _run_plugin(fake_ws)
-    ev = result["evidence"]
+    ev = _run_plugin(fake_ws)["evidence"]
     assert ev["kind"] == "success", ev
     assert "证据链" in ev["text"]
+
+
+def test_skills_command_spawns_export(fake_ws):
+    sk = _run_plugin(fake_ws)["skills"]
+    assert sk["kind"] == "success", sk
+    assert "技能导出" in sk["text"] and "2 条" in sk["text"]
+    out_dir = fake_ws / "proteus-agent" / "data" / "dsh-skills"
+    assert out_dir.is_dir()
+
+
+def test_audit_command_reads_spool_and_chain(fake_ws):
+    audit = _run_plugin(fake_ws)["audit"]
+    assert audit["kind"] == "success", audit
+    assert "2 条事件" in audit["text"]
+    assert "pwsh" in audit["text"] and "pentest_run" in audit["text"]
+    assert "offset" in audit["text"]
+    assert "1 条记录" in audit["text"]

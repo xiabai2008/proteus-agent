@@ -105,6 +105,11 @@
 # carries whatever the deployment registered globally (repository plugins).
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    # F4 技能融合：内核经验库导出目录也纳入 DSH 技能发现。
+    # 产出方式：python -m penagent skills --export（或 /proteus-skills 命令）。
+    # !!js 表达式里禁止 ": "（YAML 会拆映射键）——三元冒号后不带空格是刻意的。
+    customSkillDirs: !!js process.env.PENTEST_WS ? [(process.env.PENTEST_WS + '/proteus-agent/data/dsh-skills')]:[]
 
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'

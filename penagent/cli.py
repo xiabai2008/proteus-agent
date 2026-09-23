@@ -162,6 +162,18 @@ def cmd_skills(args) -> int:
 
         memory = memory.for_namespace(load_mode(mode_id).memory_namespace)
         print(f"目标分区: {memory.namespace}（模式 {mode_id}）")
+    if getattr(args, "export", False):
+        from .skill_export import export_skills
+
+        out_dir = getattr(args, "out", "") or str(Path(args.data) / "dsh-skills")
+        report = export_skills(args.data, out_dir,
+                               namespace=getattr(args, "export_namespace", ""))
+        print(f"技能导出: {report['count']} 条 → {report['out_dir']}")
+        for slug in report["files"][:10]:
+            print(f"  - {slug}.md")
+        if report["count"] > len(report["files"]):
+            print(f"  … 其余 {report['count'] - len(report['files'])} 条略")
+        return 0
     if getattr(args, "seed", False):
         from .skill_seeds import seed_skills
 
@@ -365,6 +377,14 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--seed", action="store_true",
                            help="写入预置技能种子（幂等；来源见 "
                                 "penagent/skill_seeds.py）")
+            p.add_argument("--export", action="store_true",
+                           help="导出经验库技能为 DSH 扁平 Markdown 技能"
+                                "（/proteus-skills 命令与 F4 融合用）")
+            p.add_argument("--out", default="",
+                           help="导出目录（缺省 <data>/dsh-skills——"
+                                "preset 的 skill-filesystem customSkillDirs 指向这里）")
+            p.add_argument("--export-namespace", default="",
+                           help="只导出指定分区（缺省全部分区）")
             p.add_argument("--refresh", action="store_true",
                            help="配合 --seed：用种子文件的新定义覆盖已有技能"
                                 "正文（保留成功率等学习统计）")

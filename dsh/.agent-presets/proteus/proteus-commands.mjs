@@ -115,6 +115,84 @@ async function handleEvidence(invocation) {
   }
 }
 
+/** F4：触发技能导出（内核 CLI 单一实现），产出进 DSH 技能发现目录。 */
+async function handleSkills(invocation) {
+  const root = repoRoot()
+  const py = process.env.PENTEST_PY312 || ''
+  if (!root) {
+    return { kind: 'error', text: 'PENTEST_WS 未设置，定位不到 Proteus 仓库根。' }
+  }
+  if (!py) {
+    return { kind: 'error', text: 'PENTEST_PY312 未设置（内核解释器目录）。' }
+  }
+  const namespace = String(invocation.rawInput || '').trim()
+  const args = ['-m', 'penagent', 'skills', '--export',
+                '--out', join(root, 'data', 'dsh-skills')]
+  if (namespace) args.push('--export-namespace', namespace)
+  try {
+    const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()
+    return { kind: 'success', text: out.slice(0, 2000) }
+  } catch (e) {
+    return { kind: 'error', text: `技能导出失败: ${String(e.message || e)}` }
+  }
+}
+
+/** F5：审计通道快览（纯 node fs 读，不起进程）。 */
+function handleAudit() {
+  const root = repoRoot()
+  if (!root) {
+    return { kind: 'error', text: 'PENTEST_WS 未设置，定位不到 Proteus 仓库根。' }
+  }
+  const dataDir = join(root, 'data')
+  const lines = []
+
+  // 1) 审计 spool：最近 10 条会话工具调用
+  const spoolPath = join(dataDir, 'dsh-events.jsonl')
+  let spoolCount = 0
+  let recent = []
+  try {
+    const raw = readFileSync(spoolPath, 'utf8').trim()
+    if (raw) {
+      const all = raw.split('\n')
+      spoolCount = all.length
+      recent = all.slice(-10).map((line) => {
+        try {
+          const e = JSON.parse(line)
+          const ts = String(e.ts || e.timestamp || '?').slice(0, 19)
+          const tool = String(e.tool || '?')
+          const ok = e.ok === undefined ? '?' : String(e.ok)
+          const preset = String(e.preset || '?')
+          return `  ${ts} · ${tool} · ok=${ok} · preset=${preset}`
+        } catch {
+          return `  (无法解析的一行，长度 ${line.length})`
+        }
+      })
+    }
+  } catch {
+    // spool 不存在：审计桥还没产生事件
+  }
+  lines.push(`审计 spool（dsh-events.jsonl）: ${spoolCount} 条事件`)
+  if (recent.length) lines.push(...recent)
+
+  // 2) dsh-sync 状态：增量偏移与链长
+  try {
+    const state = JSON.parse(readFileSync(join(dataDir, 'dsh-spool.state.json'), 'utf8'))
+    lines.push(`dsh-sync 状态: offset=${JSON.stringify(state.offset ?? state)}`
+      + (state.updated_at ? ` · 更新于 ${state.updated_at}` : ''))
+  } catch {
+    lines.push('dsh-sync 状态: 尚无导入记录（data/dsh-spool.state.json 不存在）')
+  }
+  try {
+    const chainRaw = readFileSync(join(dataDir, 'dsh-chain.jsonl'), 'utf8').trim()
+    const chainCount = chainRaw ? chainRaw.split('\n').length : 0
+    lines.push(`宿主会话证据链（dsh-chain.jsonl）: ${chainCount} 条记录`)
+  } catch {
+    lines.push('宿主会话证据链: 尚未生成')
+  }
+
+  return { kind: 'success', text: lines.join('\n').slice(0, 4000) }
+}
+
 /** Cordis 应用入口：注册两个命令（definitionId 可省略，注册表不强制）。 */
 export function apply(ctx) {
   ctx.commands.register({
@@ -128,5 +206,16 @@ export function apply(ctx) {
     description: '查看证据链校验与作战记录（可选任务 id 看明细）',
     input: { hint: '[<mission-id>]' },
     handler: (invocation) => handleEvidence(invocation)
+  })
+  ctx.commands.register({
+    name: 'proteus-skills',
+    description: '导出内核经验库技能为 DSH 技能（可选分区名过滤）',
+    input: { hint: '[<namespace>]' },
+    handler: (invocation) => handleSkills(invocation)
+  })
+  ctx.commands.register({
+    name: 'proteus-audit',
+    description: '审计通道快览：spool 事件 / dsh-sync 状态 / 证据链规模',
+    handler: () => handleAudit()
   })
 }
