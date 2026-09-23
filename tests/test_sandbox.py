@@ -7,6 +7,7 @@
 - 模式接线：注册表按模式挂沙箱策略；模式声明非法档位被拒
 """
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -286,6 +287,15 @@ def test_docker_container_execution_actually_works(tmp_path):
     ok, reason = runner.available()
     if not ok:
         pytest.skip(f"容器不可用: {reason}")
+
+    # 镜像守卫：本地没有目标镜像时尝试拉一次；拉不到按环境跳过——
+    # CI runner 上 python:3.12-slim 未预置且拉取常受限，不误报为失败。
+    image = getattr(runner, "image", "")
+    if image and not _image_exists(image):
+        pull = subprocess.run(["docker", "pull", image],
+                              capture_output=True, text=True, timeout=180)
+        if pull.returncode != 0:
+            pytest.skip(f"镜像 {image} 本地不存在且拉取失败（离线/受限环境）")
 
     spec = ToolSpec(name="probe", kind="cli", dangerous=True, timeout=120,
                     command=["python", "-c", "print('container-ok')"],

@@ -298,6 +298,8 @@ def test_wait_port_free_times_out_when_still_listening(monkeypatch):
     assert dsh_install.wait_port_free(4080, timeout=0.1) is False
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="node.exe 定位是 Windows 语义（ProgramFiles 布局）")
 def test_system_exe_finds_node_without_path(monkeypatch, tmp_path):
     """最小环境（PATH 里没有 node）也要能定位 node.exe。
 
