@@ -121,7 +121,7 @@ def test_mcp_discovery_registers_tools():
     center._servers["stub"] = _stub_spec()          # 登记声明
     report = center.discover_mcp()
 
-    assert report["stub"] == {"registered": 2, "error": ""}
+    assert report["stub"] == {"registered": 2, "error": "", "filtered": 0}
     entries = center.discover(source=SOURCE_MCP)
     assert [e.name for e in entries] == ["stub_add", "stub_echo"]
     assert all(e.origin == "stub" for e in entries)
@@ -334,3 +334,52 @@ def test_agents_listing_matches_kernel_registry(tmp_path):
                          policy=Policy(allowed_targets=["127.0.0.1"]),
                          mode=mode)
         assert set(registry.names()) == set(agent.registry.names()), mid
+
+
+# ----------------------------------------------------------------------
+# 工具面白名单（tool_filter，规划 §三-1）
+# ----------------------------------------------------------------------
+def _fake_tools():
+    return ([{"name": n, "description": f"t-{n}", "inputSchema": {"type": "object"}}
+             for n in ("load_binary", "kill_process", "run_command")], "")
+
+
+def _filtered_center(tool_filter):
+    from penagent.mcp_client import MCPServerSpec
+
+    center = ToolCenter()
+    center._servers["fake"] = MCPServerSpec(name="fake", transport="stdio",
+                                            command=("x",),
+                                            tool_filter=tool_filter)
+    return center
+
+
+def test_tool_filter_allow_narrows_registration():
+    """allow 非空：只注册列表内工具，其余被过滤（大工具面接入的前提）。"""
+    center = _filtered_center({"allow": ["load_binary", "run_command"]})
+    report = center.discover_mcp("fake", probe=lambda spec: _fake_tools())
+
+    assert report["fake"]["registered"] == 2
+    assert report["fake"]["filtered"] == 1
+    names = center.names(source=SOURCE_MCP)
+    assert "fake_load_binary" in names and "fake_run_command" in names
+    assert "fake_kill_process" not in names
+
+
+def test_tool_filter_deny_wins_over_allow():
+    """deny 优先于 allow：同名同时出现在两边 = 不注册。"""
+    center = _filtered_center({"allow": ["load_binary", "kill_process"],
+                               "deny": ["kill_process"]})
+    report = center.discover_mcp("fake", probe=lambda spec: _fake_tools())
+
+    assert report["fake"]["registered"] == 1
+    assert "fake_kill_process" not in center.names(source=SOURCE_MCP)
+
+
+def test_tool_filter_absent_registers_everything():
+    """无 tool_filter：全量注册（现有行为不变）。"""
+    center = _filtered_center({})
+    report = center.discover_mcp("fake", probe=lambda spec: _fake_tools())
+
+    assert report["fake"]["registered"] == 3
+    assert report["fake"]["filtered"] == 0

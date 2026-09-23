@@ -238,13 +238,39 @@ class ToolCenter:
         for spec in targets:
             tools, reason = probe(spec)
             if reason:
-                report[spec.name] = {"registered": 0, "error": reason}
+                report[spec.name] = {"registered": 0, "error": reason,
+                                     "filtered": 0}
                 self._notes.append(f"MCP server {spec.name} 未注册: {reason}")
                 continue
+            registered = filtered = 0
             for tool in tools:
+                if self._tool_filtered_out(spec, tool):
+                    filtered += 1
+                    continue
                 self._register_mcp_tool(spec, tool)
-            report[spec.name] = {"registered": len(tools), "error": ""}
+                registered += 1
+            report[spec.name] = {"registered": registered, "error": "",
+                                 "filtered": filtered}
+            if filtered:
+                self._notes.append(
+                    f"MCP server {spec.name}: tool_filter 收窄，"
+                    f"注册 {registered} / 过滤 {filtered}")
         return report
+
+    @staticmethod
+    def _tool_filtered_out(server: MCPServerSpec, tool: dict) -> bool:
+        """工具面白名单裁决（规划 §三-1）：deny 优先；allow 非空 = 仅放行列表内。
+
+        只影响"注册进注册表"，不改变 server 侧行为——被过滤的工具在模型
+        视野里不存在（等价于内核从未接入该工具）。
+        """
+        flt = getattr(server, "tool_filter", {}) or {}
+        remote = str(tool.get("name", ""))
+        allow = [str(x) for x in (flt.get("allow") or [])]
+        deny = [str(x) for x in (flt.get("deny") or [])]
+        if remote in deny:
+            return True
+        return bool(allow) and remote not in allow
 
     def _register_mcp_tool(self, server: MCPServerSpec, tool: dict) -> None:
         remote = str(tool.get("name", ""))

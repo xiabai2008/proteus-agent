@@ -222,9 +222,52 @@ PY
 RUN pip install --no-cache-dir pocsuite3
 
 # 构建期自检：装上了、能报版本（"真的能扫"的证据在 tests/test_sandbox.py）。
-# gobuster 的 version 子命令只打印版本号本身，故按版本串判定。
-RUN nuclei -version 2>&1 | grep -qi nuclei \
+# gobuster 3.8.x 用 `--version`（旧的 `version` 子命令已被移除——2026-09-23 实测
+# `No help topic for 'version'`，别再用旧写法）。
+# 先逐条打印实况（set -x + 直接输出），再跑 grep 断言——失败时日志里能直接
+# 看到"哪个工具、什么输出"，不用再做诊断构建（2026-09-23 排查教训）。
+RUN set -x; \
+    nuclei -version 2>&1 | head -2; \
+    ffuf -V 2>&1 | head -1; \
+    gobuster --version 2>&1 | head -1; \
+    python -c "import pocsuite3; print('pocsuite3', pocsuite3.__version__)"; \
+    nuclei -version 2>&1 | grep -qi nuclei \
  && ffuf -V 2>&1 | grep -qi ffuf \
- && gobuster version 2>&1 | grep -q "${GOBUSTER_VERSION}" \
- && python -c "import pocsuite3; print('pocsuite3', pocsuite3.__version__)"
+ && gobuster --version 2>&1 | grep -q "${GOBUSTER_VERSION}" \
+ && python -c "import pocsuite3"
 
+
+# ----------------------------------------------------------------------
+# CTF 解题/逆向/取证工具（2026-09-23，规划 T0：工具生态补强）
+#
+# 选择标准沿用上文：装上就能用、不依赖宿主侧数据文件。
+#   - pwntools：exploit 开发框架（pwn 脚本基建；纯 pip，离线可用）
+#   - checksec.py：ELF 保护检查（pip 版，自带能力）
+#   - volatility3：内存取证框架（自带核心插件；镜像样本另供）
+#   - binwalk：固件/文件雕刻（apt 版 v2，签名库内置）
+#   - gdb / strace / ltrace / file / xxd：二进制分析基础件（apt）
+#
+# apt 源默认 deb.debian.org；构建网络受限时可用国内镜像覆盖：
+#   docker build --build-arg APT_MIRROR=mirrors.tuna.tsinghua.edu.cn ...
+ARG APT_MIRROR=deb.debian.org
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
+          /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        gdb binwalk file xxd strace ltrace; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir pwntools checksec.py volatility3
+
+# 构建期自检：每个工具都要能报告自己（装不上=构建失败，不留半残镜像）。
+# 踩坑记录（2026-09-23）：
+#   - pwntools 用 CLI `pwn version`（`pwn` 模块没有 __version__ 属性）
+#   - volatility3 用 CLI `vol`（模块顶层同样没有 __version__）
+RUN pwn version 2>&1 | head -1 \
+ && python -c "import checksec; print('checksec.py ok')" \
+ && vol --help >/dev/null 2>&1 \
+ && binwalk --help >/dev/null 2>&1 \
+ && gdb --version | head -1

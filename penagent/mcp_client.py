@@ -76,6 +76,10 @@ class MCPServerSpec:
     modes: tuple[str, ...] = ()         # 模式可用性（空 = 全模式）
     dangerous: bool = False             # 本 server 的工具默认是否高危
     tool_overrides: dict = field(default_factory=dict)   # 按远端工具名覆盖
+    # 工具面白名单（2026-09-23，规划 §三-1）：{"allow": [...], "deny": [...]}
+    # 大工具面 server（如 HexStrike 150+ 工具）接入前必须收窄，否则工具清单
+    # 直接炸模型上下文。allow 非空 = 只注册列表内工具；deny 优先于 allow。
+    tool_filter: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "MCPServerSpec":
@@ -91,6 +95,7 @@ class MCPServerSpec:
             modes=tuple(data.get("modes") or ()),
             dangerous=bool(data.get("dangerous", False)),
             tool_overrides=dict(data.get("tool_overrides") or {}),
+            tool_filter=dict(data.get("tool_filter") or {}),
         )
 
     def availability(self) -> Optional[str]:

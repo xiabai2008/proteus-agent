@@ -929,3 +929,28 @@ def test_sandbox_host_dictionary_visible_at_mount_point():
     assert result.ok, f"容器内读宿主字典失败: {str(result.error)[:200]}"
     assert str(result.output).strip(), "字典内容是空的"
 
+
+
+def test_sandbox_image_ctf_toolkit():
+    """沙箱镜像的 CTF 工具链（2026-09-23 T0-a 扩层）。
+
+    覆盖：pwntools / checksec.py / volatility3 / binwalk / gdb 五件都在，
+    且走生产执行路径（ToolRegistry → 沙箱 → 容器）。
+    脚本用 `set -e`：任何一件装丢/跑不起来，整个命令非零退出 = 断言失败。
+    """
+    runner = _sandbox_image_or_skip()
+    script = ("set -e; "
+              "pwn version >/dev/null 2>&1; "
+              "python -c 'import checksec'; "
+              "vol --help >/dev/null 2>&1; "
+              "binwalk --help >/dev/null 2>&1; "
+              "gdb --version | head -1")
+    spec = ToolSpec(name="ctf_probe", kind="cli", dangerous=True, timeout=180,
+                    command=["/bin/sh", "-c", script], workdir=".")
+    registry = ToolRegistry(sandbox=build_sandbox("docker", runner=runner))
+    registry.register(spec)
+
+    result = registry.execute("ctf_probe", {})
+    assert result.ok, f"CTF 工具链容器内执行失败: {str(result.error)[:200]}"
+    assert "gdb" in str(result.output).lower(), \
+        f"gdb 未按预期输出: {str(result.output)[:120]}"
