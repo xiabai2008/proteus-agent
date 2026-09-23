@@ -1,0 +1,5 @@
+# 钉 1.x：mcp 2.x 删除了 Server.list_tools()/call_tool() 装饰器，
+# 与本 server 的用法不兼容（2026-09-23 实测 2.2.0 直接 AttributeError）。
+mcp==1.18.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0

@@ -194,3 +194,20 @@ F 项是"第四步"——深度融合；T 项是"工具面打开"——不再局
 - preset 新增第三行 `proteus-commands`（专属行 3/4；全组合 4 行），已同步，
   roster `broken=no`；命令名/返回契约按 `dsh-commands` 现行 API（`rawInput` +
   `{kind,text}`），definitionId 可省。
+
+**T0 收尾 ✅（2026-09-23 傍晚）**
+- **binwalk / searchsploit / capa** 三个容器化 MCP 本地构建并接线：
+  `mcp_e2e_probe` 全绿（7 + 3 + 3 工具注册，真调用全部 ok=True；分析文件经
+  `data/` 只读挂载到容器 `/samples`）。
+- **CyberChef 栈落地**：`proteus-cyberchef-server` 常驻容器（宿主 127.0.0.1:3110，
+  `--restart unless-stopped`）+ 适配器镜像 `proteus-cyberchef-mcp`（3 工具，
+  bake 真调用通过；`hello → aGVsbG8=`）。
+- **可复现性收口**：构建件纳管 `docker/mcp/`（补丁与来源逐条记录在 README）+
+  `tools/build_mcp_images.py`（幂等；实测从纳管件复建四镜像全通过）。
+- 构建补丁五条（全部实测原因）：apt 走清华；PyPI 走清华（直连 ReadTimeout）；
+  GitHub 走 gh-proxy（binwalk 克隆 / capa release）；**`mcp` 钉 1.18.0**
+  （2.x 删除 Server 装饰器 API，实测 2.2.0 直接 AttributeError）；cyberchef
+  适配器自建 Dockerfile（官方 uv+ghcr 耦合深；钉版依赖 + `--no-deps` 绕开
+  pip 解析冲突）。
+- 未纳管（诚实记录）：yara-mcp（基础镜像当时不可达 + 优先级最低）；
+  radare2-mcp（上游 tools/list 死锁，维持归档与三条跟进选项）。

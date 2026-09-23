@@ -74,10 +74,44 @@ def probe_radare2() -> int:
                                           {"file_path": "/bin/ls"}))
 
 
+# 容器化 MCP（mcp-security-hub 本地构建；data 目录只读挂到容器 /samples）。
+# 分析样本用 ghostpatch 里割出的 fw_v2.bin（真实 ELF，扫描无副作用）。
+def probe_binwalk() -> int:
+    return _probe("binwalk", "",
+                  lambda reg: reg.execute("binwalk_binwalk_scan",
+                                          {"filepath":
+                                           "/samples/ctf/ghostpatch/fw_v2.bin"}))
+
+
+def probe_searchsploit() -> int:
+    return _probe("searchsploit", "",
+                  lambda reg: reg.execute("searchsploit_searchsploit_search",
+                                          {"query": "apache 2.4"}))
+
+
+def probe_capa() -> int:
+    return _probe("capa", "",
+                  lambda reg: reg.execute("capa_capa_analyze",
+                                          {"filepath":
+                                           "/samples/ctf/ghostpatch/fw_v2.bin"}))
+
+
+def probe_cyberchef() -> int:
+    # 依赖：proteus-cyberchef-server 容器在宿主 127.0.0.1:3110 运行（见 README）。
+    return _probe("cyberchef", "",
+                  lambda reg: reg.execute("cyberchef_bake_recipe",
+                                          {"input_data": "hello",
+                                           "recipe": [{"op": "To Base64"}]}))
+
+
 PROBES = {"rayscan": probe_rayscan,
           "chameleon": probe_chameleon,
           "seckb": probe_seckb,
-          "radare2": probe_radare2}
+          "radare2": probe_radare2,
+          "binwalk": probe_binwalk,
+          "searchsploit": probe_searchsploit,
+          "capa": probe_capa,
+          "cyberchef": probe_cyberchef}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in PROBES:

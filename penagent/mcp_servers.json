@@ -38,6 +38,45 @@
       "timeout": 60,
       "dangerous": false,
       "modes": []
+    },
+    "binwalk": {
+      "transport": "stdio",
+      "command": ["docker", "run", "-i", "--rm",
+                  "-v", "${PENTEST_WS}/proteus-agent/data:/samples:ro",
+                  "proteus-mcp-binwalk:latest"],
+      "description": "binwalk 固件分析（扫描/提取/熵/hexdump 等 7 工具；分析文件经 data 目录只读挂载到 /samples——filepath 用容器内视角 /samples/...）",
+      "timeout": 300,
+      "dangerous": false,
+      "modes": []
+    },
+    "searchsploit": {
+      "transport": "stdio",
+      "command": ["docker", "run", "-i", "--rm",
+                  "proteus-mcp-searchsploit:latest"],
+      "description": "Exploit-DB 离线检索（searchsploit_search：标题/路径/描述；无需挂载）",
+      "timeout": 60,
+      "dangerous": false,
+      "modes": []
+    },
+    "capa": {
+      "transport": "stdio",
+      "command": ["docker", "run", "-i", "--rm",
+                  "-v", "${PENTEST_WS}/proteus-agent/data:/samples:ro",
+                  "proteus-mcp-capa:latest"],
+      "description": "capa 二进制能力检测（MITRE ATT&CK 映射；分析文件经 /samples 只读挂载）",
+      "timeout": 300,
+      "dangerous": false,
+      "modes": []
+    },
+    "cyberchef": {
+      "transport": "stdio",
+      "command": ["docker", "run", "-i", "--rm",
+                  "-e", "CYBERCHEF_API_URL=http://host.docker.internal:3110/",
+                  "proteus-cyberchef-mcp:latest"],
+      "description": "CyberChef 编码/转换链（bake_recipe：Base64/hex/URL/压缩等全部 Chef 操作；依赖 proteus-cyberchef 容器在宿主 127.0.0.1:3110 运行——docker run --restart unless-stopped 常驻）",
+      "timeout": 120,
+      "dangerous": false,
+      "modes": []
     }
   }
 }
