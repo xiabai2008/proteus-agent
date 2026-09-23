@@ -52,14 +52,26 @@ class SandboxDecision:
     wrap: Optional[Callable[[list], list]] = None  # 命令包装器（容器执行用）
 
 
+def _slash_norm(text: str) -> str:
+    """把宿主路径规范成容器比较用的形式：分隔符统一为 `/`。
+
+    刻意**不用 os.path**——生产端（Windows）与 CI（Linux）必须对同一段
+    Windows 风格路径给出同一结论；os.path 的平台语义会把
+    `C:\\Tools\\bin\\nuclei.exe` 在 Linux 上判成"无目录"（basename==原文），
+    重写静默失效（2026-09-23 被 test-linux 抓到）。
+    """
+    return text.replace("\\", "/")
+
+
 def _basename_no_exe(text: str) -> str:
     """从宿主可执行文件路径取容器内可解析的工具名。
 
     只对 `.exe` 路径生效（Windows 宿主的工具二进制），且要求确实带目录
-    （`base != text`）——否则裸名字（如 `sqlmap`）本身就该原样保留。
+    （`base != 原文`）——否则裸名字（如 `sqlmap`）本身就该原样保留。
     """
-    base = os.path.basename(text)
-    if base == text or not base.lower().endswith(".exe"):
+    norm = _slash_norm(text)
+    base = norm.rsplit("/", 1)[-1]
+    if base == norm or not base.lower().endswith(".exe"):
         return ""
     return base[:-4]
 
@@ -109,15 +121,14 @@ def containerize_command(command: list[str], data_root: str = "") -> list[str]:
     原样保留——做通用路径替换会把"镜像里没装这个工具"或"数据文件真缺"这类
     错误藏起来，而它们本该以工具自己的报错暴露出来。
     """
-    from pathlib import Path
 
-    host_python = os.path.normcase(os.path.normpath(sys.executable))
-    root = os.path.normpath(data_root) if data_root else ""
-    root_key = os.path.normcase(root) if root else ""
+    host_python = _slash_norm(sys.executable).lower()
+    root_slash = _slash_norm(data_root).rstrip("/") if data_root else ""
+    root_key = root_slash.lower()
     out = []
     for part in command:
         text = str(part)
-        if os.path.normcase(os.path.normpath(text)) == host_python:
+        if _slash_norm(text).lower() == host_python:
             out.append("python")
             continue
         # **工具二进制先判**：`${PENTEST_TOOLS}/tools/nuclei.exe` 也在数据根之下，
@@ -128,13 +139,13 @@ def containerize_command(command: list[str], data_root: str = "") -> list[str]:
             out.append(tool)
             continue
         if root_key:
-            norm = os.path.normpath(text)
-            key = os.path.normcase(norm)
+            norm = _slash_norm(text)
+            key = norm.lower()
             if key == root_key:
                 out.append(CONTAINER_TOOLS_DIR)
                 continue
-            if key.startswith(root_key + os.sep):
-                rel = Path(norm[len(root) + 1:]).as_posix()
+            if key.startswith(root_key + "/"):
+                rel = norm[len(root_slash) + 1:]
                 out.append(f"{CONTAINER_TOOLS_DIR}/{rel}")
                 continue
         out.append(text)

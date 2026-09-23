@@ -32,6 +32,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+# 输出编码兜底：CI（cp1252 控制台）下打印中文会 UnicodeEncodeError——
+# 与启动器输出编码兜底同一策略（2026-09-23 被 windows CI 抓到）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 # 内核包在仓库根下，脚本从 examples/ 运行时要显式加入 import 路径
 sys.path.insert(0, str(ROOT))
