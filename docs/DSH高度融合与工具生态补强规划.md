@@ -227,3 +227,21 @@ F 项是"第四步"——深度融合；T 项是"工具面打开"——不再局
   agent）见 `docker/mcp/README.md`「未纳管」。
 - 构建件纳管 `docker/mcp/hexstrike/`（server+adapter 两文件 + 依赖收窄清单）；
   `tools/build_mcp_images.py` 同步纳入。
+
+**第 4 步·F4/F5/F6 ✅（2026-09-23 晚，提交 b9894d0）**
+- **F4 技能融合 ✅**：`penagent/skill_export.py`（经验库 → DSH 扁平 Markdown
+  技能，frontmatter 含 name/description/whenToUse，正文含步骤/工具/证据与
+  成功率统计）；CLI `skills --export [--out DIR] [--export-namespace X]`；
+  preset 的 skill-filesystem 行配 `customSkillDirs` 指向 `data/dsh-skills`
+  （skill-filesystem 原生支持，DSH 侧零代码）；命令 `/proteus-skills` 触发导出。
+  实测导出器幂等 + frontmatter 规范（含中文安全引号转义）。
+- **F5 审计可查 ✅**：`/proteus-audit` 命令（纯 node fs 读）：spool 事件数与
+  最近 10 条（ts/tool/ok/preset）+ dsh-sync 状态（offset）+ 独立证据链规模。
+  测试桩覆盖 spool/state/chain 三件。
+- **F6 会话标题 ✅ 关闭**：标题由 `session-title-first-prompt-llm` 按首条消息
+  LLM 生成，Proteus 会话首条消息天然含目标与模式——无可定制项，结论"无需定制"。
+- **顺手抓真 bug**：preset 新增 customSkillDirs 时初版写了 `? [...] : []`
+  （!!js 行含 ": "）——被 `verify_preset` 的冒号陷阱机检当场拦下（R-15 的
+  教训在起作用），改三元无空格写法后过。全量 443 passed。
+- 至此**规划四步全部执行完毕**。剩余按需项：T2（GhidraMCP/OSINT/semgrep）、
+  radare2-mcp 专项（上游 tools/list 死锁）、yara-mcp（低优先）。
