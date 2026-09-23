@@ -460,3 +460,51 @@ node verify-proteus.mjs && rm verify-proteus.mjs
     **这条不变量已机检**（`tools/dsh_install.py` 的 `verify_gate_consistency`，
     `--check` 默认跑）：**抬起了内核 ask 档 ⇒ host 补丁里至少要有一个
     `approval: ask` 的档位**；三档全 `never` 会被直接报出来。
+---
+
+## 九、DSH 升级流程（上游更新后插件不被静默打断）
+
+**两个检查器，分工明确**：
+
+| 检查器 | 管什么 | 什么时候跑 |
+|---|---|---|
+| `python tools/dsh_install.py --check` | **本侧一致性**：装到 `~/.dsh` 的副本 vs 仓库、roster、审计桥、运行态（进程 vs 文件） | 每次改动 dsh/ 之后 |
+| `python tools/dsh_compat_check.py` | **对侧兼容性**：已装 harness 里，我们依赖的包/接口/行/参数还在不在（7 项，见下） | DSH 升级前后、日常抽查 |
+
+`dsh_compat_check` 覆盖的 7 个触面（每一项都对应 `dsh/` 下代码的真实调用点）：
+
+1. **C1 包存在性**——preset 组合 + bridge 引用的 `@deepseek-ai/*` 全部在
+   （启用行缺包=FAIL；`disabled` 占位缺包=容忍，不计）
+2. **C2 persona API**——`section()/getSectionOrder`、`deployment:persona-prefix/suffix`
+   分区名、order 有限数校验
+3. **C3 tools-policy API**——`session/event` 事件名、`agentPreset` 归属字段、
+   `tools/pre-execute` 裁决钩子派发点
+4. **C4 mcp-client schema**——`transport/serverName/command/cwd/env/
+   toolCallTimeoutMs/failOnStartupError/streamable-http`
+5. **C5 host 补丁目标**——`dsh-base` 组合里 `approval`/`permission` 两行与档位键；
+   且我们补丁引用的每个行 id 在 host 里仍存在
+6. **C6 CLI 入口**——`apps/cli/lib/bin.js` 存在且含 `--patch/profile`
+7. **C7 版本锁**——`dsh/DSH_VERSION.lock` 记录的 harness commit vs 当前 HEAD
+
+**升级五步（顺序不能反）**：
+
+```bash
+# 0) 升级前建基线（两边都跑，全绿才动手）
+python tools/dsh_install.py --check
+python tools/dsh_compat_check.py
+
+# 1) 更新 DSH（git pull / 重装 / 换版本）
+# 2) 升级后重跑兼容检查——FAIL 的每一项就是断点，按提示修 preset/插件/补丁
+python tools/dsh_compat_check.py
+
+# 3) 修完后冒烟（第五节验证步骤：roster → MCP 拉起 → 真机会话）
+# 4) 全绿后更新版本锁（记录新 commit/日期），再跑一次 install check 对齐副本
+```
+
+**锁文件**（`dsh/DSH_VERSION.lock`）：记录"被验证过的 harness commit + 日期"。
+上游一动，C7 立刻报 WARN——这不是错误，是提醒你按第 2-4 步走一遍。
+
+**设计原则（降低上游耦合，新增集成时遵守）**：能用「配置行」解决的不写插件；
+能用「MCP 工具 + persona 提示」解决的不写深钩子；插件一律明确失败语义
+（persona fail-loud、tools-policy fail-closed、审计 fail-open）。深钩子
+（`session/event`、`tools/pre-execute`）是**高脆弱点**，升级后优先复测它们。

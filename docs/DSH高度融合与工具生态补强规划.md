@@ -115,8 +115,11 @@ DSH 宿主融合**，不是工具数量。
   降级（少一组工具，不炸会话），但"没有工具就没有保护"——kernelGuard 已在管这条。
 - **工具面安全红线**：新工具一律走 `mcp_servers.json` 声明 + 内核注册，危险工具
   照旧吃 PolicyGate / 沙箱档，不允许旁路。
-- **DSH 版本耦合**：command 插件按当前安装版本 API 对齐，DSH 升级后需复测
-  （清单在指南"排查"节维护）。
+- **DSH 版本耦合**：已机制化（2026-09-23）——`tools/dsh_compat_check.py` 把 7 个
+  触面（包存在性 / persona API / tools-policy 钩子 / mcp-client schema / host
+  补丁行 / CLI 入口 / 版本锁）做成可检测契约；`dsh/DSH_VERSION.lock` 锁定被验证
+  的 harness commit；升级五步 SOP 在接入指南第九节。新增 F 项开发时遵守
+  "耦合预算"原则：配置行 > MCP 工具 + 提示 > 插件 > 深钩子。
 
 ---
 

@@ -1,0 +1,8 @@
+{
+ "harness_commit": "9d36b0ad3cfe263d260f7fb61ed2cc11a498e258",
+ "harness_commit_date": "2026-09-19 14:37:35 +0800",
+ "harness_location_hint": "PENTEST_WS/deepseek-harness（或 PENTEST_DSH_REPO）",
+ "validated_at": "2026-09-23",
+ "validated_by": "tools/dsh_compat_check.py 全绿 + tools/dsh_install.py --check + 真机冒烟",
+ "note": "上游更新后：先跑 dsh_compat_check 修断点，冒烟通过再更新本锁。"
+}
