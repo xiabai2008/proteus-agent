@@ -125,3 +125,34 @@ DSH 宿主融合**，不是工具数量。
 
 *本规划与 `docs/DSH插件化与内核旁路治理.md`（三步走已全部实施）衔接；
 F 项是"第四步"——深度融合；T 项是"工具面打开"——不再局限于本机资产。*
+
+
+---
+
+## 六、执行记录（2026-09-23）
+
+**T0-a 镜像扩层 ✅ 完成**（提交 `430633c`）
+- `proteus-sandbox:latest` 加入：pwntools / checksec.py / volatility3 / binwalk /
+  gdb / strace / ltrace / file / xxd；镜像 342MB → 877MB。
+- 回归测试 `test_sandbox_image_ctf_toolkit`（走生产执行路径，2s 跑完）。
+- 踩坑三条（都已写进 Dockerfile 注释）：① deb.debian.org 构建期拉不动 ——
+  新增 `APT_MIRROR` 构建参数（本机用清华镜像）；② gobuster 3.8.x 移除了
+  `version` 子命令，正确姿势 `gobuster --version`；③ pwntools / volatility3
+  模块顶层都没有 `__version__`，自检改用 CLI（`pwn version` / `vol --help`）。
+
+**§三-1 per-server tool_filter ✅ 完成**（同批提交）
+- `mcp_servers.json` 条目新增 `tool_filter: {allow, deny}`；deny 优先、allow
+  非空=仅放行列表内；discover 报告新增 `filtered` 计数（契约含错误路径）。
+- 3 条新测试（allow 收窄 / deny 优先 / 无过滤不改变现状）。
+
+**T0-b 容器化 MCP 🟡 部分完成**
+- mcp-security-hub 已克隆调研（GHCR 无预构建镜像，需本地 build；README 中
+  `FuzzingLabs/` 与仓库路径 `ismailbozkurt/` 不一致——以实际 clone 为准）。
+- **radare2-mcp 受阻**：Kali WSL 侧环境已备齐（r2 6.0.5 + libradare2-dev +
+  pkg-config + r2mcp 编译安装成功，含一行 `r_table_new` 适配补丁），但
+  **r2mcp v1.8.8 的 `tools/list` 死锁**：initialize 4s 正常、ping 正常、
+  tools/list 90s 零响应且进程存活无崩溃——上游缺陷，未接线（避免每次发现
+  流程空等 120s）。
+- 跟进选项：① 上游提 issue / 换版本；② 借 `r2mcp -T` CLI 能力自制薄 MCP 包装；
+  ③ 改试 GhidraMCP。证据与探针分支已留在 `examples/mcp_e2e_probe.py`。
+- CyberChef API MCP：未开始。

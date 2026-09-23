@@ -62,9 +62,22 @@ def probe_seckb() -> int:
                                           {"query": "langflow CVE-2025-3248"}))
 
 
+def probe_radare2() -> int:
+    # ⚠️ 未接线（2026-09-23）：r2mcp v1.8.8 的 tools/list 死锁——握手 init 正常
+    # （4s）、ping 正常，但 tools/list 90s 无任何响应且进程存活、无崩溃输出，
+    # 疑似上游缺陷。故 mcp_servers.json 暂未挂 radare2 条目（挂了会让发现流程
+    # 每次等 120s 超时）。本分支保留，修好后接线即可用。
+    # 跟进选项：① 给上游提 issue / 找已修版本；② 用 r2mcp -T 的 CLI 能力自制
+    # 薄 MCP 包装；③ 改试 GhidraMCP 路线。分析对象用发行版自带 /bin/ls。
+    return _probe("radare2", "",
+                  lambda reg: reg.execute("radare2_open_file",
+                                          {"file_path": "/bin/ls"}))
+
+
 PROBES = {"rayscan": probe_rayscan,
           "chameleon": probe_chameleon,
-          "seckb": probe_seckb}
+          "seckb": probe_seckb,
+          "radare2": probe_radare2}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in PROBES:
