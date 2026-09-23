@@ -23,6 +23,7 @@ IMAGES = {
     "searchsploit": (MCP_DIR / "searchsploit", "proteus-mcp-searchsploit:latest"),
     "capa": (MCP_DIR / "capa", "proteus-mcp-capa:latest"),
     "cyberchef": (MCP_DIR / "cyberchef-mcp", "proteus-mcp-cyberchef:latest"),
+    "hexstrike": (MCP_DIR / "hexstrike", "proteus-hexstrike:latest"),
 }
 
 

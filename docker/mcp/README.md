@@ -12,12 +12,14 @@ T0（规划：DSH高度融合与工具生态补强）落地的四个容器化 MC
 | `searchsploit/` | `proteus-mcp-searchsploit:latest` | 3（search/examine/recent） | stdio | 无需挂载 |
 | `capa/` | `proteus-mcp-capa:latest` | 3（analyze/…） | stdio | 同 binwalk 挂载 |
 | `cyberchef-mcp/` | `proteus-mcp-cyberchef:latest` | 3（bake/batch_bake/magic） | stdio | 依赖 `proteus-cyberchef-server` 容器（见下） |
+| `hexstrike/` | `proteus-hexstrike:latest` | 上游 151 → **allow-list 6** | stdio（适配器） | 依赖 `proteus-hexstrike-server` 容器（见下） |
 
 上游来源（均 MIT/Apache）：
 - 前三者：`ismailbozkurt/mcp-security-hub`（FuzzingLabs 维护；README 里的
   `FuzzingLabs/` 路径与仓库不一致，以实际 clone 为准）；
 - `cyberchef-mcp`：`slouchd/cyberchef-api-mcp-server`；
-- Chef 服务端：`gchq/CyberChef-server`（容器 `proteus-cyberchef-server`）。
+- Chef 服务端：`gchq/CyberChef-server`（容器 `proteus-cyberchef-server`）；
+- `hexstrike/`：`0x4m4/hexstrike-ai` v6.0（server + MCP 适配器两文件纳管）。
 
 ## 本地补丁（为什么不是直接上游构建）
 
@@ -31,6 +33,15 @@ T0（规划：DSH高度融合与工具生态补强）落地的四个容器化 MC
 5. **cyberchef-mcp 自建 Dockerfile**：官方用 uv + ghcr base + BuildKit bind
    mount，本地耦合深；改为 python:3.12-slim + 钉版依赖 + `--no-deps` 装本体
    （pyproject 的 `mcp>=1.6.0` 过松，pip 全新解析会 ResolutionImpossible）。
+6. **hexstrike 收窄三件**：① 工具集只装基线 6 件（nikto 实测不在 bookworm 源，
+   E: Unable to locate package；云工具/msf/wpscan 依赖过重按需再扩）；
+   ② 去掉 angr/pwntools（实测只出现在生成的模板字符串里，非运行时依赖）、
+   把上游写错的 `fastmcp` 依赖修正为 `mcp==1.18.0`（代码实际
+   `from mcp.server.fastmcp import FastMCP`）；③ **tool_filter allow-list 6 个**
+   ——上游 151 工具里混有 `create_file/delete_file/execute_python_script/
+   install_python_package/execute_command` 等任意执行面，必须收紧后才准接入
+   （allow：nmap_scan / nmap_advanced_scan / dirb_scan / hydra_attack /
+   john_crack / hashcat_crack；密码攻击三件套是本仓当前缺口）。
 
 ## 构建
 
@@ -41,8 +52,9 @@ python tools/build_mcp_images.py binwalk    # 只构建指定镜像
 
 ## 运行
 
-- binwalk / searchsploit / capa / cyberchef **适配器**：无需常驻——内核
-  `mcp_servers.json` 每次调用 `docker run -i --rm`（见各条目 `command`）。
+- binwalk / searchsploit / capa / cyberchef **适配器** / hexstrike **适配器**：
+  无需常驻——内核 `mcp_servers.json` 每次调用 `docker run -i --rm`（见各条目
+  `command`）。
 - **CyberChef Server 必须常驻**（适配器只是代理）：
 
 ```bash
@@ -52,6 +64,15 @@ docker run -d --name proteus-cyberchef --restart unless-stopped \
 curl -s -X POST http://127.0.0.1:3110/bake \
   -H 'Content-Type: application/json' \
   -d '{"input":"hello","recipe":[{"op":"To Base64","args":[]}]}'   # → {"value":"aGVsbG8="}
+```
+
+- **HexStrike Server 必须常驻**（工具在 server 侧执行；适配器只做 HTTP 转发）：
+
+```bash
+python tools/build_mcp_images.py hexstrike          # 构建 proteus-hexstrike:latest
+docker run -d --name proteus-hexstrike-server --restart unless-stopped \
+  -p 127.0.0.1:8888:8888 proteus-hexstrike:latest
+curl -s http://127.0.0.1:8888/health                # 健康检查
 ```
 
 （`proteus-cyberchef-server` 的构建件不在本目录——上游 Dockerfile 无需补丁；
@@ -64,6 +85,7 @@ python examples/mcp_e2e_probe.py binwalk        # 扫描 data/ctf/ghostpatch/fw_
 python examples/mcp_e2e_probe.py searchsploit   # 检索 "apache 2.4"
 python examples/mcp_e2e_probe.py capa           # 分析同一 ELF
 python examples/mcp_e2e_probe.py cyberchef      # hello → To Base64（需 chef-server 在跑）
+python examples/mcp_e2e_probe.py hexstrike      # nmap -sT 扫宿主 3110/4080（需 hexstrike-server 在跑）
 ```
 
 ## 未纳管（诚实记录）
@@ -72,3 +94,7 @@ python examples/mcp_e2e_probe.py cyberchef      # hello → To Base64（需 chef
   优先级最低，未构建。需要时按同套补丁流程处理。
 - **radare2-mcp**：r2mcp v1.8.8 的 `tools/list` 死锁（上游缺陷，证据见
   `examples/mcp_e2e_probe.py` 的 probe_radare2 注释），未接线。
+- **HexStrike 其余能力**（明确收窄，非遗漏）：nikto（bookworm 无包）、
+  wpscan（Ruby 依赖重）、metasploit（体积 GB 级）、浏览器 agent（需 Chrome）、
+  云工具（需云凭据）、`create_file/execute_command/install_python_package`
+  等任意执行面（**永久拒绝**，见补丁 6）。

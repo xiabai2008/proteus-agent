@@ -238,8 +238,8 @@ def test_shipped_mcp_servers_config():
     assert servers["seckb"].modes == ()           # 知识检索全模式可用（只读）
     assert servers["seckb"].command[-2:] == ("mcp",) or "seckb.cli" in " ".join(
         servers["seckb"].command)
-    # 容器化 MCP（T0）：四个 server 均为 docker run stdio 形态
-    for name in ("binwalk", "searchsploit", "capa", "cyberchef"):
+    # 容器化 MCP（T0/第 3 步）：五个 server 均为 docker run stdio 形态
+    for name in ("binwalk", "searchsploit", "capa", "cyberchef", "hexstrike"):
         assert servers[name].transport == "stdio"
         assert servers[name].command[:2] == ("docker", "run")
 

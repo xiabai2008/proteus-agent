@@ -211,3 +211,19 @@ F 项是"第四步"——深度融合；T 项是"工具面打开"——不再局
   pip 解析冲突）。
 - 未纳管（诚实记录）：yara-mcp（基础镜像当时不可达 + 优先级最低）；
   radare2-mcp（上游 tools/list 死锁，维持归档与三条跟进选项）。
+
+**第 3 步·HexStrike 容器化评估 ✅（2026-09-23 晚）**
+- 结论：**收窄接入**。上游 151 个 MCP 工具里混有 `create_file/modify_file/
+  delete_file/execute_python_script/install_python_package/execute_command`
+  等任意执行面，必须先过 tool_filter（§三-1 已就绪）——allow-list 收紧到 **6 个**：
+  `nmap_scan / nmap_advanced_scan / dirb_scan / hydra_attack / john_crack /
+  hashcat_crack`（**密码攻击三件套为本仓新增能力**；其余为基线覆盖或依赖过重）。
+- 精简容器 `proteus-hexstrike:latest`：slim 基础 + 6 基线工具（apt）+ flask/
+  selenium/mitmproxy 等运行依赖（pip）；剔除 angr/pwntools（实测只为模板字符串）、
+  修正上游错误的 fastmcp 依赖（实际是 `mcp.server.fastmcp`，钉 1.18.0）。
+  两进程形态：`proteus-hexstrike-server` 容器常驻 127.0.0.1:8888（工具执行方），
+  适配器 `docker run -i` 按需拉起（HTTP 转发为 stdio MCP）。
+- 明确不收窄不行的理由与不收窄的项（nikto 无包 / wpscan / msf / 云 / 浏览器
+  agent）见 `docker/mcp/README.md`「未纳管」。
+- 构建件纳管 `docker/mcp/hexstrike/`（server+adapter 两文件 + 依赖收窄清单）；
+  `tools/build_mcp_images.py` 同步纳入。

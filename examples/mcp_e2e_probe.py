@@ -104,6 +104,17 @@ def probe_cyberchef() -> int:
                                            "recipe": [{"op": "To Base64"}]}))
 
 
+def probe_hexstrike() -> int:
+    # 依赖：proteus-hexstrike-server 容器在宿主 127.0.0.1:8888 运行。
+    # 容器内无 NET_RAW 权限 → 用 -sT（TCP connect 扫）；目标取宿主两个
+    # 已知端口（cyberchef 3110 / DSH GUI 4080），快且结果确定。
+    return _probe("hexstrike", "",
+                  lambda reg: reg.execute("hexstrike_nmap_scan",
+                                          {"target": "host.docker.internal",
+                                           "scan_type": "-sT",
+                                           "ports": "3110,4080"}))
+
+
 PROBES = {"rayscan": probe_rayscan,
           "chameleon": probe_chameleon,
           "seckb": probe_seckb,
@@ -111,7 +122,8 @@ PROBES = {"rayscan": probe_rayscan,
           "binwalk": probe_binwalk,
           "searchsploit": probe_searchsploit,
           "capa": probe_capa,
-          "cyberchef": probe_cyberchef}
+          "cyberchef": probe_cyberchef,
+          "hexstrike": probe_hexstrike}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in PROBES:
