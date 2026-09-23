@@ -112,10 +112,13 @@ def test_drift_detects_stale_and_missing_files(tmp_path):
         (dst / name).write_text("old\n", encoding="utf-8")
 
     problems = dsh_install.drift(dst)
-    # 四个源文件全都不一致：两个内容不同、两个缺失
-    assert len(problems) == 4, problems
-    assert any("已过期" in p for p in problems)
-    assert any("缺少" in p for p in problems)
+    joined = "\n".join(problems)
+    # 按内容断言而非硬数：清单随 preset 演进（新增 mjs 时不该挂）
+    assert "agent.cordis.yml 已过期" in joined
+    assert "preset.yml 已过期" in joined
+    assert "缺少 proteus-persona.mjs" in joined
+    assert "缺少 proteus-tools-policy.mjs" in joined
+    assert "缺少 proteus-commands.mjs" in joined
 
 
 def test_drift_reports_missing_directory(tmp_path):

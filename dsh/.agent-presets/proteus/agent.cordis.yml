@@ -37,7 +37,7 @@
 
 # The preset's own persona, shadowing the deployment default for this agent.
 # `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
-# ── Proteus 专属行 1/2：人格 ───────────────────────────────────────────────
+# ── Proteus 专属行 1/4：人格 ───────────────────────────────────────────────
 # 人格由随 preset 的本地插件注册：挂载时读取 Proteus 仓库的 prompts/ 下人格
 # 文件，注册成 deployment:persona-prefix/suffix 分区，遮蔽部署默认人格。
 # 提示词以仓库文件为唯一来源，不在此复制。路径经 !!js 读环境变量
@@ -287,7 +287,7 @@
   name: '@deepseek-ai/dsh-plugin-manager/tools'
   disabled: true
 
-# ── Proteus 专属行 2/3：目标动作裁决（preset 作用域） ──────────────────────
+# ── Proteus 专属行 2/4：目标动作裁决（preset 作用域） ──────────────────────
 #
 # 为什么这一行必须在 preset 里而不是 host 平面 bundle 里：`tools/pre-execute`
 # 的派发是**作用域过滤**的——host 平面（bundle/root）的监听收不到 preset
@@ -314,7 +314,16 @@
     shellTools: ['pwsh', 'bash']
     spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
 
-# ── Proteus 专属行 3/3：内核 MCP 客户端 ────────────────────────────────────
+# ── Proteus 专属行 3/4：人机命令（F2/F3，2026-09-23） ──────────────────────
+#
+# /proteus-mode：查看/设置内核会话默认模式（写仓库 data/session-mode.json，
+#   内核逐次读取——无需重启内核进程）。
+# /proteus-evidence：证据链校验 + 作战记录汇总（spawn 内核 CLI，短命进程）。
+# 只注册命令、不做裁决（机制与审计仍在行 2/4 的 tools-policy）。
+- id: proteus-commands
+  name: './proteus-commands.mjs'
+
+# ── Proteus 专属行 4/4：内核 MCP 客户端 ────────────────────────────────────
 #
 # 一个 mcp-client 实例 = 一个外部 MCP server。工具在会话里以
 # `mcp__<serverName>__<rawName>` 出现，因此 serverName 取 `proteus`，

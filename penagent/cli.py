@@ -190,6 +190,14 @@ def cmd_missions(args) -> int:
     return 0
 
 
+def cmd_evidence(args) -> int:
+    """证据链校验 + 作战记录汇总（与 MCP 工具 pentest_evidence 共用一份实现）。"""
+    from penagent.report import evidence_report
+
+    print(evidence_report(args.data, getattr(args, "mission", "") or ""))
+    return 0
+
+
 def cmd_verify(args) -> int:
     evidence = EvidenceChain(Path(args.data) / "chain.jsonl")
     v = evidence.verify()
@@ -333,10 +341,14 @@ def main(argv: list[str] | None = None) -> int:
         ("skills", cmd_skills, "经验库技能"),
         ("missions", cmd_missions, "作战记录"),
         ("verify", cmd_verify, "证据链校验"),
+        ("evidence", cmd_evidence, "证据链+作战记录汇总（人读，/proteus-evidence 用）"),
         ("dsh-sync", cmd_dsh_sync, "导入 DSH 会话事件到证据链（审计桥）"),
     ):
         p = sub.add_parser(name, help=help_t)
         p.add_argument("--data", default="data")
+        if name == "evidence":
+            p.add_argument("--mission", default="",
+                           help="看指定任务明细（缺省列最近任务）")
         if name == "dsh-sync":
             p.add_argument("--spool", default="",
                            help="宿主桥落的事件文件（缺省 <data>/dsh-events.jsonl）")

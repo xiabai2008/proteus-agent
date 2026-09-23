@@ -181,3 +181,117 @@ def test_server_without_default_mode_keeps_legacy_behavior(tmp_path):
     assert server._agent().mode is None
 
 
+
+
+# ----------------------------------------------------------------------
+# F1/F2/F3：进度流 + 会话模式 + 证据摘要（2026-09-23）
+# ----------------------------------------------------------------------
+def test_set_mode_writes_session_file_and_rejects_unknown(server, tmp_path):
+    r = _call(server, "tools/call",
+              {"name": "pentest_set_mode", "arguments": {"mode": "ctf-web"}},
+              msg_id=21)
+    payload = json.loads(r["result"]["content"][0]["text"])
+    assert payload["ok"] is True and payload["mode"] == "ctf-web"
+    state = Path(server.data_dir) / "session-mode.json"
+    assert state.exists() and json.loads(state.read_text(encoding="utf-8"))["mode"] == "ctf-web"
+
+    r2 = _call(server, "tools/call",
+               {"name": "pentest_set_mode", "arguments": {"mode": "ghost-mode"}},
+               msg_id=22)
+    assert r2["result"]["isError"] is True
+    # 拒绝不覆盖已写入的值
+    assert json.loads(state.read_text(encoding="utf-8"))["mode"] == "ctf-web"
+
+    r3 = _call(server, "tools/call",
+               {"name": "pentest_set_mode", "arguments": {}}, msg_id=23)
+    payload3 = json.loads(r3["result"]["content"][0]["text"])
+    assert payload3["mode"] == "ctf-web" and payload3["source"] == "会话"
+
+
+def test_agent_resolves_session_mode_with_correct_priority(tmp_path):
+    from penagent.mcp import PentestMCPServer
+
+    # 会话文件 > 服务端默认；显式参数 > 会话文件
+    srv = PentestMCPServer(data_dir=str(tmp_path / "data"),
+                           default_mode="pentest-standard")
+    (Path(srv.data_dir) / "session-mode.json").write_text(
+        json.dumps({"mode": "ctf-web"}), encoding="utf-8")
+    assert srv._agent().mode.id == "ctf-web"
+    assert srv._agent(mode_id="ctf-crypto").mode.id == "ctf-crypto"
+
+    # 文件缺失/损坏时回落服务端默认（fail-open）
+    (Path(srv.data_dir) / "session-mode.json").write_text("{broken", encoding="utf-8")
+    assert srv._agent().mode.id == "pentest-standard"
+
+
+def test_progress_notifications_emitted(server, monkeypatch):
+    """tools/call 带 _meta.progressToken 时，任务事件转成 notifications/progress。"""
+    captured = []
+
+    class _FakeAgent:
+        def __init__(self, on_event):
+            self.on_event = on_event
+
+        def run(self, target, objective):
+            self.on_event({"type": "mission_start", "mission": "m1"})
+            self.on_event({"type": "step", "step": 1, "tool": "port_scan", "ok": True})
+            self.on_event({"type": "done", "mission": "m1", "outcome": "success"})
+
+            class _R:
+                outcome = "success"
+
+                def to_dict(self):
+                    return {"outcome": "success", "steps": 1}
+            return _R()
+
+    monkeypatch.setattr(
+        type(server), "_agent",
+        lambda self, authorize=False, mode_id="", on_event=None: _FakeAgent(on_event))
+    monkeypatch.setattr(server, "_notify",
+                        lambda method, params: captured.append((method, params)))
+
+    r = _call(server, "tools/call",
+              {"name": "pentest_run",
+               "arguments": {"target": "http://x", "objective": "t"},
+               "_meta": {"progressToken": "tok-1"}}, msg_id=31)
+    assert r["result"]["isError"] is False
+    progress = [p for m, p in captured if m == "notifications/progress"]
+    assert len(progress) == 3
+    assert all(p["progressToken"] == "tok-1" for p in progress)
+    assert "port_scan" in progress[1]["message"]
+
+
+def test_no_progress_token_no_notifications(server, monkeypatch):
+    """未带进度令牌：不发任何进度通知（静默降级）。"""
+    captured = []
+
+    class _FakeAgent:
+        def __init__(self, on_event):
+            self.on_event = on_event
+
+        def run(self, target, objective):
+            assert self.on_event is None  # 无令牌 → 不注入回调
+
+            class _R:
+                outcome = "success"
+
+                def to_dict(self):
+                    return {"outcome": "success"}
+            return _R()
+
+    monkeypatch.setattr(
+        type(server), "_agent",
+        lambda self, authorize=False, mode_id="", on_event=None: _FakeAgent(on_event))
+    monkeypatch.setattr(server, "_notify",
+                        lambda method, params: captured.append(method))
+    _call(server, "tools/call",
+          {"name": "pentest_run",
+           "arguments": {"target": "http://x", "objective": "t"}}, msg_id=32)
+    assert captured == []
+
+
+def test_evidence_tool_returns_summary(server):
+    r = _call(server, "tools/call",
+              {"name": "pentest_evidence", "arguments": {}}, msg_id=41)
+    text = r["result"]["content"][0]["text"]
+    assert "证据链" in text

@@ -3,8 +3,9 @@
 MCP 工具（供外部 Agent 客户端调用）：
 - 底层工具：port_scan / http_probe / http_raw / dns_lookup / robots_fetch（安全被动）
            + poxiao_scan（危险，需 authorize=true）
-- 高层能力：pentest_run（LLM 决策完整任务）/ pentest_skills / pentest_missions
-           / pentest_reflect
+- 高层能力：pentest_run（LLM 决策完整任务，发 notifications/progress 进度流）
+           / pentest_skills / pentest_missions / pentest_reflect
+           / pentest_set_mode（会话级默认模式） / pentest_evidence（证据链与作战记录）
 
 协议：JSON-RPC 2.0 over stdio（initialize / tools/list / tools/call）。
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -33,12 +35,21 @@ SERVER_TOOLS = [
                          "mode 指定模式档案：pentest-standard（常规渗透与侦察）/"
                          "ctf-web / ctf-crypto（CTF 与解题任务选 ctf-*）——"
                          "决定工具白名单、权限档位、预算与判定器；"
-                         "省略时使用服务端配置的默认模式（未配置则不加模式约束）。"
+                         "省略时依次回落：会话默认模式（pentest_set_mode 设置）→ "
+                         "服务端配置的默认模式（未配置则不加模式约束）。"
                          "危险动作需 authorize=true。",
              parameters={"target": {"type": "string"},
                          "objective": {"type": "string"},
                          "mode": {"type": "string"},
                          "authorize": {"type": "boolean"}}),
+    ToolSpec(name="pentest_set_mode",
+             description="设置本会话默认模式（此后 pentest_run 未显式传 mode 时使用）。"
+                         "不传 mode 只查询当前值。",
+             parameters={"mode": {"type": "string"}}),
+    ToolSpec(name="pentest_evidence",
+             description="查看证据链校验状态与作战记录；传 mission_id 看指定任务明细，"
+                         "不传则列最近任务。",
+             parameters={"mission_id": {"type": "string"}}),
     ToolSpec(name="pentest_skills",
              description="列出经验库技能（按成功率排序）",
              parameters={}),
@@ -49,6 +60,18 @@ SERVER_TOOLS = [
              description="对指定任务反思并沉淀技能",
              parameters={"mission_id": {"type": "string"}}),
 ]
+
+
+def _progress_token(params: dict):
+    """从 tools/call 请求里取 MCP 进度令牌（params._meta.progressToken）。
+
+    部分客户端写 `meta` 不带下划线；都没有则返回 None（不发进度，静默降级）。
+    """
+    for key in ("_meta", "meta"):
+        meta = params.get(key)
+        if isinstance(meta, dict) and "progressToken" in meta:
+            return meta["progressToken"]
+    return None
 
 
 class PentestMCPServer:
@@ -93,30 +116,58 @@ class PentestMCPServer:
             self.default_mode = default_mode
 
     # ------------------------------------------------------------------
+    def _session_mode_path(self) -> Path:
+        return Path(self.data_dir) / "session-mode.json"
+
+    def _read_session_mode(self) -> str:
+        """读会话默认模式（文件缺失/损坏 → 空串，fail-open 不阻塞行程）。"""
+        try:
+            data = json.loads(self._session_mode_path().read_text(encoding="utf-8"))
+            return str(data.get("mode", "") or "")
+        except (OSError, ValueError):
+            return ""
+
+    def _write_session_mode(self, mode_id: str) -> None:
+        path = self._session_mode_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"mode": mode_id,
+                        "set_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                       ensure_ascii=False), encoding="utf-8")
+
     def _agent(self, authorize: bool = False,
-               mode_id: str = "") -> PenAgent:
+               mode_id: str = "",
+               on_event=None) -> PenAgent:
         """内层 ReAct Agent：复用服务端授权目标，按调用参数放大授权与选择模式。
 
         `--targets` 对 pentest_run 同样生效（此前被 `allowed_targets=None`
         丢掉，只剩默认回环）；`authorize` 是 pentest_run 的既有契约
         （工具描述里写明"危险动作需 authorize=true"），但只在这条路径上生效，
         且作用范围是**本次任务的注册表副本**——不改动服务端共享注册表。
-        `mode_id` 非空时按模式档案构建注册表（capability 白名单 / 沙箱档位 /
-        判定器 / 预算随之切换），未知 id 抛 ModeError 由调用方转 isError。
-        `mode_id` 为空且服务端配了 `default_mode` 时回落到该默认模式（R-1）；
-        两者皆无则走无模式路径（向后兼容）。
+        模式回落顺序（T1/F2 起）：调用参数 `mode_id` → 会话模式文件
+        （pentest_set_mode 写入）→ 服务端 `--default-mode`；未知 id 抛
+        ModeError 由调用方转 isError。`on_event` 为进度回调（发给 MCP 客户端）。
         """
         mode = None
         if mode_id:
             from penagent.modes import load_mode
 
             mode = load_mode(mode_id)
-        elif self._default_profile is not None:
-            # 未显式指定 mode：回落到服务端默认模式（R-1）。
-            # 不做这层回落时，不带 mode 的任务走 mode=None 分支——
-            # 沙箱裁决缺失（危险 CLI 工具直跑宿主）、记忆落 default 分区、
-            # 步数预算退回 12，等于模式约束完全失效（违反硬规则 1）。
-            mode = self._default_profile
+        else:
+            session_mode = self._read_session_mode()
+            if session_mode:
+                from penagent.modes import load_mode
+
+                try:
+                    mode = load_mode(session_mode)
+                except Exception:  # noqa: BLE001 —— 文件被外部写坏：回落，不阻塞
+                    mode = None
+            if mode is None and self._default_profile is not None:
+                # 未显式指定 mode：回落到服务端默认模式（R-1）。
+                # 不做这层回落时，不带 mode 的任务走 mode=None 分支——
+                # 沙箱裁决缺失（危险 CLI 工具直跑宿主）、记忆落 default 分区、
+                # 步数预算退回 12，等于模式约束完全失效（违反硬规则 1）。
+                mode = self._default_profile
         policy = Policy(allowed_targets=self.allowed_targets or None,
                         authorize=bool(authorize) or self.authorize,
                         mode=mode)
@@ -126,7 +177,8 @@ class PentestMCPServer:
             registry = self.registry.copy(gate=PolicyGate(policy))
         registry.gate = PolicyGate(policy)
         return PenAgent(registry, self.memory, self.evidence,
-                        self.llm, policy, max_steps=None, mode=mode)
+                        self.llm, policy, max_steps=None, mode=mode,
+                        on_event=on_event)
 
     # ------------------------------------------------------------------
     # MCP tools 定义
@@ -182,16 +234,78 @@ class PentestMCPServer:
                                      "message": f"不支持的方法: {method}"}})
 
     # ------------------------------------------------------------------
+    def _notify(self, method: str, params: dict) -> None:
+        """发送 JSON-RPC 通知（无 id 的消息行）。stdio 单线程内即写即冲。"""
+        try:
+            sys.stdout.write(json.dumps(
+                {"jsonrpc": "2.0", "method": method, "params": params},
+                ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except OSError:
+            pass  # 客户端已断：通知丢失不影响任务本体
+
+    def _progress_emitter(self, token):
+        """把内层任务事件转成 MCP notifications/progress（F1 进度流）。"""
+        def emit(event: dict) -> None:
+            etype = event.get("type", "")
+            if etype == "step":
+                message = (f"step {event.get('step')}: {event.get('tool')} "
+                           f"{'ok' if event.get('ok') else 'fail'}")
+            elif etype == "mission_start":
+                message = f"mission {event.get('mission')} 开始"
+            elif etype == "done":
+                message = (f"mission {event.get('mission')} 收口: "
+                           f"{event.get('outcome')}")
+            else:
+                message = str(etype)
+            self._notify("notifications/progress", {
+                "progressToken": token,
+                "progress": int(event.get("step") or 0),
+                "message": message})
+        return emit
+
+    # ------------------------------------------------------------------
     def _handle_call(self, msg_id, params: dict) -> dict:
         name = params.get("name", "")
         args = params.get("arguments") or {}
         try:
             if name == "pentest_run":
-                result = self._agent(authorize=bool(args.get("authorize")),
-                                     mode_id=str(args.get("mode") or ""))\
-                    .run(args.get("target", ""), args.get("objective", ""))
+                token = _progress_token(params)
+                agent = self._agent(
+                    authorize=bool(args.get("authorize")),
+                    mode_id=str(args.get("mode") or ""),
+                    on_event=(self._progress_emitter(token)
+                              if token is not None else None))
+                result = agent.run(args.get("target", ""),
+                                   args.get("objective", ""))
                 return self._result(msg_id, result.to_dict(),
                                     is_error=result.outcome != "success")
+            if name == "pentest_set_mode":
+                mode_id = str(args.get("mode") or "").strip()
+                if not mode_id:
+                    current = (self._read_session_mode()
+                               or self.default_mode or "")
+                    return self._result(msg_id, {
+                        "mode": current,
+                        "source": ("会话" if self._read_session_mode()
+                                   else ("服务端默认" if self.default_mode
+                                         else "未设置"))})
+                from penagent.modes import load_mode
+
+                try:
+                    profile = load_mode(mode_id)
+                except Exception as exc:  # noqa: BLE001 —— 未知 id 走结构化错误
+                    return self._result(msg_id, {"ok": False, "error": str(exc)},
+                                        is_error=True)
+                self._write_session_mode(mode_id)
+                return self._result(msg_id, {"ok": True, "mode": mode_id,
+                                             "label": profile.label})
+            if name == "pentest_evidence":
+                from penagent.report import evidence_report
+
+                text = evidence_report(self.data_dir,
+                                       str(args.get("mission_id") or ""))
+                return self._result(msg_id, text)
             if name == "pentest_skills":
                 skills = self.memory.list_skills(sort_by_rate=True)
                 return self._result(msg_id, [s.to_dict() for s in skills])

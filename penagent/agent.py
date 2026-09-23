@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from penagent.evidence import EvidenceChain
 from penagent.llm import LLMConfig, LLMError, chat_json
@@ -194,7 +194,8 @@ class PenAgent:
                  skill_policy: Optional["SkillPolicy"] = None,
                  mode: Optional[ModeProfile] = None,
                  verifier: Optional[Verifier] = None,
-                 max_steps: Optional[int] = None) -> None:
+                 max_steps: Optional[int] = None,
+                 on_event: Optional[Callable[[dict], None]] = None) -> None:
         self.mode = mode
         # 成功判定器：模式决定判据（CTF 挂 flag 正则，渗透挂证据链）；
         # 不传模式时沿用升级前的证据链语义（require_poc 关闭）
@@ -234,6 +235,8 @@ class PenAgent:
         if max_steps is None:
             max_steps = mode.budget.max_steps if mode is not None else 12
         self.max_steps = max_steps
+        # 进度事件回调（T1/F1）：None = 不外发；异常被吞（fail-open）
+        self.on_event = on_event
         # 时长预算（budget.max_minutes）：超限走"换策略收口"而非硬退出；
         # 不传模式时无时长上限（升级前行为）
         self.max_minutes = (mode.budget.max_minutes
@@ -353,6 +356,21 @@ class PenAgent:
         return self.llm.tier_models.get(tier) or None
 
     # ------------------------------------------------------------------
+    def _emit(self, **event) -> None:
+        """进度事件外发（fail-open）：观测通道坏了也绝不改任务语义。"""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(event)
+        except Exception:  # noqa: BLE001 —— 故意 fail-open（与审计桥同哲学）
+            pass
+
+    def _finish(self, mission) -> "MissionResult":
+        """收口统一出口：先发 done 事件再返回（run 内六个收口点共用）。"""
+        self._emit(type="done", mission=mission.mission_id,
+                   outcome=mission.outcome, steps=mission.steps)
+        return mission
+
     def run(self, target: str, objective: str,
             fingerprint: str = "", stealth: bool = False) -> MissionResult:
         mission_id = self.memory.new_mission(target, objective)
@@ -376,6 +394,8 @@ class PenAgent:
                 f"任务: {objective}\n"
                 f"当前时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")},
         ]
+        self._emit(type="mission_start", mission=mission_id,
+                   target=target, objective=objective)
         run_started = time.time()
         exhaust_reason = f"步数预算已用尽（max_steps={self.max_steps}）"
         time_exhausted = False
@@ -401,7 +421,7 @@ class PenAgent:
                 self.memory.finish(mission_id, mission.outcome,
                                    mission.summary)
                 self._record_skill_outcomes(False)
-                return mission
+                return self._finish(mission)
 
             self.evidence.append("decision", {
                 "step": step, "thought": decision.get("thought", "")})
@@ -423,7 +443,7 @@ class PenAgent:
                     self.memory.finish(mission_id, mission.outcome,
                                        mission.summary)
                     self._record_skill_outcomes(False)
-                    return mission
+                    return self._finish(mission)
                 mission.outcome = "success"
                 mission.summary = decision.get("summary", "")
                 mission.evidence_refs = list(verdict.evidence_refs)
@@ -433,7 +453,7 @@ class PenAgent:
                     "verdict": verdict.reason})
                 self.memory.finish(mission_id, mission.outcome)
                 self._record_skill_outcomes(True)
-                return mission
+                return self._finish(mission)
 
             tool = decision.get("tool", "")
             args = decision.get("args", {}) or {}
@@ -471,6 +491,8 @@ class PenAgent:
                 "step": step, "tool": tool, "args": args,
                 "ok": tool_result.ok, "output": str(tool_result.output)[:800],
             })
+            self._emit(type="step", mission=mission_id, step=step,
+                       tool=tool, ok=tool_result.ok)
             messages.append({
                 "role": "user",
                 "content": (f"工具 {tool} 执行结果:\n"
@@ -494,7 +516,7 @@ class PenAgent:
             mission.summary = f"步数预算耗尽且收口调用失败: {exc}"
             self.memory.finish(mission_id, mission.outcome, mission.summary)
             self._record_skill_outcomes(False)
-            return mission
+            return self._finish(mission)
 
         verdict = self.verifier.verify(
             decision, self.evidence,
@@ -509,11 +531,11 @@ class PenAgent:
                 "verdict": verdict.reason, "phase": "budget_concluded"})
             self.memory.finish(mission_id, mission.outcome)
             self._record_skill_outcomes(True)
-            return mission
+            return self._finish(mission)
 
         mission.outcome = "failed"
         mission.summary = (f"{exhaust_reason}，"
                            f"切换收口策略后仍未通过判定: {verdict.reason}")
         self.memory.finish(mission_id, mission.outcome, mission.summary)
         self._record_skill_outcomes(False)
-        return mission
+        return self._finish(mission)

@@ -156,3 +156,41 @@ F 项是"第四步"——深度融合；T 项是"工具面打开"——不再局
 - 跟进选项：① 上游提 issue / 换版本；② 借 `r2mcp -T` CLI 能力自制薄 MCP 包装；
   ③ 改试 GhidraMCP。证据与探针分支已留在 `examples/mcp_e2e_probe.py`。
 - CyberChef API MCP：未开始。
+
+**F1 进度流 + F2/F3 命令插件 ✅ 完成（2026-09-23 第二轮）**
+- F1：`PenAgent` 新增 `on_event` 回调（fail-open，异常不入任务语义），六个收口点
+  统一走 `_finish` 发 `done` 事件；`PentestMCPServer` 把 mission_start / step /
+  done 转成 MCP `notifications/progress`——**tools/call 带 `params._meta.progressToken`
+  才发**（无令牌静默降级）。诚实备注：当前 DSH 版 mcp-client 尚未渲染 progress
+  通知（上游能力），内核侧已按规范就绪，任意标准客户端（含后续 DSH 版本）可直接消费。
+- F2：内核新增 `pentest_set_mode` MCP 工具 + 模式回落链 **调用参数 → 会话文件
+  `data/session-mode.json` → `--default-mode`**；DSH 侧 `/proteus-mode [<id>]`
+  命令（写同一份文件——内核逐次读取，**无需重启内核进程**；未知 id 结构化拒绝）。
+- F3：内核新增 `pentest_evidence` MCP 工具 + `python -m penagent evidence` CLI
+  （共享 `penagent/report.py` 一份实现）；DSH 侧 `/proteus-evidence [<id>]` 命令
+  （spawn 短命 CLI，20s 超时；输出编码走 cli.py 既有 utf-8 兜底，真机验证无乱码）。
+- 测试：mcp 侧 +5（进度令牌三态 / 模式回落优先级与损坏文件回落 / 证据摘要）、
+  命令插件侧 +2（node 真加载插件调 handler，假仓库根 + 桩包全链路）；
+  另把 drift 测试从硬编码计数改为按内容断言（对 preset 演进免疫）。
+- preset 新增第三行 `proteus-commands`（专属行 3/4；全组合 4 行），已同步，
+  roster `broken=no`；命令名/返回契约按 `dsh-commands` 现行 API（`rawInput` +
+  `{kind,text}`），definitionId 可省。
+
+**F1 进度流 + F2/F3 命令插件 ✅ 完成（2026-09-23 第二轮）**
+- F1：`PenAgent` 新增 `on_event` 回调（fail-open，异常不入任务语义），六个收口点
+  统一走 `_finish` 发 `done` 事件；`PentestMCPServer` 把 mission_start / step /
+  done 转成 MCP `notifications/progress`——**tools/call 带 `params._meta.progressToken`
+  才发**（无令牌静默降级）。诚实备注：当前 DSH 版 mcp-client 尚未渲染 progress
+  通知（上游能力），内核侧已按规范就绪，任意标准客户端（含后续 DSH 版本）可直接消费。
+- F2：内核新增 `pentest_set_mode` MCP 工具 + 模式回落链 **调用参数 → 会话文件
+  `data/session-mode.json` → `--default-mode`**；DSH 侧 `/proteus-mode [<id>]`
+  命令（写同一份文件——内核逐次读取，**无需重启内核进程**；未知 id 结构化拒绝）。
+- F3：内核新增 `pentest_evidence` MCP 工具 + `python -m penagent evidence` CLI
+  （共享 `penagent/report.py` 一份实现）；DSH 侧 `/proteus-evidence [<id>]` 命令
+  （spawn 短命 CLI，20s 超时；输出编码走 cli.py 既有 utf-8 兜底，真机验证无乱码）。
+- 测试：mcp 侧 +5（进度令牌三态 / 模式回落优先级与损坏文件回落 / 证据摘要）、
+  命令插件侧 +2（node 真加载插件调 handler，假仓库根 + 桩包全链路）；
+  另把 drift 测试从硬编码计数改为按内容断言（对 preset 演进免疫）。
+- preset 新增第三行 `proteus-commands`（专属行 3/4；全组合 4 行），已同步，
+  roster `broken=no`；命令名/返回契约按 `dsh-commands` 现行 API（`rawInput` +
+  `{kind,text}`），definitionId 可省。
