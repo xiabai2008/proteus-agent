@@ -17,7 +17,7 @@ ToolRegistry。
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -33,6 +33,38 @@ SOURCE_MCP = "mcp"
 SOURCES = (SOURCE_FUNCTION, SOURCE_CLI, SOURCE_MCP)
 
 DEFAULT_MCP_SERVERS_JSON = Path(__file__).resolve().parent / "mcp_servers.json"
+
+# 外部 MCP 发现的全局预算（秒）。P0-1（2026-09-24）：只有逐 server timeout
+# 时，多个不可达 server 的最坏耗时是各自 timeout 之和（实测 6 个容器 server
+# ≈ 23 分钟，内核迟迟不进入 serve 循环）。这个默认值保证"无论配置写多长，
+# 发现阶段总时长有上界"；需要更长可显式传 discover_budget。
+DEFAULT_DISCOVER_BUDGET = 180.0
+
+
+def normalize_discover(value) -> Optional[list[str]]:
+    """把 `--discover-mcp` 的多种写法归一成 server 名单。
+
+    返回 None = 不发现；[] = 全部；[names] = 指定子集。
+
+    接受：None / False / "" （关）；True / "*" / "all"（全开）；
+    "a,b"（指定）；字符串序列（指定）。
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if text in ("", "0", "false", "no"):
+            return None
+        if text in ("*", "all", "1", "true", "yes"):
+            return []
+        return [part.strip() for part in text.split(",") if part.strip()]
+    if isinstance(value, (list, tuple, set)):
+        names = [str(x).strip() for x in value if str(x).strip()]
+        return names
+    return []
+
 
 
 @dataclass(frozen=True)
@@ -226,16 +258,45 @@ class ToolCenter:
         return {"tools": len(self._entries), "by_source": counts,
                 "servers": sorted(self._servers), "notes": list(self._notes)}
 
-    def discover_mcp(self, name: Optional[str] = None,
-                     probe: Callable = probe_server) -> dict:
+    def discover_mcp(self, name=None, probe: Callable = probe_server,
+                     budget: Optional[float] = None) -> dict:
         """连接外部 MCP Server 并把其工具登记进来（不可用则登记失败原因）。
+
+        `name`：None = 全部已声明的 server；字符串 = 单个（兼容旧调用）；
+        字符串序列 = 子集（`--discover-mcp seckb,chameleon` 走这条）。
+        名单里不存在的 server 会记一条 note，不抛异常。
+
+        `budget`：**全局预算（秒）**。P0-1（2026-09-24）新增——只有逐 server
+        的 timeout 时，多个不可达 server 的最坏耗时是各自 timeout 之和
+        （实测 6 个容器 server ≈ 23 分钟）。给全局预算后：① 剩余预算会
+        **夹住**单个 server 的 timeout（不让最后一个 server 独自吃掉 300s）；
+        ② 预算耗尽后的 server 直接跳过并记录原因，不再尝试。
 
         probe 可注入（测试用桩），默认走真实 stdio/http 探测。
         阻塞式：仅在显式调用时发生，内核启动不隐式连接外部服务。
         """
-        targets = ([self._servers[name]] if name else list(self._servers.values()))
+        import time
+
+        targets, missing = self._discover_targets(name)
+        for miss in missing:
+            self._notes.append(f"MCP server {miss} 未声明，已跳过")
         report: dict[str, dict] = {}
+        deadline = (time.monotonic() + budget
+                    if budget is not None and budget > 0 else None)
         for spec in targets:
+            if deadline is not None:
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    report[spec.name] = {
+                        "registered": 0, "filtered": 0,
+                        "error": f"全局预算耗尽（{budget:g}s）"}
+                    self._notes.append(
+                        f"MCP server {spec.name} 未注册: 全局预算耗尽"
+                        f"（{budget:g}s）")
+                    continue
+                if spec.timeout > remain:
+                    # 夹住 timeout：剩余预算不足以走完这个 server 的完整超时
+                    spec = replace(spec, timeout=remain)
             tools, reason = probe(spec)
             if reason:
                 report[spec.name] = {"registered": 0, "error": reason,
@@ -256,6 +317,24 @@ class ToolCenter:
                     f"MCP server {spec.name}: tool_filter 收窄，"
                     f"注册 {registered} / 过滤 {filtered}")
         return report
+
+    def _discover_targets(
+            self, name) -> tuple[list[MCPServerSpec], list[str]]:
+        """把 name 的三种写法归一成 (要探测的 server, 未声明的名字)。"""
+        if name is None:
+            return list(self._servers.values()), []
+        if isinstance(name, str):
+            names = [name]
+        else:
+            names = [str(x) for x in name if str(x)]
+        targets: list[MCPServerSpec] = []
+        missing: list[str] = []
+        for item in names:
+            if item in self._servers:
+                targets.append(self._servers[item])
+            else:
+                missing.append(item)
+        return targets, missing
 
     @staticmethod
     def _tool_filtered_out(server: MCPServerSpec, tool: dict) -> bool:
@@ -346,14 +425,19 @@ def build_center(*, with_builtins: bool = True, with_external_cli: bool = True,
                  with_mcp_servers: bool = True,
                  with_ctf_tools: bool = True,
                  with_adapters: bool = True,
-                 discover_mcp: bool = False) -> ToolCenter:
+                 discover_mcp=False,
+                 discover_budget: Optional[float] = DEFAULT_DISCOVER_BUDGET,
+                 ) -> ToolCenter:
     """组装默认注册中心（登记 + 声明；默认不连接外部 MCP Server）。
 
-    `discover_mcp=True` 时才真正连接 `mcp_servers.json` 声明的外部 server
-    （阻塞式逐个探测，超时见配置）。默认 False 是为避免启动被不可达的外部
-    服务拖住——取舍合理，但代价是这些能力须显式开启才可用（此前没有任何
-    生产路径调用 discover_mcp，声明的 seckb / rayscan / chameleon 全部悬空，
-    见 docs/修复待办清单.md R-14）。
+    `discover_mcp` 是**显式开关**，接受多种写法（`normalize_discover`）：
+    `True` / `"*"` = 连接全部声明的 server；`"seckb,chameleon"` = 只连指定
+    子集；`False` / `""` = 不连接（缺省，避免启动被不可达的外部服务拖住）。
+
+    真连接时受 `discover_budget`（秒）约束——全局预算耗尽即跳过剩余 server
+    并记 note，不让最坏耗时变成"各 server timeout 之和"（P0-1，2026-09-24：
+    实测 Docker 守护不可用时 6 个容器 server 合计约 23 分钟）。传 None 关闭
+    该上界（只在明确知道自己在做什么时用）。
 
     `with_adapters=True` 时把 PacketForge / RayScan 适配层一并登记。此前这
     两个适配层**只在 CLI 路径**注册，导致走本中心的 DSH / MCP 路径看不到它们
@@ -384,8 +468,9 @@ def build_center(*, with_builtins: bool = True, with_external_cli: bool = True,
                                      origin=origin)
     if with_mcp_servers:
         center.load_mcp_servers()
-        if discover_mcp:
+        names = normalize_discover(discover_mcp)
+        if names is not None:
             # 失败会在 center 的 notes 里留原因（discover_mcp 内部记录），
             # 不可达的 server 不注册其工具，不抛异常
-            center.discover_mcp()
+            center.discover_mcp(names or None, budget=discover_budget)
     return center

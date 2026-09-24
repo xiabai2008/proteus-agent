@@ -15,7 +15,10 @@ tools/call）。两种传输：
 （重定向意味着配置错误或中间人，宁可报错也不把会话 id 带去别的地址）。
 
 超时与失败处理：任何一步超时都干净杀掉子进程并抛 MCPClientError，
-由注册中心决定"不可用即不注册"（不静默降级）。
+由注册中心决定"不可用即不注册"（不静默降级）。**子进程退出（stdout EOF）
+按失败立即返回**，不等满 timeout——否则一个 0.2s 就崩掉的 server 会让
+每次探测白等一个 timeout（2026-09-24 实测：Docker 守护不可用时 6 个容器
+server 合计拖住内核启动约 23 分钟）。失败原因带上退出码与 stderr 尾巴。
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -149,7 +153,10 @@ class MCPClient:
     def __init__(self, spec: MCPServerSpec) -> None:
         self.spec = spec
         self._proc: Optional[subprocess.Popen] = None
-        self._queue: "queue.Queue[str]" = queue.Queue()
+        # 哨兵：stdout EOF 时放 None 进队列——等待者据此立即失败，而不是
+        # 等满 timeout（见 `_pump_stdout` 的实测教训）
+        self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._stderr_tail: "deque[str]" = deque(maxlen=20)
         self._next_id = 0
         self._session_id = ""
 
@@ -218,12 +225,64 @@ class MCPClient:
         except OSError as exc:
             raise MCPClientError(
                 f"{self.spec.name} 启动失败: {exc}") from exc
-        threading.Thread(target=self._pump, daemon=True).start()
+        proc = self._proc
+        threading.Thread(target=self._pump_stdout, args=(proc,),
+                         daemon=True).start()
+        threading.Thread(target=self._pump_stderr, args=(proc,),
+                         daemon=True).start()
 
-    def _pump(self) -> None:
-        assert self._proc is not None and self._proc.stdout is not None
-        for line in self._proc.stdout:
-            self._queue.put(line)
+    def _pump_stdout(self, proc: subprocess.Popen) -> None:
+        """读子进程 stdout，**EOF 时放哨兵**唤醒等待者。
+
+        实测教训（2026-09-24，P0-1）：子进程 0.2s 就退出时，旧实现（只把行
+        放进队列、EOF 后线程静默结束）会让 `_read_response` 一直等到
+        `spec.timeout` ——Docker 守护不可用时 6 个容器 server 各卡满自己的
+        timeout（300/60/300/120/300/300 ≈ 23 分钟），内核迟迟不进入 serve
+        循环，DSH 侧表现为"这个会话没有 mcp__proteus__*"。
+        """
+        try:
+            for line in proc.stdout:          # type: ignore[union-attr]
+                self._queue.put(line)
+        except (ValueError, OSError):
+            pass                              # 流被关闭：按 EOF 处理
+        finally:
+            self._queue.put(None)
+
+    def _pump_stderr(self, proc: subprocess.Popen) -> None:
+        """收 stderr 尾巴：既防管道写满死锁，又给失败原因。
+
+        stderr 此前接的是 PIPE 却没人读——子进程往 stderr 写满 64KB 就会
+        永久阻塞（另一类"卡满 timeout"）。同时 Docker 的错误信息就在 stderr
+        上（"cannot find the file specified" 之类），带上它，失败原因不必
+        再靠猜。
+        """
+        try:
+            for line in proc.stderr:          # type: ignore[union-attr]
+                self._stderr_tail.append(str(line).rstrip())
+        except (ValueError, OSError):
+            pass
+
+    def _gone_reason(self) -> str:
+        """子进程消失时的可读原因（退出码 + stderr 尾巴）。
+
+        必须在 `close()` **之前**调用——close 会把 `_proc` 置空。
+        """
+        proc = self._proc
+        code = None
+        if proc is not None:
+            try:
+                # EOF 与"进程被回收"之间有微小竞态：stdout 先关、退出码后到。
+                # 最多等 1s 拿退出码（有界，不会变成新的卡点）。
+                code = proc.wait(timeout=1.0)
+            except Exception:                 # noqa: BLE001
+                try:
+                    code = proc.poll()
+                except Exception:             # noqa: BLE001
+                    code = None
+        detail = f"退出码 {code}" if code is not None else "输出流已关闭"
+        tail = " | ".join(list(self._stderr_tail)[-3:])
+        reason = f"{self.spec.name} 进程已退出（{detail}）"
+        return f"{reason}：{tail}" if tail else reason
 
     def _read_response(self, msg_id: int) -> dict:
         import time
@@ -241,6 +300,11 @@ class MCPClient:
                 self.close()
                 raise MCPClientError(
                     f"{self.spec.name} 响应超时（{self.spec.timeout}s）")
+            if line is None:
+                # 哨兵：子进程已退出（EOF）。立即失败，不等满 timeout。
+                reason = self._gone_reason()
+                self.close()
+                raise MCPClientError(reason)
             line = line.strip()
             if not line:
                 continue

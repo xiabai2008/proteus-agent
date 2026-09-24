@@ -175,6 +175,128 @@ def test_probe_returns_reason_for_missing_command():
 
 
 # ----------------------------------------------------------------------
+# 3.5 启动健壮性（P0-1，2026-09-24）
+#
+# 实测背景：Docker 守护不可用时，6 个容器 MCP server 的子进程 0.2s 就退出，
+# 而旧实现（EOF 不唤醒等待者）让每个 server 卡满自己的 timeout，合计约 23
+# 分钟——内核迟迟不进入 serve 循环，DSH 侧表现为"没有 mcp__proteus__*"。
+# ----------------------------------------------------------------------
+def _exiting_spec(name: str, code: int = 3, stderr: str = "") -> MCPServerSpec:
+    """一启动就退出的 server（可带 stderr 输出），用于验证"立即失败"。"""
+    script = ("import sys;"
+              f"sys.stderr.write({stderr!r});"
+              "sys.stderr.flush();"
+              f"sys.exit({code})")
+    return MCPServerSpec(name=name, transport="stdio",
+                         command=(sys.executable, "-c", script),
+                         timeout=30.0)
+
+
+def test_probe_fails_fast_when_child_exits():
+    """子进程退出必须立即失败（EOF 感知），不能等满 timeout。
+
+    判据用时间上界：30s 的 timeout 下，实测旧实现耗时 >30s，新实现 <5s。
+    """
+    import time
+
+    t0 = time.monotonic()
+    tools, reason = probe_server(_exiting_spec("dead"))
+    elapsed = time.monotonic() - t0
+
+    assert tools == []
+    assert elapsed < 5.0, f"EOF 未唤醒等待者（耗时 {elapsed:.1f}s）"
+    assert "进程已退出" in reason
+
+
+def test_probe_reason_carries_exit_code_and_stderr_tail():
+    """失败原因要能定位：退出码 + stderr 尾巴（Docker 的报错就在 stderr 上）。"""
+    tools, reason = probe_server(
+        _exiting_spec("dead", code=125, stderr="docker: cannot find the file"))
+    assert tools == []
+    assert "退出码 125" in reason
+    assert "cannot find the file" in reason
+
+
+def test_discover_mcp_budget_skips_remaining_servers():
+    """全局预算：耗尽后剩余 server 直接跳过，不再逐个等 timeout。"""
+    import time
+
+    center = ToolCenter()
+    for name in ("s1", "s2", "s3"):
+        center._servers[name] = MCPServerSpec(name=name, transport="stdio",
+                                              command=(sys.executable, "-c", ""))
+
+    def _slow_probe(spec):
+        time.sleep(0.2)
+        return [], ""
+
+    report = center.discover_mcp(probe=_slow_probe, budget=0.05)
+
+    assert report["s1"]["registered"] == 0          # 第一个被探测（超时/无响应）
+    for name in ("s2", "s3"):
+        assert "全局预算耗尽" in report[name]["error"]
+    assert any("全局预算耗尽" in n for n in center.summary()["notes"])
+
+
+def test_discover_mcp_budget_clamps_single_server_timeout():
+    """剩余预算会夹住单个 server 的 timeout——最后一个 server 不能独吞 300s。"""
+    center = ToolCenter()
+    center._servers["s1"] = MCPServerSpec(name="s1", transport="stdio",
+                                          command=(sys.executable, "-c", ""),
+                                          timeout=300.0)
+    seen = {}
+
+    def _probe(spec):
+        seen["timeout"] = spec.timeout
+        return [], ""
+
+    center.discover_mcp(probe=_probe, budget=1.5)
+    assert 0 < seen["timeout"] <= 1.5
+
+
+def test_discover_mcp_accepts_name_subset():
+    """`--discover-mcp seckb,chameleon` 只连指定子集；未声明的名字记 note。"""
+    center = ToolCenter()
+    for name in ("a", "b", "c"):
+        center._servers[name] = MCPServerSpec(name=name, transport="stdio",
+                                              command=(sys.executable, "-c", ""))
+    probed = []
+
+    def _probe(spec):
+        probed.append(spec.name)
+        return [], ""
+
+    report = center.discover_mcp(["a", "c"], probe=_probe)
+    assert probed == ["a", "c"]
+    assert set(report) == {"a", "c"}
+
+    probed.clear()
+    center.discover_mcp("b", probe=_probe)          # 单字符串写法（旧调用兼容）
+    assert probed == ["b"]
+
+    probed.clear()
+    center.discover_mcp("nope", probe=_probe)
+    assert probed == []
+    assert any("nope" in n for n in center.summary()["notes"])
+
+
+def test_normalize_discover_forms():
+    """`--discover-mcp` 的写法归一：关 / 全开 / 子集 / 序列。"""
+    from penagent.registry import normalize_discover
+
+    assert normalize_discover(None) is None
+    assert normalize_discover(False) is None
+    assert normalize_discover("") is None
+    assert normalize_discover("false") is None
+    assert normalize_discover(True) == []
+    assert normalize_discover("*") == []
+    assert normalize_discover("all") == []
+    assert normalize_discover("seckb,chameleon") == ["seckb", "chameleon"]
+    assert normalize_discover(["a", "b"]) == ["a", "b"]
+    assert normalize_discover(" a , ,b ") == ["a", "b"]
+
+
+# ----------------------------------------------------------------------
 # 4. 验收点：新增工具不需要改内核代码
 # ----------------------------------------------------------------------
 def test_adding_tool_requires_no_kernel_change(tmp_path):
@@ -273,7 +395,7 @@ def test_build_center_default_does_not_connect_external_servers(monkeypatch):
 
     calls = []
 
-    def _spy(self, name=None, probe=None):
+    def _spy(self, name=None, probe=None, **kw):
         calls.append(name)
         return {}
 
@@ -288,13 +410,32 @@ def test_build_center_discover_flag_connects_external_servers(monkeypatch):
 
     calls = []
 
-    def _spy(self, name=None, probe=None):
+    def _spy(self, name=None, probe=None, **kw):
         calls.append(name)
         return {}
 
     monkeypatch.setattr(reg_mod.ToolCenter, "discover_mcp", _spy)
     reg_mod.build_center(discover_mcp=True)
     assert calls == [None]
+
+
+def test_build_center_discover_accepts_subset_and_budget(monkeypatch):
+    """`discover_mcp` 支持子集写法，且全局预算透传给 discover_mcp。"""
+    from penagent import registry as reg_mod
+
+    calls = []
+
+    def _spy(self, name=None, probe=None, budget=None):
+        calls.append((name, budget))
+        return {}
+
+    monkeypatch.setattr(reg_mod.ToolCenter, "discover_mcp", _spy)
+    reg_mod.build_center(discover_mcp="seckb,chameleon", discover_budget=30.0)
+    assert calls == [(["seckb", "chameleon"], 30.0)]
+
+    calls.clear()
+    reg_mod.build_center(discover_mcp="")
+    assert calls == []                       # 空串 = 不发现
 
 
 # ----------------------------------------------------------------------

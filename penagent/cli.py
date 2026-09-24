@@ -33,10 +33,12 @@ def _make_agent(args, registry=None, memory=None, evidence=None):
         # 统一走注册中心：模式可用性、CTF 工具、适配层（PacketForge /
         # RayScan）都在这里装配。此前无模式分支自行拼装 ToolRegistry 并
         # 单独注册 adapters，与带模式分支的工具集不一致（R-9）。
-        from penagent.registry import build_center
+        from penagent.registry import DEFAULT_DISCOVER_BUDGET, build_center
 
         reg = build_center(
-            discover_mcp=bool(getattr(args, "discover_mcp", False))
+            discover_mcp=getattr(args, "discover_mcp", False),
+            discover_budget=getattr(args, "discover_budget",
+                                    DEFAULT_DISCOVER_BUDGET),
         ).build_registry(mode)
     mem = memory or Memory(args.data)
     ev = evidence or EvidenceChain(Path(args.data) / "chain.jsonl")
@@ -120,11 +122,15 @@ def cmd_agents(args) -> int:
     实际挂载的注册表不一致（见 docs/修复待办清单.md R-9）。
     """
     from penagent.modes import load_mode
-    from penagent.registry import build_center
+    from penagent.registry import DEFAULT_DISCOVER_BUDGET, build_center
 
     mode_id = getattr(args, "mode", "") or ""
     mode = load_mode(mode_id) if mode_id else None
-    center = build_center(discover_mcp=getattr(args, "discover_mcp", False))
+    center = build_center(
+        discover_mcp=getattr(args, "discover_mcp", False),
+        discover_budget=getattr(args, "discover_budget",
+                                DEFAULT_DISCOVER_BUDGET),
+    )
     registry = center.build_registry(mode)
     if mode is not None:
         # 第二层过滤：与 PenAgent.__init__ 完全同款——只按 entry.modes 过滤
@@ -253,9 +259,13 @@ def cmd_dsh_sync(args) -> int:
 def cmd_mcp(args) -> int:
     """启动 MCP Server（stdio）：供 Claude/Codex/OpenCode 等客户端驱动。"""
     from penagent.mcp import PentestMCPServer
-    from penagent.registry import build_center
+    from penagent.registry import DEFAULT_DISCOVER_BUDGET, build_center
 
-    center = build_center(discover_mcp=getattr(args, "discover_mcp", False))
+    center = build_center(
+        discover_mcp=getattr(args, "discover_mcp", False),
+        discover_budget=getattr(args, "discover_budget",
+                                DEFAULT_DISCOVER_BUDGET),
+    )
     server = PentestMCPServer(data_dir=args.data,
                               allowed_targets=args.targets or None,
                               authorize=getattr(args, "authorize", False),
@@ -302,6 +312,8 @@ def cmd_gaps(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from penagent.registry import DEFAULT_DISCOVER_BUDGET
+
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -329,10 +341,17 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--data", default="data")
     p_run.add_argument("--rl-policy", default="data/rl/policy.json",
                        help="RL 策略 Q 表路径（不存在则跳过）")
-    p_run.add_argument("--discover-mcp", action="store_true",
+    p_run.add_argument("--discover-mcp", nargs="?", const="*", default="",
+                       metavar="SERVERS",
                        help="连接 mcp_servers.json 声明的外部 MCP Server"
-                            "（seckb 知识库 / RayScan / Chameleon）；默认不连接，"
+                            "（seckb 知识库 / RayScan / Chameleon）。"
+                            "不带值 = 全部；也可写子集："
+                            "--discover-mcp seckb,chameleon。默认不连接，"
                             "避免启动被不可达的外部服务拖住")
+    p_run.add_argument("--discover-budget", type=float,
+                       default=DEFAULT_DISCOVER_BUDGET,
+                       help="外部 MCP 发现的全局预算（秒，缺省 %(default)s）："
+                            "耗尽即跳过剩余 server")
     p_run.set_defaults(fn=cmd_run)
 
     p_ref = sub.add_parser("reflect", help="任务后反思（LLM 复盘→技能沉淀）")
@@ -344,9 +363,14 @@ def main(argv: list[str] | None = None) -> int:
     p_ag.add_argument("--data", default="data")
     p_ag.add_argument("--mode", default="",
                       help="只看该模式可见的工具（缺省列出全部已登记）")
-    p_ag.add_argument("--discover-mcp", action="store_true",
+    p_ag.add_argument("--discover-mcp", nargs="?", const="*", default="",
+                      metavar="SERVERS",
                       help="列出前先连接外部 MCP Server"
-                           "（seckb 知识库 / RayScan / Chameleon）")
+                           "（seckb 知识库 / RayScan / Chameleon）。"
+                           "不带值 = 全部；也可写子集")
+    p_ag.add_argument("--discover-budget", type=float,
+                      default=DEFAULT_DISCOVER_BUDGET,
+                      help="外部 MCP 发现的全局预算（秒，缺省 %(default)s）")
     p_ag.set_defaults(fn=cmd_agents)
 
     for name, fn, help_t in (
@@ -409,10 +433,18 @@ def main(argv: list[str] | None = None) -> int:
                        help="服务端默认模式 id：pentest_run 未显式指定 mode 时"
                             "回落到它（如 pentest-standard）。不配则该路径不加"
                             "模式约束——沙箱裁决缺失，危险工具直跑宿主")
-    p_mcp.add_argument("--discover-mcp", action="store_true",
+    p_mcp.add_argument("--discover-mcp", nargs="?", const="*", default="",
+                       metavar="SERVERS",
                        help="连接 mcp_servers.json 声明的外部 MCP Server"
-                            "（seckb 知识库 / RayScan / Chameleon）；默认不连接，"
+                            "（seckb 知识库 / RayScan / Chameleon）。"
+                            "不带值 = 全部；也可写子集："
+                            "--discover-mcp seckb,chameleon。默认不连接，"
                             "避免启动被不可达的外部服务拖住")
+    p_mcp.add_argument("--discover-budget", type=float,
+                       default=DEFAULT_DISCOVER_BUDGET,
+                       help="外部 MCP 发现的全局预算（秒，缺省 %(default)s）："
+                            "耗尽即跳过剩余 server（不让最坏耗时等于各 "
+                            "timeout 之和）")
     p_mcp.set_defaults(fn=cmd_mcp)
 
     p_gaps = sub.add_parser("gaps", help="技能盲区发现（能力进化分析）")
