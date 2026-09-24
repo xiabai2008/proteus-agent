@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-PLUGIN = ROOT / "dsh" / ".agent-presets" / "proteus" / "proteus-commands.mjs"
+PLUGIN = (ROOT / "dsh" / ".agent-presets" / "_shared"
+          / "proteus-commands.mjs")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node 不可用")

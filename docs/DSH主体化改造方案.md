@@ -156,6 +156,23 @@ roster 校验 / `--check` 全部按列表循环；`dsh/start-proteus.cmd` 的同
 
 ---
 
+## 六之补、执行记录（2026-09-24，阶段 0 完成）
+
+| # | 交付 | 提交 | 真机证据 |
+|---|---|---|---|
+| P0-1 | 启动变便宜：EOF 哨兵 + stderr 尾巴 + 全局预算 + 按名子集 | `5e54a33` | Docker 未起时 `--discover-mcp` 启动 **23 分钟 → 6.7s**，注册 49 工具 |
+| P0-2 | CTF 模式 allow 改真名 + 家族通配（fnmatch）+ 名单可解析性用例 | `d81f3d7` | `ctf-web`/`ctf-crypto` 下 `http_raw` → `allowed=True`；`nuclei_scan` 仍被拒 |
+| P0-3 | 工具面按模式裁剪（列表与执行同一判据）+ `listChanged` 通知 | `bf95551` | `pentest-standard` 33 / `ctf-web` 14 / `ctf-crypto` 11；CTF 工具首次真正可见 |
+| P0-4 | 会话授权入口（命令 + 裁决行同源）+ 自我授权防线 | `3d88aba` | 未授权目标被拒且拒因带 `/proteus-scope` 指引；授权后**下一次调用生效**；改写授权文件被拒 |
+| P0-5 | 模式贯通宿主裁决行（按会话模式决定档位） | `f2e82f8` | `ctf-web` 下范围内目标动作放行且留痕；越界仍 `ask` |
+| P0-6 | 三 preset（模板渲染 + 共享实现单份 + `--session-key` 隔离 + 旧目录迁移） | 本次 | roster 三个均未 broken；会话键隔离实测（A 写 B 读不到） |
+
+阶段 0 验收：全量 **480 passed / 15 skipped**；`dsh_install.py --check` 与
+`dsh_compat_check.py` 全绿。**尚未做的**：真机会话（起 web profile 选一个 preset
+走一轮"切模式 / 授权 / 裁决"）——阶段 1 开工前先补这一次冒烟。
+
+---
+
 ## 七、风险与开放问题
 
 1. **三 preset = 三个内核进程**（roster 在进程启动时挂载）：启动耗时与内存 ×3。P0-1 完成后每进程

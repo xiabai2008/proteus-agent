@@ -1,0 +1,3 @@
+name: Proteus CTF-Web
+description: CTF Web 解题（codec 链 / HTTP 原始证据 / 容器化 RE 工具；flag 判定）。仅用于授权范围内的受控安全实验。
+order: 6

@@ -1,8 +1,13 @@
 # The `proteus` agent preset — Proteus · 千面（多模式渗透测试 Agent）的 DSH 宿主接入。
 #
-# ⚠ 本文件 = **官方 standard preset 的 fork + 两行 Proteus 专属内容**。
+# ⚠ 本文件是**模板**：由 `tools/dsh_install.py` 渲染成三个 preset
+#   （proteus-pentest / proteus-ctf-web / proteus-ctf-crypto），占位符
+#   {{PRESET_ID}} / {{PRESET_LABEL}} / {{DEFAULT_MODE}} / {{PERSONA_PROMPT}}
+#   / {{SESSION_KEY}} 在同步时替换。**改这里就是改三个 preset**。
+#
+# ⚠ 基座 = **官方 standard preset 的 fork**。
 #   基座版本：deepseek-harness 0.1.6-alpha.2（2026-09-21 重新同步）。
-#   DSH 升级后若本 preset 在选择器里消失，先跑 roster 检查——
+#   DSH 升级后若 preset 在选择器里消失，先跑 roster 检查——
 #   `node --input-type=module -e "..."`（见 docs/DSH宿主接入指南.md 5.1）：
 #   基座里引用的包被改名/移除会得到 `broken=row "xxx" names a plugin that
 #   cannot be resolved`，而 **broken 的 preset 不会出现在选择器里**（无任何提示）。
@@ -45,10 +50,11 @@
 - id: persona
   name: './proteus-persona.mjs'
   config:
-    promptPath: !!js (process.env.PENTEST_WS || '') + '/proteus-agent/prompts/dsh-persona.md'
+    promptPath: !!js (process.env.PENTEST_WS || '') + '/proteus-agent/prompts/{{PERSONA_PROMPT}}'
     suffix: >-
-      本会话通过 mcp__proteus__* 工具驱动 Proteus 内核；模式（pentest-standard /
-      ctf-web / ctf-crypto）由内核侧 ModeProfile 决定，工具白名单与权限档位随之生效。
+      本会话 = {{PRESET_LABEL}}，默认模式 {{DEFAULT_MODE}}（通过 mcp__proteus__* 工具驱动
+      Proteus 内核；模式由内核侧 ModeProfile 决定，工具白名单与权限档位随之生效）。
+      切换场景用 /proteus-mode；授权新目标用 /proteus-scope（只有人能执行）。
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
@@ -319,21 +325,26 @@
     shellTools: ['pwsh', 'bash']
     spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
     # P0-4：会话授权文件（人工命令 /proteus-scope 写）——与内核读同一份，
-    # 生效白名单 = 上面的基线 ∪ 这份清单
-    scopePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-scope.json'
+    # 生效白名单 = 上面的基线 ∪ 这份清单。按 preset 分文件（{{SESSION_KEY}}）：
+    # 授权是安全边界，"在一个 preset 里授权、另一个 preset 自动生效"是意外行为。
+    scopePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-scope-{{SESSION_KEY}}.json'
     # P0-5：会话模式文件（/proteus-mode 写、内核读的同一份）——模式同时驱动
     # 宿主侧档位：ctf-* 放行范围内目标动作（CTF 环境即授权范围、工具密集），
     # 其余沿用 mode（ask）；越界目标不受这张表影响，一律至少 ask
-    modePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-mode.json'
+    modePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-mode-{{SESSION_KEY}}.json'
 
 # ── Proteus 专属行 3/4：人机命令（F2/F3，2026-09-23） ──────────────────────
 #
-# /proteus-mode：查看/设置内核会话默认模式（写仓库 data/session-mode.json，
+# /proteus-mode：查看/设置内核会话默认模式（写 data/session-mode-<key>.json，
 #   内核逐次读取——无需重启内核进程）。
+# /proteus-scope：查看/追加会话授权目标（只有人能执行；模型不能自我授权）。
 # /proteus-evidence：证据链校验 + 作战记录汇总（spawn 内核 CLI，短命进程）。
 # 只注册命令、不做裁决（机制与审计仍在行 2/4 的 tools-policy）。
 - id: proteus-commands
   name: './proteus-commands.mjs'
+  config:
+    # 会话状态文件按 preset 分（P0-6）：三个 preset 共用 data/ 时不能互串
+    sessionKey: '{{SESSION_KEY}}'
 
 # ── Proteus 专属行 4/4：内核 MCP 客户端 ────────────────────────────────────
 #
@@ -351,7 +362,7 @@
     transport: stdio
     serverName: proteus
     command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
-    args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'pentest-standard', '--discover-mcp']
+    args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', '{{DEFAULT_MODE}}', '--session-key', '{{SESSION_KEY}}', '--discover-mcp']
     cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
     env:
       PENTEST_LLM_BASE_URL: !!js process.env.PENTEST_LLM_BASE_URL ?? ''

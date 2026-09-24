@@ -270,6 +270,7 @@ def cmd_mcp(args) -> int:
                               allowed_targets=args.targets or None,
                               authorize=getattr(args, "authorize", False),
                               default_mode=getattr(args, "default_mode", ""),
+                              session_key=getattr(args, "session_key", ""),
                               center=center)
     print(f"XPentest MCP Server 就绪（tools/list 可查工具，"
           f"targets={args.targets or '127.0.0.1/localhost'}，"
@@ -286,21 +287,22 @@ def cmd_scope(args) -> int:
     from penagent import scope
 
     data = args.data
+    key = getattr(args, "session_key", "")
     if args.clear:
-        print(json.dumps({"targets": scope.clear_scope(data)},
+        print(json.dumps({"targets": scope.clear_scope(data, key)},
                          ensure_ascii=False))
         return 0
     if args.add:
-        current = scope.add_targets(data, args.add, note=args.note)
+        current = scope.add_targets(data, args.add, note=args.note, key=key)
         print(json.dumps({"targets": current}, ensure_ascii=False))
         return 0
     if args.remove:
-        current = scope.remove_targets(data, args.remove)
+        current = scope.remove_targets(data, args.remove, key=key)
         print(json.dumps({"targets": current}, ensure_ascii=False))
         return 0
-    current = scope.read_scope(data)
+    current = scope.read_scope(data, key)
     print(json.dumps({"targets": current,
-                      "file": str(scope.scope_path(data))},
+                      "file": str(scope.scope_path(data, key))},
                      ensure_ascii=False))
     return 0
 
@@ -431,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
                            help="清空会话授权（回到 --targets 基线）")
             p.add_argument("--note", default="",
                            help="授权来源说明（写进文件，便于事后审计）")
+            p.add_argument("--session-key", default="",
+                           help="会话状态文件键（与 mcp 的 --session-key 一致）")
         if name == "skills":
             p.add_argument("--seed", action="store_true",
                            help="写入预置技能种子（幂等；来源见 "
@@ -479,6 +483,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="外部 MCP 发现的全局预算（秒，缺省 %(default)s）："
                             "耗尽即跳过剩余 server（不让最坏耗时等于各 "
                             "timeout 之和）")
+    p_mcp.add_argument("--session-key", default="",
+                       help="会话状态文件键（P0-6）：多 preset 共用一个 data/ 时"
+                            "用不同的键把 session-mode/session-scope 分开，"
+                            "避免模式与授权互串。空 = 旧文件名（单 preset 兼容）")
     p_mcp.set_defaults(fn=cmd_mcp)
 
     p_gaps = sub.add_parser("gaps", help="技能盲区发现（能力进化分析）")

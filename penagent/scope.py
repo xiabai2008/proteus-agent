@@ -35,8 +35,17 @@ SESSION_SCOPE_FILE = "session-scope.json"
 Targets = Union[str, Iterable[str], None]
 
 
-def scope_path(data_dir: Union[str, Path]) -> Path:
-    return Path(data_dir) / SESSION_SCOPE_FILE
+def _file_name(key: str = "") -> str:
+    """按会话键分文件（P0-6）：三个 preset 共用 data/ 时不能互串。
+
+    空键 = 旧行为（`session-scope.json`），单 preset 场景保持兼容。
+    """
+    key = str(key or "").strip()
+    return f"session-scope-{key}.json" if key else SESSION_SCOPE_FILE
+
+
+def scope_path(data_dir: Union[str, Path], key: str = "") -> Path:
+    return Path(data_dir) / _file_name(key)
 
 
 def _normalize(targets: Targets) -> list[str]:
@@ -59,10 +68,10 @@ def _normalize(targets: Targets) -> list[str]:
     return seen
 
 
-def read_scope(data_dir: Union[str, Path]) -> list[str]:
+def read_scope(data_dir: Union[str, Path], key: str = "") -> list[str]:
     """读会话授权清单（缺失/损坏 → 空清单，不抛异常）。"""
     try:
-        data = json.loads(scope_path(data_dir).read_text(encoding="utf-8"))
+        data = json.loads(scope_path(data_dir, key).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, dict):
@@ -71,9 +80,9 @@ def read_scope(data_dir: Union[str, Path]) -> list[str]:
 
 
 def write_scope(data_dir: Union[str, Path], targets: Targets, *,
-                note: str = "") -> list[str]:
+                note: str = "", key: str = "") -> list[str]:
     """整体覆盖会话授权清单（幂等），返回写入后的清单。"""
-    path = scope_path(data_dir)
+    path = scope_path(data_dir, key)
     clean = _normalize(targets)
     payload = {"targets": clean,
                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -85,22 +94,23 @@ def write_scope(data_dir: Union[str, Path], targets: Targets, *,
 
 
 def add_targets(data_dir: Union[str, Path], targets: Targets, *,
-                note: str = "") -> list[str]:
+                note: str = "", key: str = "") -> list[str]:
     """追加授权（去重）；返回新清单。"""
-    merged = read_scope(data_dir)
+    merged = read_scope(data_dir, key)
     for item in _normalize(targets):
         if item not in merged:
             merged.append(item)
-    return write_scope(data_dir, merged, note=note)
+    return write_scope(data_dir, merged, note=note, key=key)
 
 
-def remove_targets(data_dir: Union[str, Path], targets: Targets) -> list[str]:
+def remove_targets(data_dir: Union[str, Path], targets: Targets,
+                   key: str = "") -> list[str]:
     """移除授权；返回新清单。"""
     drop = {t.lower() for t in _normalize(targets)}
-    kept = [t for t in read_scope(data_dir) if t.lower() not in drop]
-    return write_scope(data_dir, kept)
+    kept = [t for t in read_scope(data_dir, key) if t.lower() not in drop]
+    return write_scope(data_dir, kept, key=key)
 
 
-def clear_scope(data_dir: Union[str, Path]) -> list[str]:
+def clear_scope(data_dir: Union[str, Path], key: str = "") -> list[str]:
     """清空会话授权（回到只剩 `--targets` 基线）。"""
-    return write_scope(data_dir, [])
+    return write_scope(data_dir, [], key=key)

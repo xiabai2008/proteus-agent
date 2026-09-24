@@ -46,13 +46,75 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SRC = REPO / "dsh" / ".agent-presets" / "proteus"
+SRC_ROOT = REPO / "dsh" / ".agent-presets"
+SHARED = SRC_ROOT / "_shared"
+TEMPLATE = SHARED / "agent.cordis.template.yml"
+SHARED_FILES = ("proteus-persona.mjs", "proteus-tools-policy.mjs",
+                "proteus-commands.mjs")
 PATCH = REPO / "dsh" / "proteus.cordis.patch.yml"
 BRIDGE_NAME = "dsh-proteus-bridge"
 BRIDGE_SRC = REPO / "dsh" / "proteus-bridge"
 REQUIRED_FILES = ("preset.yml", "agent.cordis.yml")
 PROTECTED_TIERS = ("proteus-safe", "proteus-standard", "proteus-ctf")
 KEEP_BACKUPS = 3
+
+# 三个 preset（P0-6，2026-09-24 拍板 D1/D2）：同一份模板 + 同一份共享实现，
+# 差异只有"默认模式 / 人格文件 / 会话状态键 / 显示名与排序"。
+PRESETS: dict[str, dict[str, str]] = {
+    "proteus-pentest": {
+        "label": "渗透场景",
+        "mode": "pentest-standard",
+        "persona": "dsh-persona.md",
+        "session_key": "pentest",
+    },
+    "proteus-ctf-web": {
+        "label": "CTF Web 场景",
+        "mode": "ctf-web",
+        "persona": "dsh-persona-ctf.md",
+        "session_key": "ctf-web",
+    },
+    "proteus-ctf-crypto": {
+        "label": "CTF Crypto 场景",
+        "mode": "ctf-crypto",
+        "persona": "dsh-persona-ctf.md",
+        "session_key": "ctf-crypto",
+    },
+}
+
+
+def render_composition(preset_id: str) -> str:
+    """渲染 preset 组合文件（模板 + 该 preset 的取值）。
+
+    为什么用模板而不是三份拷贝（P0-6）：组合文件是官方 standard preset 的
+    fork（300+ 行），DSH 升级时要重新合成——三份拷贝就是三次合成、三处漂移。
+    差异只有四个占位符，渲染是纯字符串替换（`!!js` 行原样保留）。
+    """
+    cfg = PRESETS[preset_id]
+    text = TEMPLATE.read_text(encoding="utf-8")
+    for token, value in (
+        ("{{PRESET_ID}}", preset_id),
+        ("{{PRESET_LABEL}}", cfg["label"]),
+        ("{{DEFAULT_MODE}}", cfg["mode"]),
+        ("{{PERSONA_PROMPT}}", cfg["persona"]),
+        ("{{SESSION_KEY}}", cfg["session_key"]),
+    ):
+        text = text.replace(token, value)
+    return text
+
+
+def expected_files(preset_id: str) -> dict[str, str]:
+    """安装副本应有的全部文件内容（键 = 文件名）。
+
+    共享实现 `_shared/*.mjs` 按 preset 拷进去（DSH 只认"本目录相对文件"），
+    但**单一实现来源**在 `_shared/`——避免同一份代码三份拷贝各自漂移。
+    渲染后仍有未替换的占位符 = 模板写漏，直接报出来。
+    """
+    files = {name: (SHARED / name).read_text(encoding="utf-8")
+             for name in SHARED_FILES}
+    files["agent.cordis.yml"] = render_composition(preset_id)
+    files["preset.yml"] = (SRC_ROOT / preset_id / "preset.yml").read_text(
+        encoding="utf-8")
+    return files
 
 ROSTER_JS = """
 import { discoverPresets } from '@deepseek-ai/dsh-agent-presets'
@@ -88,24 +150,40 @@ def _is_reparse_point(path: Path) -> bool:
     return bool(attrs & reparse)
 
 
-def drift(dst: Path) -> list[str]:
-    """安装副本 vs 仓库的逐文件差异——"跑旧代码"的唯一可靠判据。"""
+def drift(dst: Path, preset_id: str = "") -> list[str]:
+    """安装副本 vs 仓库的逐文件差异——"跑旧代码"的唯一可靠判据。
+
+    `preset_id` 为空时按 `dst.name` 推断（调用方通常只给目录）。
+    """
+    preset_id = preset_id or dst.name
+    if preset_id not in PRESETS:
+        return [f"未知 preset：{preset_id}"]
     problems: list[str] = []
     if not dst.is_dir():
         return [f"preset 目录不存在：{dst}"]
-    for src_file in sorted(p for p in SRC.iterdir() if p.is_file()):
-        target = dst / src_file.name
+    expected = expected_files(preset_id)
+    for name, text in expected.items():
+        target = dst / name
         if not target.is_file():
-            problems.append(f"缺少 {src_file.name}（仓库里有）")
-        elif _sha(target) != _sha(src_file):
+            problems.append(f"缺少 {name}（仓库里有）")
+        elif target.read_text(encoding="utf-8") != text:
             problems.append(
-                f"{src_file.name} 已过期（安装 {target.stat().st_size} 字节 / "
-                f"仓库 {src_file.stat().st_size} 字节）")
+                f"{name} 已过期（安装 {target.stat().st_size} 字节 / "
+                f"仓库 {len(text.encode('utf-8'))} 字节）")
+    for stale in dst.iterdir():
+        if stale.is_file() and stale.name not in expected:
+            problems.append(f"{stale.name} 是多余文件（仓库里没有）——"
+                            f"旧版本残留？")
     return problems
 
 
 def _yaml_rows(path: Path) -> list[dict]:
     """读 composition 的插件行，**容忍未知 tag**（`!!js` 是自定义 tag）。"""
+    return _yaml_rows_text(path.read_text(encoding="utf-8"))
+
+
+def _yaml_rows_text(text: str) -> list[dict]:
+    """从文本解析插件行（与 `_yaml_rows` 同一实现，供渲染后的文本直接用）。"""
     import yaml
 
     class _Tolerant(yaml.SafeLoader):
@@ -120,17 +198,30 @@ def _yaml_rows(path: Path) -> list[dict]:
 
     _Tolerant.add_multi_constructor("!", _unknown)
     _Tolerant.add_multi_constructor("tag:yaml.org,2002:", _unknown)
-    data = yaml.load(path.read_text(encoding="utf-8"), Loader=_Tolerant)
+    data = yaml.load(text, Loader=_Tolerant)
     return [row for row in (data or []) if isinstance(row, dict)]
 
 
-def verify_preset(dst: Path) -> list[str]:
+def verify_preset(dst: Path, preset_id: str = "") -> list[str]:
     """校验装好的 preset 目录（经**目标路径**读，漏拷文件也抓得到）。"""
+    preset_id = preset_id or dst.name
     problems: list[str] = []
+    if preset_id not in PRESETS:
+        return [f"未知 preset：{preset_id}"]
     for name in REQUIRED_FILES:
         if not (dst / name).is_file():
             problems.append(
                 f"缺少必需文件 {name}（preset 会 broken，且在选择器里静默消失）")
+    # 模板渲染漏替换的占位符：会让行 config 变成字面量（静默失效）
+    rendered = dst / "agent.cordis.yml"
+    if rendered.is_file():
+        text = rendered.read_text(encoding="utf-8")
+        for token in ("{{PRESET_ID}}", "{{PRESET_LABEL}}", "{{DEFAULT_MODE}}",
+                      "{{PERSONA_PROMPT}}", "{{SESSION_KEY}}"):
+            if token in text:
+                problems.append(
+                    f"agent.cordis.yml 里还有未替换的占位符 {token}"
+                    f"（模板渲染漏了 token）")
     cfg = dst / "agent.cordis.yml"
     if not cfg.is_file():
         return problems
@@ -189,14 +280,24 @@ def verify_gate_consistency(preset: Path | None = None,
 
     三档全 `never`（无人值守最宽姿态）会被直接报出来。
     """
-    cfg = preset or (SRC / "agent.cordis.yml")
+    if preset is None:
+        # 三个 preset 的组合只差占位符，校验渲染后的第一份即可
+        return verify_gate_consistency_text(
+            render_composition(sorted(PRESETS)[0]), patch)
+    if not preset.is_file():
+        return []
+    return verify_gate_consistency_text(preset.read_text(encoding="utf-8"), patch)
+
+
+def verify_gate_consistency_text(text: str,
+                                 patch: Path | None = None) -> list[str]:
     patch_path = patch or PATCH
-    if not cfg.is_file() or not patch_path.is_file():
+    if not text or not patch_path.is_file():
         return []
 
     uses_authorize = False
     try:
-        rows = _yaml_rows(cfg)
+        rows = _yaml_rows_text(text)
     except Exception:                             # noqa: BLE001 - 解析问题另有检查
         return []
     for row in rows:
@@ -258,12 +359,14 @@ def check_bridge_entry(home: Path, profile: str) -> list[str]:
             f"{BRIDGE_SRC}"]
 
 
-def roster_check(home: Path) -> tuple[list[str], str]:
+def roster_check(home: Path, preset_ids: tuple[str, ...] | None = None
+                 ) -> tuple[list[str], str]:
     """用 DSH 自己的发现机制读一次 roster；返回 (问题, 说明)。
 
     `broken` 为空只说明"这份 preset 装得上"——它不评估 `!!js`、不看
     `command`/`cwd`，所以与 `verify_preset` 不是替代关系。
     """
+    want = preset_ids or tuple(PRESETS)
     node = shutil.which("node")
     if node is None:
         return [], "跳过 roster 检查（本机无 node）"
@@ -284,14 +387,20 @@ def roster_check(home: Path) -> tuple[list[str], str]:
             rows.append(json.loads(line))
     if not rows:
         return ["roster 里一个 preset 都没有——发现根可能不对"], ""
-    found = [r for r in rows if r.get("id") == "proteus"]
-    if not found:
-        return ["roster 里没有 proteus（目录名/位置不对，或目录是链接——"
-                "发现机制不跟随 reparse point，见模块头注释）"], ""
-    broken = found[0].get("broken")
-    if broken:
-        return [f"proteus 在 roster 里是 broken：{broken}"], ""
-    return [], f"roster OK（{len(rows)} 个 preset，proteus 未 broken）"
+    problems: list[str] = []
+    for preset_id in want:
+        found = [r for r in rows if r.get("id") == preset_id]
+        if not found:
+            problems.append(
+                f"roster 里没有 {preset_id}（目录名/位置不对，或目录是链接——"
+                f"发现机制不跟随 reparse point，见模块头注释）")
+            continue
+        broken = found[0].get("broken")
+        if broken:
+            problems.append(f"{preset_id} 在 roster 里是 broken：{broken}")
+    if problems:
+        return problems, ""
+    return [], f"roster OK（{len(rows)} 个 preset，{'/'.join(want)} 均未 broken）"
 
 
 # ----------------------------------------------------------------------
@@ -469,17 +578,20 @@ def _parse_start(value: str) -> float:
     return 0.0
 
 
-def live_check(profile: str, dst: Path) -> list[str]:
+def live_check(profile: str, dirs: list[Path]) -> list[str]:
     """改了的模块，正在跑的进程里**是不是真的生效了**。
 
     这条补的是最后一个静默失效面：文件同步对了、`--check` 也过了，但 Node 的
     ESM 缓存**不重启不更新**（指南 §5.1 记过这个坑）——进程仍在跑旧模块，而
-    从会话里完全看不出来。判据：进程启动时间 vs 安装文件的最新改动时间。
+    从会话里完全看不出来。判据：进程启动时间 vs 安装文件的最新改动时间
+    （三个 preset 取最大）。
     """
     procs = running_dsh(profile)
     if not procs:
         return []
-    newest = max((p.stat().st_mtime for p in dst.iterdir() if p.is_file()),
+    newest = max((p.stat().st_mtime
+                  for dst in dirs if dst.is_dir()
+                  for p in dst.iterdir() if p.is_file()),
                  default=0.0)
     if newest == 0.0:
         return []
@@ -681,14 +793,16 @@ def _remove_link(path: Path) -> None:
         path.unlink()
 
 
-def _backup_previous(home: Path, dst: Path, keep: int = KEEP_BACKUPS) -> str:
+def _backup_previous(home: Path, dst: Path, preset_id: str = "",
+                     keep: int = KEEP_BACKUPS) -> str:
     """把改动前的副本存到 preset 根**之外**（放根里会被当成一个 preset）。"""
     if not dst.is_dir():
         return ""
     import time
 
+    name = preset_id or dst.name
     root = home / "backups"
-    target = root / f"preset-proteus-{time.strftime('%Y%m%d%H%M%S')}"
+    target = root / f"preset-{name}-{time.strftime('%Y%m%d%H%M%S')}"
     try:
         target.mkdir(parents=True, exist_ok=True)
         for item in dst.iterdir():
@@ -696,36 +810,81 @@ def _backup_previous(home: Path, dst: Path, keep: int = KEEP_BACKUPS) -> str:
                 shutil.copy2(item, target / item.name)
     except OSError:
         return ""
-    old = sorted(p for p in root.glob("preset-proteus-*") if p.is_dir())
+    old = sorted(p for p in root.glob(f"preset-{name}-*") if p.is_dir())
     for stale in old[:-keep]:
         shutil.rmtree(stale, ignore_errors=True)
     return str(target)
 
 
-def install(home: Path) -> list[str]:
-    """把仓库的 preset 同步到 `$DSH_HOME`（幂等）。返回动作说明。"""
-    dst = home / ".agent-presets" / "proteus"
+def sync_preset(home: Path, preset_id: str) -> list[str]:
+    """把仓库里渲染后的 preset 同步到 `$DSH_HOME`（幂等）。"""
+    dst = home / ".agent-presets" / preset_id
     notes: list[str] = []
     if dst.exists() and _is_reparse_point(dst):
         _remove_link(dst)
-        notes.append("移除原有链接——DSH 的 preset 发现机制**不跟随 reparse point**，"
-                     "链接会让 preset 从选择器里静默消失")
+        notes.append(f"[{preset_id}] 移除原有链接——DSH 的 preset 发现机制"
+                     f"**不跟随 reparse point**，链接会让 preset 从选择器里静默消失")
     dst.mkdir(parents=True, exist_ok=True)
 
-    changed = [p.name for p in sorted(SRC.iterdir())
-               if p.is_file()
-               and (not (dst / p.name).is_file()
-                    or _sha(dst / p.name) != _sha(p))]
+    expected = expected_files(preset_id)
+    changed = []
+    for name, text in expected.items():
+        target = dst / name
+        if not target.is_file() or target.read_text(
+                encoding="utf-8") != text:
+            changed.append(name)
     if not changed:
-        notes.append("已是最新，无需同步")
+        notes.append(f"[{preset_id}] 已是最新，无需同步")
         return notes
-    backup = _backup_previous(home, dst)
+    backup = _backup_previous(home, dst, preset_id)
     for name in changed:
-        shutil.copy2(SRC / name, dst / name)
-    notes.append(f"已同步 {len(changed)} 个文件：{', '.join(changed)}")
+        (dst / name).write_text(expected[name], encoding="utf-8")
+    notes.append(f"[{preset_id}] 已同步 {len(changed)} 个文件："
+                 f"{', '.join(changed)}")
     if backup:
-        notes.append(f"改动前的副本：{backup}")
+        notes.append(f"[{preset_id}] 改动前的副本：{backup}")
     return notes
+
+
+def migrate_legacy(home: Path) -> list[str]:
+    """把旧的单 preset 目录 `proteus` 迁走（P0-6）。
+
+    旧目录由本安装器创建，现在被三个场景 preset 取代。**必须处理**：留着它，
+    选择器里会多出一个跑旧配置（单模式、共用 `session-mode.json`）的入口，
+    用户点进去看到的行为和预期不一致且没有任何提示——正是本项目一直在治的
+    那类静默失效。先备份（放到 preset 根之外），再移除。
+    """
+    legacy = home / ".agent-presets" / "proteus"
+    if not legacy.is_dir() or legacy.name in PRESETS:
+        return []
+    cfg = legacy / "agent.cordis.yml"
+    if not cfg.is_file():
+        return []
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    if "proteus-persona.mjs" not in text:
+        return []                       # 不是我们的目录，绝不动
+    backup = _backup_previous(home, legacy, "proteus")
+    if _is_reparse_point(legacy):
+        _remove_link(legacy)
+    else:
+        shutil.rmtree(legacy, ignore_errors=True)
+    note = "[迁移] 已移除旧单 preset 目录 proteus（由三个场景 preset 取代）"
+    return [f"{note}——备份：{backup}" if backup else note]
+
+
+def install(home: Path) -> list[str]:
+    """同步三个 preset（幂等）。返回动作说明。"""
+    notes: list[str] = migrate_legacy(home)
+    for preset_id in PRESETS:
+        notes += sync_preset(home, preset_id)
+    return notes
+
+
+def installed_dirs(home: Path) -> list[Path]:
+    return [home / ".agent-presets" / pid for pid in PRESETS]
 
 
 # ----------------------------------------------------------------------
@@ -766,12 +925,12 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     home = dsh_home(args.home)
-    dst = home / ".agent-presets" / "proteus"
+    dirs = installed_dirs(home)
     print(f"DSH home : {home}")
-    print(f"preset   : {dst}")
+    print(f"presets  : {', '.join(p.name for p in dirs)}")
 
     if args.launch:
-        return launch(args.profile, dst, port=args.port)
+        return launch(args.profile, dirs[0], port=args.port)
 
     if not args.check:
         for note in install(home):
@@ -797,17 +956,19 @@ def main(argv: list[str] | None = None) -> int:
             print("  - 端口已释放，可以启动新实例")
 
     problems: list[str] = []
-    problems += verify_preset(dst)
-    problems += [f"与仓库不同步：{d}" for d in drift(dst)]
+    for preset_id, dst in zip(PRESETS, dirs):
+        problems += [f"[{preset_id}] {p}" for p in verify_preset(dst, preset_id)]
+        problems += [f"[{preset_id}] 与仓库不同步：{d}"
+                     for d in drift(dst, preset_id)]
     problems += verify_patch()
-    problems += verify_gate_consistency()
+    problems += verify_gate_consistency(PRESETS and dirs[0] / "agent.cordis.yml")
     problems += verify_launcher()
     if not args.no_bundle_check:
         problems += check_bundle(home, args.profile)
         problems += check_bridge_entry(home, args.profile)
     notes: list[str] = []
     if not args.no_live:
-        problems += live_check(args.profile, dst)
+        problems += live_check(args.profile, dirs)
         bridge_problems, bridge_live_note = bridge_live_check(
             Path(args.spool) if args.spool else REPO / "data" / "dsh-events.jsonl")
         problems += bridge_problems
@@ -829,7 +990,7 @@ def main(argv: list[str] | None = None) -> int:
         if any("与仓库不同步" in p for p in problems):
             print("  → 同步：python tools/dsh_install.py（不带 --check）")
         return 1
-    print("接入健康：preset 与仓库同步、补丁完整、审计桥已接线且为链接")
+    print("接入健康：三个 preset 与仓库同步、补丁完整、审计桥已接线且为链接")
     return 0
 
 

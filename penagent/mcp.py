@@ -82,8 +82,12 @@ class PentestMCPServer:
                  allowed_targets: Optional[list[str]] = None,
                  center: Optional[ToolCenter] = None,
                  authorize: bool = False,
-                 default_mode: str = "") -> None:
+                 default_mode: str = "",
+                 session_key: str = "") -> None:
         self.data_dir = data_dir
+        # 会话状态文件按 preset 分（P0-6）：三个 preset 共用 data/ 时，
+        # 模式与授权不能互串（否则"选了 ctf-web 却按 pentest 跑"且无提示）
+        self.session_key = str(session_key or "").strip()
         # 授权目标与高危授权：服务端级（操作员给），不来自调用参数。
         # 目标规范化必须做：CLI 的 --targets 是 "a,b" 字符串，直接 list() 会
         # 炸成单字符、把白名单打成筛子（见 Policy.normalize_targets）
@@ -134,7 +138,7 @@ class PentestMCPServer:
         内核只能靠比对发现变化。变化时重建 Policy 与带 mode 的工具面，
         使新授权对底层工具、pentest_run、沙箱裁决**同时**生效（不需要重启）。
         """
-        scope = read_session_scope(self.data_dir)
+        scope = read_session_scope(self.data_dir, self.session_key)
         if scope == self._session_scope:
             return
         self._session_scope = scope
@@ -147,7 +151,10 @@ class PentestMCPServer:
 
     # ------------------------------------------------------------------
     def _session_mode_path(self) -> Path:
-        return Path(self.data_dir) / "session-mode.json"
+        """会话模式文件——按 `--session-key` 分文件（P0-6）。"""
+        name = (f"session-mode-{self.session_key}.json" if self.session_key
+                else "session-mode.json")
+        return Path(self.data_dir) / name
 
     def _read_session_mode(self) -> str:
         """读会话默认模式（文件缺失/损坏 → 空串，fail-open 不阻塞行程）。"""

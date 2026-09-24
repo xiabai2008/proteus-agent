@@ -29,6 +29,17 @@ export const inject = ['commands']
 
 const MODE_HINT = 'pentest-standard / ctf-web / ctf-crypto'
 
+/**
+ * 会话状态文件键（P0-6）：三个 preset 共用一个 data/ 时必须分文件，
+ * 否则"A preset 里切了模式、B preset 读到"且无任何提示。空串 = 旧文件名。
+ */
+let sessionKey = ''
+
+/** 按会话键拼状态文件名（与内核 penagent/mcp.py / scope.py 同口径）。 */
+function stateFile(kind) {
+  return sessionKey ? `${kind}-${sessionKey}.json` : `${kind}.json`
+}
+
 /** 仓库根（PENTEST_WS/proteus-agent）；未配置时返回空串。 */
 function repoRoot() {
   const ws = process.env.PENTEST_WS || ''
@@ -62,7 +73,7 @@ function handleMode(invocation) {
   if (!root) {
     return { kind: 'error', text: 'PENTEST_WS 未设置，定位不到 Proteus 仓库根。' }
   }
-  const statePath = join(root, 'data', 'session-mode.json')
+  const statePath = join(root, 'data', stateFile('session-mode'))
   const input = String(invocation.rawInput || '').trim()
   const modes = listModes(root)
 
@@ -160,7 +171,7 @@ async function handleScope(invocation) {
   if (!root) {
     return { kind: 'error', text: 'PENTEST_WS 未设置，定位不到 Proteus 仓库根。' }
   }
-  const scopePath = join(root, 'data', 'session-scope.json')
+  const scopePath = join(root, 'data', stateFile('session-scope'))
   const input = String(invocation.rawInput || '').trim()
   const usage = '用法: /proteus-scope [add <host[,host]> | remove <host> | clear]'
   if (!input || input === 'list') {
@@ -186,6 +197,7 @@ async function handleScope(invocation) {
                 verb === 'add' ? '--add' : verb === 'remove' ? '--remove' : '--clear']
   if (verb !== 'clear') args.push(targets)
   args.push('--note', 'DSH /proteus-scope（人工授权）')
+  if (sessionKey) args.push('--session-key', sessionKey)
   try {
     const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()
     const parsed = JSON.parse(out)
@@ -254,8 +266,9 @@ function handleAudit() {
   return { kind: 'success', text: lines.join('\n').slice(0, 4000) }
 }
 
-/** Cordis 应用入口：注册两个命令（definitionId 可省略，注册表不强制）。 */
-export function apply(ctx) {
+/** Cordis 应用入口：注册五个命令（definitionId 可省略，注册表不强制）。 */
+export function apply(ctx, config = {}) {
+  sessionKey = typeof config.sessionKey === 'string' ? config.sessionKey : ''
   ctx.commands.register({
     name: 'proteus-mode',
     description: `查看/设置 Proteus 内核会话默认模式（${MODE_HINT}）`,

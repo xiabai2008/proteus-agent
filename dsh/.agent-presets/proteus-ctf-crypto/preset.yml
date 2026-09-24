@@ -1,0 +1,3 @@
+name: Proteus CTF-Crypto
+description: CTF Crypto/Misc/RE 解题（RsaCtfTool / 一次性脚本 / 文件分析；flag 判定）。仅用于授权范围内的受控安全实验。
+order: 7

@@ -24,7 +24,8 @@ _spec.loader.exec_module(dsh_install)
 
 
 def _preset_dir(tmp_path: Path, body: str) -> Path:
-    dst = tmp_path / "proteus"
+    """假的安装副本目录（目录名必须是已知 preset id，drift/verify 才认）。"""
+    dst = tmp_path / "proteus-pentest"
     dst.mkdir(parents=True, exist_ok=True)
     (dst / "agent.cordis.yml").write_text(body, encoding="utf-8")
     (dst / "preset.yml").write_text("name: t\n", encoding="utf-8")
@@ -106,7 +107,7 @@ def test_verify_patch_requires_all_three_tiers(tmp_path):
 # 漂移：跑旧代码的唯一可靠判据
 # ----------------------------------------------------------------------
 def test_drift_detects_stale_and_missing_files(tmp_path):
-    dst = tmp_path / "installed"
+    dst = tmp_path / "proteus-pentest"
     dst.mkdir()
     for name in ("agent.cordis.yml", "preset.yml"):
         (dst / name).write_text("old\n", encoding="utf-8")
@@ -121,20 +122,96 @@ def test_drift_detects_stale_and_missing_files(tmp_path):
     assert "缺少 proteus-commands.mjs" in joined
 
 
+def test_drift_flags_extra_file(tmp_path):
+    """多余文件（旧版本残留）也要报——三个 preset 并存时最容易留这种尾巴。"""
+    home = tmp_path / "dsh"
+    dsh_install.install(home)
+    dst = home / ".agent-presets" / "proteus-pentest"
+    (dst / "proteus-legacy.mjs").write_text("// stale\n", encoding="utf-8")
+
+    joined = "\n".join(dsh_install.drift(dst))
+    assert "多余文件" in joined and "proteus-legacy.mjs" in joined
+
+
 def test_drift_reports_missing_directory(tmp_path):
-    assert "不存在" in dsh_install.drift(tmp_path / "nope")[0]
+    assert "不存在" in dsh_install.drift(
+        tmp_path / "proteus-pentest")[0]
 
 
 def test_install_syncs_and_is_idempotent(tmp_path):
     home = tmp_path / "dsh"
     notes = dsh_install.install(home)
     assert any("已同步" in n for n in notes), notes
-    dst = home / ".agent-presets" / "proteus"
-    assert dsh_install.drift(dst) == []
-    assert dsh_install.verify_preset(dst) == []
+    for preset_id in dsh_install.PRESETS:
+        dst = home / ".agent-presets" / preset_id
+        assert dsh_install.drift(dst) == [], preset_id
+        assert dsh_install.verify_preset(dst) == [], preset_id
 
     again = dsh_install.install(home)
-    assert any("已是最新" in n for n in again), again
+    assert sum("已是最新" in n for n in again) == len(dsh_install.PRESETS), again
+
+
+def test_three_presets_differ_only_in_the_expected_places():
+    """P0-6：三个 preset 来自同一份模板——差异必须**只有**默认模式/人格/键。
+
+    这条挡的是"改了一个 preset 忘了另两个"：模板渲染保证这一点，用例只留一道
+    保险（直接对渲染产物做断言）。
+    """
+    rendered = {pid: dsh_install.render_composition(pid)
+                for pid in dsh_install.PRESETS}
+    our_tokens = ("{{PRESET_ID}}", "{{PRESET_LABEL}}", "{{DEFAULT_MODE}}",
+                  "{{PERSONA_PROMPT}}", "{{SESSION_KEY}}")
+    for pid, text in rendered.items():
+        cfg = dsh_install.PRESETS[pid]
+        for token in our_tokens:
+            assert token not in text, f"{pid} 渲染后仍有未替换占位符 {token}"
+        assert f"'{cfg['mode']}'" in text          # --default-mode 是本 preset 的
+        assert cfg["persona"] in text
+        assert cfg["session_key"] in text
+        assert "proteus-commands.mjs" in text      # 共享实现仍在行里
+
+    # 差异只在占位符位置：抹掉取值后三份应当逐字相同
+    def _blank(text: str) -> str:
+        for cfg in dsh_install.PRESETS.values():
+            for value in (cfg["mode"], cfg["persona"], cfg["session_key"],
+                          cfg["label"]):
+                text = text.replace(value, "@V@")
+        return text
+
+    blanks = {_blank(t) for t in rendered.values()}
+    assert len(blanks) == 1
+
+
+def test_shared_implementation_has_a_single_source():
+    """共享实现只允许在 `_shared/` 有一份——三份拷贝必然漂移。"""
+    shared = ROOT / "dsh" / ".agent-presets" / "_shared"
+    for name in dsh_install.SHARED_FILES:
+        assert (shared / name).is_file(), name
+    for pid in dsh_install.PRESETS:
+        preset_dir = ROOT / "dsh" / ".agent-presets" / pid
+        copies = [p.name for p in preset_dir.iterdir() if p.suffix == ".mjs"]
+        assert copies == [], f"{pid} 不应自带 .mjs 拷贝：{copies}"
+
+
+def test_migration_removes_legacy_single_preset(tmp_path):
+    """旧的单 preset 目录必须迁走：留着会出现"选了它却跑旧配置"的静默错配。"""
+    home = tmp_path / "dsh"
+    legacy = home / ".agent-presets" / "proteus"
+    legacy.mkdir(parents=True)
+    (legacy / "agent.cordis.yml").write_text(
+        "- id: persona\n  name: './proteus-persona.mjs'\n", encoding="utf-8")
+    (legacy / "proteus-persona.mjs").write_text("// old\n", encoding="utf-8")
+
+    notes = dsh_install.install(home)
+    assert any("迁移" in n for n in notes), notes
+    assert not legacy.exists()
+    assert list((home / "backups").glob("preset-proteus-*")), "迁移前应留备份"
+    # 别人的 preset（不含我们的标记）绝不动
+    other = home / ".agent-presets" / "liangshen"
+    other.mkdir()
+    (other / "agent.cordis.yml").write_text("- id: x\n", encoding="utf-8")
+    dsh_install.install(home)
+    assert other.is_dir()
 
 
 def test_install_replaces_a_link_with_a_real_directory(tmp_path):
@@ -144,7 +221,7 @@ def test_install_replaces_a_link_with_a_real_directory(tmp_path):
     所以这条同时断言**目标文件还在**。
     """
     home = tmp_path / "dsh"
-    dst = home / ".agent-presets" / "proteus"
+    dst = home / ".agent-presets" / "proteus-pentest"
     dst.parent.mkdir(parents=True)
     src = tmp_path / "real"
     src.mkdir()
@@ -162,33 +239,34 @@ def test_install_replaces_a_link_with_a_real_directory(tmp_path):
 def test_backup_lives_outside_the_preset_root(tmp_path):
     """备份不能放在 preset 根目录里——那会被发现机制当成一个 preset。"""
     home = tmp_path / "dsh"
-    dst = home / ".agent-presets" / "proteus"
+    dst = home / ".agent-presets" / "proteus-pentest"
     dst.mkdir(parents=True)
     (dst / "agent.cordis.yml").write_text("stale\n", encoding="utf-8")
     (dst / "preset.yml").write_text("stale\n", encoding="utf-8")
 
     dsh_install.install(home)
-    backups = list((home / "backups").glob("preset-proteus-*"))
+    backups = list((home / "backups").glob("preset-proteus-pentest-*"))
     assert len(backups) == 1
     assert (backups[0] / "agent.cordis.yml").read_text(encoding="utf-8") == "stale\n"
-    # preset 根里只应有 proteus 这一个目录
-    assert [p.name for p in (home / ".agent-presets").iterdir()] == ["proteus"]
+    # preset 根里只应有三个预设目录
+    assert sorted(p.name for p in (home / ".agent-presets").iterdir()) == \
+        sorted(dsh_install.PRESETS)
 
 
 def test_backup_keeps_only_the_newest_three(tmp_path):
     home = tmp_path / "dsh"
     dsh_install.install(home)
-    dst = home / ".agent-presets" / "proteus"
+    dst = home / ".agent-presets" / "proteus-pentest"
     for i in range(5):
         (dst / "preset.yml").write_text(f"v{i}\n", encoding="utf-8")
         dsh_install.install(home)
-    assert len(list((home / "backups").glob("preset-proteus-*"))) <= 3
+    assert len(list((home / "backups").glob("preset-proteus-pentest-*"))) <= 3
 
 
 def test_check_fails_on_drift(tmp_path, capsys):
     home = tmp_path / "dsh"
     dsh_install.install(home)
-    dst = home / ".agent-presets" / "proteus"
+    dst = home / ".agent-presets" / "proteus-pentest"
     (dst / "proteus-tools-policy.mjs").write_text("// stale\n", encoding="utf-8")
 
     rc = dsh_install.main(["--home", str(home), "--check", "--no-roster",
@@ -196,6 +274,7 @@ def test_check_fails_on_drift(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "与仓库不同步" in out and "已过期" in out
+    assert "[proteus-pentest]" in out                # 指出是哪个 preset
     assert "python tools/dsh_install.py" in out      # 给出修复命令
 
 
@@ -205,11 +284,11 @@ def test_check_fails_on_drift(tmp_path, capsys):
 def test_live_check_flags_process_older_than_installed_files(tmp_path, monkeypatch):
     home = tmp_path / "dsh"
     dsh_install.install(home)
-    dst = home / ".agent-presets" / "proteus"
+    dirs = dsh_install.installed_dirs(home)
     monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: [
         {"pid": 25904, "start": "2020-01-01T00:00:00", "cmd": "x"}])
 
-    problems = dsh_install.live_check("web", dst)
+    problems = dsh_install.live_check("web", dirs)
     assert len(problems) == 1
     assert "pid=25904" in problems[0] and "ESM 缓存" in problems[0]
 
@@ -219,17 +298,17 @@ def test_live_check_passes_when_process_started_after_files(tmp_path, monkeypatc
 
     home = tmp_path / "dsh"
     dsh_install.install(home)
-    dst = home / ".agent-presets" / "proteus"
+    dirs = dsh_install.installed_dirs(home)
     future = (datetime.datetime.now() + datetime.timedelta(minutes=1)).isoformat()
     monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: [
         {"pid": 1, "start": future, "cmd": "x"}])
-    assert dsh_install.live_check("web", dst) == []
+    assert dsh_install.live_check("web", dirs) == []
 
 
 def test_live_check_skips_without_running_process(tmp_path, monkeypatch):
     """没在跑就跳过——这条检查不该在"只装不跑"的场景下报错。"""
     monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: [])
-    assert dsh_install.live_check("web", tmp_path) == []
+    assert dsh_install.live_check("web", [tmp_path]) == []
 
 
 def test_verify_launcher_flags_lf_only_cmd(tmp_path):
