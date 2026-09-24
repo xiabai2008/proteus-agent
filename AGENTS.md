@@ -66,7 +66,10 @@
   `docs/修复待办清单.md` R-42。曾经唯一的那条 failed 是 lab 标记用例撞上工作机 8080 被别的服务
   占用（实测是 java/Burp Suite）：守卫按 `reachable()` 判靶在不在，任何在 8080 应答 HTTP 的服务
   都会让它失灵——**已修**：新增身份判据 `identifies()`（首页须带靶自己的身份标记），三处守卫换用。
-  skip 面（16 条）**不等于通过**：Docker 一上线就抓出 3 条从未执行过的死缺陷（R-44）。CI 覆盖
+  skip 面（16 条）**不等于通过**：Docker 一上线就抓出 3 条从未执行过的死缺陷（R-44）。
+  `pytest.ini` 已钉收集边界（`testpaths = tests` + `norecursedirs` 排除 `data`）：`data/` 下会落
+  克隆的第三方仓库（自带 tests/），裸 `pytest` 递归进去会直接收集中断——故 `pytest` /
+  `pytest tests` / `pytest .` 三种写法都可跑（均收集 542 条、零错误）。CI 覆盖
   Windows py3.12/3.13（必过）+ Linux（实验性），并在 pytest 之后跑
   `python examples/benchmark.py --suite ctf` 作为**能力闸门**（33 题纯离线，约 5 秒；有失败即非零退出）。
 - DSH 阶段 0+1 已交付（2026-09-24）：启动健壮性（外部 MCP 发现 23 分钟 → 6.7s）·
