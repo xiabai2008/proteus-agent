@@ -390,7 +390,7 @@ def run_lab_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
     if examples not in sys.path:
         sys.path.insert(0, examples)
     try:
-        from lab import DEFAULT_URLS, LABS, probe_lab, reachable
+        from lab import DEFAULT_URLS, LABS, identifies, probe_lab
     except Exception as exc:                              # noqa: BLE001
         return [CaseResult(
             suite="lab", case_id="__env__", category="env", outcome="skipped",
@@ -401,13 +401,13 @@ def run_lab_suite(root: Path, driver: str = "scripted") -> list[CaseResult]:
     for lab in LABS:
         base = DEFAULT_URLS.get(lab.id, "")
         started = time.time()
-        if not base or not reachable(base):
+        if not base or not identifies(lab, base):
             results.append(CaseResult(
                 suite="lab", case_id=lab.id, category="recon",
                 outcome="skipped", passed=False,
                 elapsed_s=round(time.time() - started, 2),
                 expected=f"{len(lab.findings)} 项预期发现",
-                detail=f"靶不可达（{lab.hint}）"))
+                detail=f"靶不在：不可达，或端口被别的服务占用（{lab.hint}）"))
             continue
         try:
             if registry is None:

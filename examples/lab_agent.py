@@ -338,7 +338,7 @@ def run_agent_lab_suite(root: Path, driver: str = "agent",
     `last_run_r1.json` 覆盖过，分数还在评分卡里、复盘素材却没了。
     """
     from benchmark import CaseResult          # 统一结果模型
-    from lab import DEFAULT_URLS, LABS, reachable
+    from lab import DEFAULT_URLS, LABS, identifies
 
     def _skipped(case_id: str, why: str) -> "CaseResult":
         return CaseResult(suite="agent-lab", case_id=case_id,
@@ -358,8 +358,10 @@ def run_agent_lab_suite(root: Path, driver: str = "agent",
     workdir = Path(root)
     for lab in targets:
         base_url = DEFAULT_URLS.get(lab.id, "")
-        if not base_url or not reachable(base_url):
-            results.append(_skipped(lab.id, f"靶不可达（{lab.hint}）"))
+        if not base_url or not identifies(lab, base_url):
+            results.append(_skipped(lab.id,
+                                    f"靶不在：不可达，或端口被别的服务占用"
+                                    f"（{lab.hint}）"))
             continue
         for idx in range(1, max(1, repeat) + 1):
             case_id = lab.id if repeat <= 1 else f"{lab.id}#{idx}"

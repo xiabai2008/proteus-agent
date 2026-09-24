@@ -202,11 +202,15 @@ def test_get_lab_unknown_returns_none():
 
 
 def test_lab_suite_skips_when_unreachable(monkeypatch):
-    """靶不可达 -> 该项 skipped 并带启动提示（不是 failed）。"""
+    """靶不在 -> 该项 skipped 并带启动提示（不是 failed）。
+
+    守卫是 `identifies()` 而不是 `reachable()`：端口被别的服务占用时
+    （实测 8080 上是 Burp Suite）也算"靶不在"，见 R-42。
+    """
     import benchmark
     import lab
 
-    monkeypatch.setattr(lab, "reachable", lambda url, **kw: False)
+    monkeypatch.setattr(lab, "identifies", lambda target, url, **kw: False)
     results = benchmark.run_lab_suite(".")
     assert results
     assert all(r.outcome == "skipped" for r in results)
@@ -381,7 +385,7 @@ def test_agent_lab_chain_gate_fails_case(monkeypatch, tmp_path):
     import lab_agent
     import benchmark
 
-    monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
+    monkeypatch.setattr(lab, "identifies", lambda target, url, **kw: True)
     monkeypatch.setattr(
         lab_agent, "run_lab_agent",
         lambda lab_, base, workdir, llm, **kw: {
@@ -414,13 +418,13 @@ def test_agent_lab_suite_skips_without_llm(monkeypatch, tmp_path):
 
 
 def test_agent_lab_suite_skips_unreachable(monkeypatch, tmp_path):
-    """靶不可达 -> skipped 并带启动提示。"""
+    """靶不在 -> skipped 并带启动提示。"""
     import benchmark
     import lab
     from penagent.llm import LLMConfig
 
     monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
-    monkeypatch.setattr(lab, "reachable", lambda url, **kw: False)
+    monkeypatch.setattr(lab, "identifies", lambda target, url, **kw: False)
     results = benchmark.run_agent_lab_suite(str(tmp_path))
     assert results
     assert all(r.outcome == "skipped" for r in results)
@@ -445,7 +449,7 @@ def test_agent_lab_workdir_is_root_not_nested(monkeypatch, tmp_path):
                 "mission_id": "m1", "injected_skills": []}
 
     monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
-    monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
+    monkeypatch.setattr(lab, "identifies", lambda target, url, **kw: True)
     monkeypatch.setattr(lab_agent, "run_lab_agent", _fake_run)
     monkeypatch.setattr(lab_agent, "_save_raw", lambda run, path: None)
 
@@ -472,7 +476,7 @@ def test_agent_lab_repeat_makes_one_case_per_round(monkeypatch, tmp_path):
                 "mission_id": "m1", "injected_skills": []}
 
     monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
-    monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
+    monkeypatch.setattr(lab, "identifies", lambda target, url, **kw: True)
     monkeypatch.setattr(lab_agent, "run_lab_agent", _fake_run)
     monkeypatch.setattr(lab_agent, "_save_raw", lambda run, path: None)
 
@@ -523,7 +527,7 @@ def test_reset_memory_flag_reaches_run_lab_agent(monkeypatch, tmp_path):
 
     order = []
     monkeypatch.setattr(LLMConfig, "ready", lambda self: True)
-    monkeypatch.setattr(lab, "reachable", lambda url, **kw: True)
+    monkeypatch.setattr(lab, "identifies", lambda target, url, **kw: True)
     monkeypatch.setattr(lab_agent, "_reset_sandbox_memory",
                         lambda workdir, lab_id: order.append(
                             f"reset:{lab_id}") or True)
@@ -610,13 +614,19 @@ def test_lab_ground_truth_markers_are_observable():
     `http_probe` 只返回状态/头/标题，不返回正文——标记若取自正文
     （如 /ftp/acquisitions.md 的 "confidential"），判定永远命中不了。
     这条把"标记可用"钉住：每条带标记的路径，探一次必须能看到该标记。
+
+    守卫用 `identifies()`（要求首页带上靶的身份标记）而不是 `reachable()`：
+    工作机 8080 被 Burp Suite 占用时，后者为真、前者为假——本该跳过转红就是
+    这么来的（R-42）。这不会让 home 那条断言变恒真：`identifies()` 走裸
+    `http.client` 能读正文，而 `http_probe` 只暴露状态/头/标题，取正文的标记
+    照样会被这条用例抓住。
     """
-    from lab import DEFAULT_URLS, LABS, _kernel_registry, reachable
+    from lab import DEFAULT_URLS, LABS, _kernel_registry, identifies
 
     registry = None
     for lab in LABS:
         base = DEFAULT_URLS.get(lab.id, "")
-        if not base or not reachable(base):
+        if not base or not identifies(lab, base):
             continue          # 靶不在时跳过（环境缺失不等于失败）
         if registry is None:
             registry = _kernel_registry()
@@ -669,6 +679,96 @@ def test_lab_reachable_rejects_connect_without_http_response():
         server.close()
         for conn in held:
             conn.close()
+
+
+# ----------------------------------------------------------------------
+# 靶身份判据（R-42）：端口被别的服务占用时，只判"可达"会把别人的服务当靶
+#
+# 实测：工作机 8080 上是 java / Burp Suite Professional，它照常回 200 和
+# `<title>`，`reachable()` 因此为真——于是"靶不在"被判成"靶在但断言不过"，
+# 判分里该 SKIP 的记成 FAIL、`test_lab_ground_truth_markers_are_observable`
+# 从跳过转红。`identifies()` 要求响应里出现靶自己声明的身份标记。
+# ----------------------------------------------------------------------
+def _serving(body: bytes, headers: dict | None = None):
+    """起一个只回固定正文（与可选额外响应头）的本地 HTTP 服务。
+
+    返回 `(base_url, 关闭函数)`。
+    """
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                       # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):           # 静音测试输出
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def stop() -> None:
+        server.shutdown()
+        server.server_close()
+
+    return f"http://127.0.0.1:{server.server_port}", stop
+
+
+def _dvwa_stub():
+    """只带 `home` 身份发现的靶桩（身份标记即 DVWA 的首页标题）。"""
+    from lab import Finding, LabTarget
+
+    return LabTarget(
+        id="dvwa", label="DVWA", image="vulnerables/web-dvwa",
+        findings=(Finding("home", "/", 200,
+                          "Damn Vulnerable Web Application"),))
+
+
+def test_lab_identifies_rejects_foreign_service_on_same_port():
+    """端口上有 HTTP 回话、但**不是这个靶** -> 不算在线。
+
+    这就是 8080 被 Burp 占用的真实场景：`reachable()` 为真、`identifies()` 为假。
+    两者必须给出不同答案，否则守卫等于没设。
+    """
+    from lab import identifies, reachable
+
+    base, stop = _serving(b"<title>Burp Suite Professional</title>")
+    try:
+        assert reachable(base) is True            # 端口确实在应答
+        assert identifies(_dvwa_stub(), base) is False
+    finally:
+        stop()
+
+
+def test_lab_identifies_accepts_the_real_lab():
+    """靶真在时判 True（否则守卫恒假，判分会被整体跳过）。"""
+    from lab import identifies
+
+    base, stop = _serving(
+        b"<title>Damn Vulnerable Web Application</title>")
+    try:
+        assert identifies(_dvwa_stub(), base) is True
+    finally:
+        stop()
+
+
+def test_lab_identifies_sees_marker_in_response_headers():
+    """标记落在响应头里也算在线——与 `http_probe` 的可见面（头 + 标题）一致。"""
+    from lab import identifies
+
+    base, stop = _serving(
+        b"<html>no marker in body</html>",
+        headers={"X-Powered-By": "Damn Vulnerable Web Application"})
+    try:
+        assert identifies(_dvwa_stub(), base) is True
+    finally:
+        stop()
 
 
 def test_dsh_records_for_lab_filters_by_preset():

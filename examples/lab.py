@@ -236,6 +236,10 @@ def reachable(base_url: str, timeout: float = 1.5) -> bool:
     回话"（拿到状态行即在线，含 401/403/405/500），恰好是裸 HTTP 连接的语义。
     地址仍先过 `validate_http_url`（仅 http/https 且必须带主机名）——与内核
     其它出站调用点（`builtin_tools` / `mcp_client`）同一条边界。
+
+    **注意分工**：本函数只判"有没有回话"，判不了"回话的是不是这个靶"。
+    要确认靶在不在（判分与用例的守卫都该如此）请用 `identifies()`——否则工作机
+    上被别的服务占用的端口会被当成靶（R-42）。
     """
     import http.client
     import urllib.parse
@@ -259,6 +263,58 @@ def reachable(base_url: str, timeout: float = 1.5) -> bool:
         resp = conn.getresponse()
         resp.read(1)                     # 只取 1 字节：判在线即可，不拉正文
         return True
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        conn.close()
+
+
+def identity_finding(lab: LabTarget) -> Optional[Finding]:
+    """靶的身份判据：`home` 发现（首页路径 + 标题级指纹）。"""
+    return next((f for f in lab.findings
+                 if f.name == "home" and f.expect_contains), None)
+
+
+def identifies(lab: LabTarget, base_url: str = "",
+               timeout: float = 1.5) -> bool:
+    """端口上应答的**是不是这个靶**（而不是工作机上别的服务）。
+
+    与 `reachable()` 的分工：`reachable()` 只回答"有没有 HTTP 回话"，本函数回答
+    "回话的是不是它"。工作机的 8080 常被别的服务占用——实测是 java / Burp Suite
+    Professional，它照常回 200 和 `<title>`，于是只判可达就把别人的服务当成靶：
+    判分里该 SKIP 的记成 FAIL、用例里该跳过的转红（见 docs/修复待办清单.md R-42）。
+
+    判据：靶首页响应（响应头或正文前 64KB）里能看到 `home` 发现声明的身份标记
+    ——"DVWA 在线吗"的答案本来就是"首页标题是不是 DVWA"。以下一律判 False
+    （宁可跳过，不可误判）：靶没声明身份标记、HTTP 拿不到响应、URL 非法。
+
+    实现同样走裸 `http.client`（与 `reachable` 同一条 URL 校验边界），不消费内核
+    注册表——守卫要便宜，不该为了"确认靶在不在"就拉起整条工具链。
+    """
+    import http.client
+    import urllib.parse
+
+    from penagent.mcp_client import validate_http_url
+
+    home = identity_finding(lab)
+    base = (base_url or DEFAULT_URLS.get(lab.id, "")).rstrip("/")
+    if home is None or validate_http_url(base):
+        return False
+
+    parsed = urllib.parse.urlparse(base + home.path)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    target = parsed.path or "/"
+    conn_cls = (http.client.HTTPSConnection if parsed.scheme == "https"
+                else http.client.HTTPConnection)
+    conn = conn_cls(host, port, timeout=timeout)
+    try:
+        conn.request("GET", target)
+        resp = conn.getresponse()
+        body = resp.read(65536).decode("utf-8", "replace")
+        head = "\n".join(f"{k}: {v}" for k, v in resp.getheaders())
+        marker = home.expect_contains
+        return marker in body or marker in head
     except (OSError, http.client.HTTPException):
         return False
     finally:
