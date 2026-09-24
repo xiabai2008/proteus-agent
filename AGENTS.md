@@ -59,13 +59,15 @@
   环境：pytest 解释器 `<PY312>\python.exe` 上装的是 `torch 2.8.0+cpu`；torch 保持**可选依赖**定位不变（硬规则 5，不进 `requirements.txt` 安装列表），屏蔽 torch 时 RL 链路用例按环境跳过，其余全量必须通过。
   数据：`eval_evolution.py` 决策步数 6.0 → 3.0（下降 50%，与内核 README 声称一致）；`eval_closed_loop.py` 四层叠加为基线 4.28 → Q 学习 2.60（-39%）→ PPO 2.50（-42%），三次重跑逐位一致。
 - 外部依赖 **07 靶场**：两个评测脚本需要 `warfare` 仿真包，位于 `<WS>\网安项目开发规划\07-agent-war-range`（注意**不在** `<WS>\07-agent-war-range`）。`conftest.py` 按 `PENTEST_G07_ROOT` → 相邻布局 → 本机绝对路径的顺序解析并注入 `PYTHONPATH`（供测试用 subprocess 拉起的评测脚本继承）；直接跑脚本时须自行设 `PYTHONPATH`，否则报 `ModuleNotFoundError: No module named 'warfare'`。
-- 测试基线（2026-09-24 实测）：**480 passed / 0 failed / 15 skipped**（30 个测试文件）。skip 全是容器类用例（Docker 暂停或 `proteus-sandbox` 镜像未构建）。CI 覆盖 Windows py3.12/3.13（必过）+ Linux（实验性），并在 pytest 之后跑 `python examples/benchmark.py --suite ctf` 作为**能力闸门**（33 题纯离线，约 5 秒；有失败即非零退出）。
-- DSH 阶段 0（P0-1..P0-6，2026-09-24）已交付：启动健壮性（外部 MCP 发现 23 分钟 → 6.7s）·
+- 测试基线（2026-09-24 实测）：**499 passed / 0 failed / 16 skipped**（31 个测试文件）。skip 全是容器类用例（Docker 暂停或 `proteus-sandbox` 镜像未构建）。CI 覆盖 Windows py3.12/3.13（必过）+ Linux（实验性），并在 pytest 之后跑 `python examples/benchmark.py --suite ctf` 作为**能力闸门**（33 题纯离线，约 5 秒；有失败即非零退出）。
+- DSH 阶段 0+1 已交付（2026-09-24）：启动健壮性（外部 MCP 发现 23 分钟 → 6.7s）·
   CTF 模式 allow 修真名 + 家族通配 · 工具面按模式裁剪 + `listChanged` · 会话授权入口
   `/proteus-scope`（内核与宿主裁决行同一份文件 + 自我授权防线）· 模式贯通宿主裁决行 ·
-  三个场景 preset（模板渲染 + 共享实现 + `--session-key` 隔离）。待办编号 R-25..R-30。
-  方案与执行记录见 `docs/DSH主体化改造方案.md`；**下一步是 P1 场景专精**（渗透三件套
-  session_http / replay_request / report_gen、CTF 工具面补全、工具合并去重、阶段化流水线、技能双套）。
+  三个场景 preset（模板渲染 + 共享实现 + `--session-key` 隔离）· 渗透三件套
+  （`session_http` / `replay_request` / `report_gen`+SARIF）· CTF `checksec_bin` ·
+  宿主侧监督层（循环检测与救场）· 注入护栏。待办编号 R-25..R-32。
+  方案与执行记录见 `docs/DSH主体化改造方案.md`。**剩余**：真机会话冒烟（选 preset 走
+  一轮"切模式 / 授权 / 裁决"）、P2-2 CTF 评测分档、P2-3 审计层级视图。
 
 ## 4. ModeProfile 规范（阶段一的核心交付）
 

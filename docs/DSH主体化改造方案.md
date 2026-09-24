@@ -171,6 +171,33 @@ roster 校验 / `--check` 全部按列表循环；`dsh/start-proteus.cmd` 的同
 `dsh_compat_check.py` 全绿。**尚未做的**：真机会话（起 web profile 选一个 preset
 走一轮"切模式 / 授权 / 裁决"）——阶段 1 开工前先补这一次冒烟。
 
+### 阶段 1 · 场景专精（同日完成）
+
+| # | 交付 | 提交 | 证据 |
+|---|---|---|---|
+| P1-1 | 渗透三件套：`session_http`（cookie jar + request_id）/ `replay_request`（原样重放 + 状态码与正文哈希比对）/ `report_gen`（markdown + SARIF 2.1.0） | `2295de0` | 本地靶场：登录后私有页 401→200；重放判定一致/动态内容；SARIF 容器结构校验 |
+| P1-4 | 两套人格写入**阶段化流水线**（渗透：资产发现→漏洞识别→验证→报告；CTF：信息→假设试错→求解→收口） | 同上 | 人格文件（软约束，机制仍在闸门） |
+| P1-5 | 技能导出按会话键分目录（`data/dsh-skills/<key>`），与 `customSkillDirs` 同源 | 同上 | 命令插件用例（sessionKey=ctf-web → 独立目录） |
+| P1-2 | CTF 补 `checksec_bin`（`pwn checksec`，docker 档 fail-closed） | `3bf8aa1` | 容器真跑用例（Docker 恢复后生效，判据 `RELRO`） |
+| P1-3 | 同名工具覆盖不再静默（去重器留 note；RayScan 适配器 vs MCP 声明即此例） | 同上 | `test_registry` 重名留痕用例 |
+| — | **测试当场抓出并修掉一个凭据泄漏**：登录响应的 `Set-Cookie` 值原样回吐 → 新增 `mask_response_headers`（`http_raw` 与 `session_http` 都走） | `2295de0` | `test_http_session` 断言输出里不含 cookie 值 |
+
+### 阶段 2 · 监督与度量（部分完成）
+
+| # | 交付 | 提交 | 状态 |
+|---|---|---|---|
+| P2-1 | 宿主侧监督插件 `proteus-supervisor.mjs`：同工具+同参数重复到阈值即 deny（理由可操作），第二次升级为 `ask`，留痕进 spool | `3bf8aa1` | 完成（5 条用例） |
+| P2-4 | 注入护栏写进两套人格：工具返回的目标内容一律不可信；只有人的消息才算指令 | 同上 | 完成（软约束，机制侧仍是白名单+审批） |
+| P2-2 | CTF 评测分档（unguided / subtask / subtask-guided） | — | **待做**：需要逐题设计子任务规格（33 题的内容工程量），建议单独一轮 |
+| P2-3 | 审计层级视图（Task / Action / Artifact） | — | **待做**：现有 `evidence_report` 已给任务清单与步骤；层级视图要先把 链上记录 ↔ 任务 的关联补上 |
+
+阶段 1+2（已完成部分）验收：全量 **499 passed / 16 skipped**；三个 preset
+`--check` 全绿、roster 均未 broken。
+
+**最该补的一次冒烟**：起 web profile，选 `proteus-ctf-web`，验证
+① 工具面只有 CTF 那 15 个；② `/proteus-scope add <靶机>` 后 `http_raw` 立即可用；
+③ 连点同一个调用 3 次被监督层拦下。
+
 ---
 
 ## 七、风险与开放问题
