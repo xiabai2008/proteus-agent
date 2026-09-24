@@ -304,13 +304,14 @@ proteus-agent/
 |---|---|---|
 | `Skill` | [L31](../penagent/memory.py#L31) | `id / title / target_fingerprint / steps / tools / evidence_refs / evidence_text / category / success_rate / successes / attempts / exposure / source_mission / created_at`；`record_outcome(success)` 更新成功率 |
 | `Memory(root="data", namespace=DEFAULT_NAMESPACE)` | [L65](../penagent/memory.py#L65) | 目录：`<root>/missions/<ns>/` 与 `<root>/skills/<ns>/` |
-| `for_namespace(ns)` / `namespaces()` | [L77](../penagent/memory.py#L77) | 分区切换 / 已存在分区枚举 |
-| `new_mission(target, objective)` | [L92](../penagent/memory.py#L92) | 生成 8 位 uuid mission_id 并落盘 |
-| `add_step(mission_id, step)` / `finish(mission_id, outcome, reflection="", evidence_refs=None)` | [L103](../penagent/memory.py#L103) | 作战记录生命周期（`finish` 会把结论引用写进记录） |
-| `get_mission` / `list_missions` | [L121](../penagent/memory.py#L121) | 读单条 / 全部分区记录 |
-| `add_skill` / `update_skill` / `list_skills(sort_by_rate=False, sort_by_stealth=False, category="")` | [L141](../penagent/memory.py#L141) | 经验库 CRUD 与排序 |
-| `find_skills(fingerprint)` | [L173](../penagent/memory.py#L173) | 关键词共现匹配（忽略纯数字 token，如 IP 段） |
-| `recent_skills(limit=5)` | [L192](../penagent/memory.py#L192) | 最近技能 |
+| `for_namespace(ns)` / `namespaces()` | [L77](../penagent/memory.py#L77) / [L81](../penagent/memory.py#L81) | 分区切换 / 已存在分区枚举 |
+| `locate_mission(root, mission_id)`（classmethod） | [L91](../penagent/memory.py#L91) | **跨分区定位任务** → `(namespace, 记录)`；拒绝路径分隔符与 `..`。`reflect` / `pentest_reflect` 靠它读模式分区任务（R-37） |
+| `new_mission(target, objective)` | [L123](../penagent/memory.py#L123) | 生成 8 位 uuid mission_id 并落盘 |
+| `add_step(mission_id, step)` / `finish(mission_id, outcome, reflection="", evidence_refs=None)` | [L134](../penagent/memory.py#L134) / [L139](../penagent/memory.py#L139) | 作战记录生命周期（`finish` 会把结论引用写进记录） |
+| `get_mission` / `list_missions` | [L152](../penagent/memory.py#L152) / [L155](../penagent/memory.py#L155) | 读单条 / 全部分区记录 |
+| `add_skill` / `update_skill` / `list_skills(sort_by_rate=False, sort_by_stealth=False, category="")` | [L172](../penagent/memory.py#L172) / [L177](../penagent/memory.py#L177) / [L185](../penagent/memory.py#L185) | 经验库 CRUD 与排序 |
+| `find_skills(fingerprint)` | [L204](../penagent/memory.py#L204) | 关键词共现匹配（忽略纯数字 token，如 IP 段） |
+| `recent_skills(limit=5)` | [L223](../penagent/memory.py#L223) | 最近技能 |
 
 分区名经 `_safe_namespace()` 校验（仅 `[A-Za-z0-9._-]`，拒绝路径穿越）。**模式间不互串**：渗透沉淀的技能不会被 CTF 任务检索到。
 
@@ -367,15 +368,16 @@ RL 链路实测（2026-09-18，见 `docs/RL链路实测记录.md`）：`eval_evo
 
 | 符号 | 位置 | 说明 |
 |---|---|---|
-| `FROZEN_ARGS_KEY = "_frozen_args"` | [L26](../penagent/tools.py#L26) | 模式冻结参数在 args 中的保留键（按命令行 token 追加到命令尾部） |
-| `ToolSpec` | [L29](../penagent/tools.py#L29) | `name / description / kind(function\|cli\|http) / parameters(JSON Schema 子集) / fn / command(模板，`{args}` 替换) / workdir / timeout / dangerous / positional / arg_flags / sandbox / network`；`to_schema()` |
-| `ToolResult` | [L53](../penagent/tools.py#L53) | `tool / ok / output / error / duration_ms`；`to_dict()` |
-| `ToolRegistry(sandbox=None, gate=None)` | [L65](../penagent/tools.py#L65) | **持有沙箱策略与闸门**（执行前裁决发生在 `execute()` 内部） |
-| `.register / .get / .schemas / .names` | [L76-L86](../penagent/tools.py#L76-L86) | 注册表基本操作 |
-| `.copy(*, gate=None)` | [L88](../penagent/tools.py#L88) | 复制注册表（工具集相同）并可换装闸门——为**一次任务**派生独立护栏，不改共享注册表（避免权限放大） |
-| `.execute(name, args, confirm_high_risk=True)` | [L102](../penagent/tools.py#L102) | 顺序：闸门裁决 → 沙箱裁决 → 按 `kind` 执行（`function` 按 `parameters` 过滤入参；`mcp` 原样透传且剥离冻结键；`cli` 走 `_run_cli`） |
-| `._run_cli(spec, args, wrapper=None)` | [L145](../penagent/tools.py#L145) | 模板替换 + 可执行文件存在性校验（容器执行时由 wrapper 接管）；返回 `stdout[-4000:]` |
-| `._cli_args(spec, args)` | [L171](../penagent/tools.py#L171) | 位置参数模式 / `--key`（可由 `arg_flags` 覆盖）/ 布尔开关；冻结串经 `shlex.split` 追加 |
+| `FROZEN_ARGS_KEY = "_frozen_args"` | [L31](../penagent/tools.py#L31) | 模式冻结参数在 args 中的保留键（按命令行 token 追加到命令尾部） |
+| `ToolSpec` | [L35](../penagent/tools.py#L35) | `name / description / kind(function\|cli\|http) / parameters(JSON Schema 子集) / fn / command(模板，`{args}` 替换) / workdir / timeout / dangerous / positional / arg_flags / sandbox / network`；`to_schema()` |
+| `ToolResult` | [L59](../penagent/tools.py#L59) | `tool / ok / output / error / duration_ms`；`to_dict()` |
+| `business_error(output)` | [L70](../penagent/tools.py#L70) | 结果语义统一：返回值带非空 `error` 键即判失败——供 `execute` 映射 `ok=False`（R-36） |
+| `ToolRegistry(sandbox=None, gate=None)` | [L94](../penagent/tools.py#L94) | **持有沙箱策略与闸门**（执行前裁决发生在 `execute()` 内部） |
+| `.register / .get / .schemas / .names` | [L105-L115](../penagent/tools.py#L105-L115) | 注册表基本操作 |
+| `.copy(*, gate=None)` | [L117](../penagent/tools.py#L117) | 复制注册表（工具集相同）并可换装闸门——为**一次任务**派生独立护栏，不改共享注册表（避免权限放大） |
+| `.execute(name, args, confirm_high_risk=True)` | [L131](../penagent/tools.py#L131) | 顺序：闸门裁决 → 沙箱裁决 → 按 `kind` 执行（`function` 按 `parameters` 过滤入参；`mcp` 原样透传且剥离冻结键；`cli` 走 `_run_cli`）→ **业务失败映射 `ok=False`** |
+| `._run_cli(spec, args, wrapper=None)` | [L181](../penagent/tools.py#L181) | 模板替换 + 可执行文件存在性校验（容器执行时由 wrapper 接管）；返回 `stdout[-4000:]` |
+| `._cli_args(spec, args)` | [L208](../penagent/tools.py#L208) | 位置参数模式 / `--key`（可由 `arg_flags` 覆盖）/ 布尔开关；冻结串经 `shlex.split` 追加 |
 
 ### 6.2 [registry.py](../penagent/registry.py) — 统一注册中心
 
@@ -420,7 +422,9 @@ RL 链路实测（2026-09-18，见 `docs/RL链路实测记录.md`）：`eval_evo
 
 **（2）外部 CLI 工具**（`external_tools.json` + [external_tools.py](../penagent/external_tools.py#L17)）：`load_external_tools` 注册前校验可执行文件存在性，缺失即不注册并在 note 里说明。字段含 `command / workdir / timeout / dangerous / positional / parameters（可带 flag） / sandbox / network`。
 
-**（3）CTF 工具链**（[ctf_tools.py](../penagent/ctf_tools.py) + `ctf_tools.json`）：`codec_decode`（[L65](../penagent/ctf_tools.py#L65)）、`codec_chain`（[L76](../penagent/ctf_tools.py#L76)）、`file_type`（[L94](../penagent/ctf_tools.py#L94)）为 stdlib 实现的 function 工具，`modes=("ctf-web","ctf-crypto")`；`rsactf_attack` / `python_solve` 等外部二进制走 `ctf_tools.json` CLI 登记（`python_solve` 声明 `sandbox: docker`）。
+**（3）CTF 工具链**（[ctf_tools.py](../penagent/ctf_tools.py) + `ctf_tools.json`）：`codec_decode`（[L116](../penagent/ctf_tools.py#L116)）、`codec_chain`（[L127](../penagent/ctf_tools.py#L127)）、`file_type`（[L145](../penagent/ctf_tools.py#L145)）为 stdlib 实现的 function 工具，`modes=("ctf-web","ctf-crypto")`；`rsactf_attack` / `python_solve` 等外部二进制走 `ctf_tools.json` CLI 登记（`python_solve` 声明 `sandbox: docker`）。
+
+**路径口径（R-38）**：`_resolve_path()`（[L59](../penagent/ctf_tools.py#L59)）让宿主侧路径工具与容器视角等价——`/samples/...` 映射到 `sandbox.data_root()`，相对路径未命中再试 data 目录之下；失败信息带已尝试路径 / cwd / `/samples` 映射目标 / 同目录候选（此前只说"文件不存在"，模型因此重复同一个失败调用 57 次、耗尽 60 步预算）。
 
 **（4）适配层**：`rayscan_scan`（[adapters/rayscan.py](../penagent/adapters/rayscan.py#L31)，wvs 库异步扫描，`dangerous=True`）、`pf_nmap_scan / pf_nmap_services / pf_nmap_vuln`（[adapters/packetforge.py](../penagent/adapters/packetforge.py#L32)）；包不可用时**不注册**（LLM 看不到）。
 
@@ -434,16 +438,17 @@ RL 链路实测（2026-09-18，见 `docs/RL链路实测记录.md`）：`eval_evo
 
 | 符号 | 位置 | 说明 |
 |---|---|---|
-| `LEVELS` / `DEFAULT_IMAGE="python:3.12-slim"` / `CONTAINER_WORKDIR="/work"` / `CONTAINER_TOOLS_DIR="/opt/host-tools"` / `CONTAINER_TEMPLATES_DIR="/root/nuclei-templates"` | [L26-L34](../penagent/sandbox.py#L26-L34) | 档位与容器路径常量 |
-| `tool_needs_isolation(spec)` | [L37](../penagent/sandbox.py#L37) | 声明 `sandbox: docker/container` 或 `dangerous=True` |
-| `SandboxDecision(allowed, reason, isolated, wrap)` | [L45](../penagent/sandbox.py#L45) | 裁决结果 |
-| `containerize_command(command, data_root="")` | [L103](../penagent/sandbox.py#L103) | 宿主路径 → 容器路径重写：宿主解释器 → `python`；`.exe` 二进制 → 工具名；数据根之下 → `/opt/host-tools/...` |
-| `host_data_mounts()` | [L79](../penagent/sandbox.py#L79) | 把 `$PENTEST_TOOLS` 与 `~/nuclei-templates` **只读**挂进容器（数据不打进镜像） |
-| `DockerRunner(image="", probe_timeout=8.0)` | [L155](../penagent/sandbox.py#L155) | `available()`（探测结果缓存）/ `wrap(command, spec)`（`-v` 宿主侧、`-w /work`、默认 `--network none`）/ `network_mode(spec)` |
-| `SandboxPolicy(level="none", runner=None, egress=False)` | [L221](../penagent/sandbox.py#L221) | `availability()` / `decide(spec)`：出网声明在 `egress=False` 时**先拒**；容器不可用时的错误消息**含修复指引** |
-| `build_sandbox(level, runner=None, egress=False)` | [L294](../penagent/sandbox.py#L294) | 工厂函数 |
+| `LEVELS` / `DEFAULT_IMAGE="python:3.12-slim"` / `CONTAINER_WORKDIR="/work"` / `CONTAINER_TOOLS_DIR="/opt/host-tools"` / `CONTAINER_TEMPLATES_DIR="/root/nuclei-templates"` / `CONTAINER_SAMPLES_DIR="/samples"` / `DEFAULT_DATA_ROOT="data"` | [L26-L43](../penagent/sandbox.py#L26-L43) | 档位与容器路径常量（`/samples` = 宿主 data 目录的容器视图） |
+| `configure_data_root(path)` / `data_root()` | [L48](../penagent/sandbox.py#L48) / [L59](../penagent/sandbox.py#L59) | 注入 / 读取宿主 data 目录（与 `http_session.configure` 同构；CLI 与 MCP 入口在装配时调用） |
+| `tool_needs_isolation(spec)` | [L64](../penagent/sandbox.py#L64) | 声明 `sandbox: docker/container` 或 `dangerous=True` |
+| `SandboxDecision(allowed, reason, isolated, wrap)` | [L73](../penagent/sandbox.py#L73) | 裁决结果 |
+| `host_data_mounts()` | [L106](../penagent/sandbox.py#L106) | 只读挂载清单：`$PENTEST_TOOLS → /opt/host-tools`、`~/nuclei-templates → /root/nuclei-templates`、**data → `/samples`**（目录不存在则不挂） |
+| `containerize_command(command, data_root="")` | [L139](../penagent/sandbox.py#L139) | 宿主路径 → 容器路径重写：宿主解释器 → `python`；`.exe` 二进制 → 工具名；数据根之下 → `/opt/host-tools/...` |
+| `DockerRunner(image="", probe_timeout=8.0)` | [L191](../penagent/sandbox.py#L191) | `available()`（探测结果缓存）/ `wrap(command, spec)`（`-v` 宿主侧、`-w /work`、默认 `--network none`）/ `network_mode(spec)` |
+| `SandboxPolicy(level="none", runner=None, egress=False)` | [L257](../penagent/sandbox.py#L257) | `availability()` / `decide(spec)`：出网声明在 `egress=False` 时**先拒**；容器不可用时的错误消息**含修复指引** |
+| `build_sandbox(level, runner=None, egress=False)` | [L330](../penagent/sandbox.py#L330) | 工厂函数 |
 
-`_slash_norm` / `_basename_no_exe`（[L55-L77](../penagent/sandbox.py#L55-L77)）刻意不用 `os.path`——让 Windows 生产端与 Linux CI 对同一段路径给出同一结论。
+`_slash_norm` / `_basename_no_exe`（[L82-L104](../penagent/sandbox.py#L82-L104)）刻意不用 `os.path`——让 Windows 生产端与 Linux CI 对同一段路径给出同一结论。
 
 ### 6.5 [mcp.py](../penagent/mcp.py) — 本内核作为 MCP Server
 
