@@ -41,6 +41,57 @@ def _to_text(data: bytes) -> str:
         return data.hex()
 
 
+#: 容器视角路径前缀（宿主 `data/` 目录在容器内的只读挂载点，见 sandbox.py）
+SAMPLES_PREFIX = "/samples"
+#: 失败时回给模型的同目录候选上限（帮它自我纠正，而不是反复重试同一个错路径）
+MAX_CANDIDATES = 8
+
+
+def _candidates(path: Path) -> list[str]:
+    """同目录下的候选文件名（目录不存在/不可读时返回空列表）。"""
+    try:
+        return sorted(x.name for x in path.parent.iterdir()
+                      if x.is_file())[:MAX_CANDIDATES]
+    except OSError:
+        return []
+
+
+def _resolve_path(raw: str) -> tuple[Path, list[str]]:
+    """把入参路径解析成宿主路径：返回 `(优先路径, 已尝试路径列表)`。
+
+    两种视角在**同一套工具面**里必须等价（R-38，2026-09-24 实测）：
+
+    - **容器视角** `/samples/...` → 宿主 data 目录（`sandbox.data_root()`）。
+      容器化 MCP 工具（binwalk / yara / capa）与 `checksec_bin` 都用这个约定，
+      模型自然会把同一约定套到宿主侧工具上；
+    - **宿主视角**：绝对路径原样；相对路径按进程 cwd 解析，未命中再试 data
+      目录之下（模型常把 `data/eval-ctf/x` 简写成 `eval-ctf/x`）。
+
+    不统一的代价是实打实的：一次 CTF 会话里模型照 `/samples/...` 调宿主侧的
+    `file_type`，连失败 57 次、60 步预算耗尽（`docs/修复待办清单.md` R-38）。
+    """
+    from penagent.sandbox import data_root
+
+    text = str(raw or "").strip()
+    norm = text.replace("\\", "/")
+    if norm == SAMPLES_PREFIX or norm.startswith(SAMPLES_PREFIX + "/"):
+        rel = norm[len(SAMPLES_PREFIX):].strip("/")
+        mapped = Path(data_root()) / rel if rel else Path(data_root())
+        return mapped, [str(mapped)]
+
+    path = Path(text)
+    if path.is_absolute():
+        return path, [str(path)]
+
+    attempts = [str(path)]
+    if not path.is_file():
+        under_data = Path(data_root()) / text
+        attempts.append(str(under_data))
+        if under_data.is_file():
+            return under_data, attempts
+    return path, attempts
+
+
 def _decode_once(text: str, codec: str) -> bytes:
     name = (codec or "").strip().lower()
     if name == "base64":
@@ -92,10 +143,23 @@ def codec_chain(data: str, codecs: str = "") -> dict:
 
 
 def file_type(path: str) -> dict:
-    """按魔数识别文件类型；文本文件附带前 200 字符预览。"""
-    p = Path(str(path))
+    """按魔数识别文件类型；文本文件附带前 200 字符预览。
+
+    路径两种视角都支持（见 `_resolve_path`）：容器视角 `/samples/...` 映射到宿主
+    data 目录，宿主视角按绝对路径或进程 cwd 解析（未命中再试 data 目录之下）。
+    失败时给出**可操作的错误**（已尝试路径 / cwd / `/samples` 映射目标 / 同目录
+    候选文件）——只说"文件不存在"等于逼模型反复重试同一个错路径。
+    """
+    p, attempts = _resolve_path(path)
     if not p.is_file():
-        return {"path": str(p), "error": "文件不存在"}
+        from penagent.sandbox import data_root
+
+        return {
+            "path": str(p),
+            "error": (f"文件不存在: {p}（已尝试: {'、'.join(attempts)}；"
+                      f"cwd={Path.cwd()}；{SAMPLES_PREFIX} 映射到 {data_root()}）"),
+            "candidates": _candidates(p),
+        }
     head = p.read_bytes()[:64]
     kind = "data"
     for magic, name in _MAGIC:
@@ -132,7 +196,10 @@ def register_ctf_tools(center, modes=("ctf-web", "ctf-crypto")) -> int:
                              "codecs": {"type": "string"}},
                  fn=codec_chain),
         ToolSpec(name="file_type",
-                 description="识别文件类型（魔数），文本文件返回前 200 字符预览",
+                 description="识别文件类型（魔数），文本文件返回前 200 字符预览。"
+                             "路径两种视角都支持：容器视角 /samples/...（映射到 "
+                             "data 目录，与 binwalk/yara/capa/checksec_bin 一致）"
+                             "与宿主视角（绝对路径或相对进程 cwd）",
                  parameters={"path": {"type": "string"}},
                  fn=file_type),
     ]

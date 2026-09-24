@@ -42,6 +42,11 @@ def _make_agent(args, registry=None, memory=None, evidence=None):
         ).build_registry(mode)
     mem = memory or Memory(args.data)
     ev = evidence or EvidenceChain(Path(args.data) / "chain.jsonl")
+    # 容器视角 /samples 指向同一份 data（沙箱包装时只读挂载）：宿主侧路径工具
+    # 与容器工具因此共用一套路径约定（R-38/R-43）
+    from penagent.sandbox import configure_data_root
+
+    configure_data_root(args.data)
     policy = Policy(allowed_targets=args.targets or None,
                     authorize=args.authorize)
     skill_policy = None

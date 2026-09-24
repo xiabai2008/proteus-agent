@@ -115,6 +115,12 @@ class PentestMCPServer:
         from penagent.http_session import configure as configure_http
 
         configure_http(data_dir)
+        # 容器视角 /samples 指向同一份 data（沙箱包装时只读挂载，R-38/R-43）：
+        # 容器化 MCP 工具与 checksec_bin 的用途路径、宿主侧 file_type 的解析
+        # 因此落在同一个根上
+        from penagent.sandbox import configure_data_root
+
+        configure_data_root(data_dir)
         self.llm = LLMConfig.from_env()
         # 服务端级默认模式：pentest_run 未显式指定 mode 时的回落。
         # 空串 = 保持向后兼容（无模式路径：全量注册表 + 证据链判定器）；

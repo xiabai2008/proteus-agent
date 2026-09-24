@@ -158,6 +158,65 @@ def test_checksec_is_visible_in_ctf_and_hidden_in_pentest():
     assert "checksec_bin" not in pentest
 
 
+# ----------------------------------------------------------------------
+# 路径口径统一（R-38，2026-09-24 实测）
+#
+# 同一个 CTF 工具面里混着两种视角：容器化 MCP 工具（binwalk/yara/capa）与
+# checksec_bin 用 `/samples/...`（宿主 data 目录在容器内的只读挂载点），宿主侧
+# file_type 却按 cwd 解析。实测一次会话里模型照 `/samples/...` 调 file_type，
+# 连失败 57 次、60 步预算耗尽。
+# ----------------------------------------------------------------------
+def test_file_type_accepts_container_samples_path(tmp_path, monkeypatch):
+    """/samples/... 前缀映射到宿主 data 目录——两种视角等价。"""
+    from penagent import sandbox as sb
+    from penagent.ctf_tools import file_type
+
+    root = tmp_path / "data"
+    (root / "eval-ctf").mkdir(parents=True)
+    (root / "eval-ctf" / "encoding-chain.txt").write_text(
+        "# encoded challenge", encoding="utf-8")
+    monkeypatch.setattr(sb, "_data_root", str(root))
+
+    out = file_type("/samples/eval-ctf/encoding-chain.txt")
+    assert "error" not in out
+    assert out["type"] == "text" and "encoded challenge" in out["preview"]
+
+
+def test_file_type_relative_path_falls_back_to_data_root(tmp_path, monkeypatch):
+    """相对路径先按 cwd 解析，未命中再试 data 目录之下（模型常省掉 data/）。"""
+    from penagent import sandbox as sb
+    from penagent.ctf_tools import file_type
+
+    root = tmp_path / "data"
+    (root / "eval-ctf").mkdir(parents=True)
+    (root / "eval-ctf" / "x.txt").write_text("hello", encoding="utf-8")
+    monkeypatch.setattr(sb, "_data_root", str(root))
+
+    out = file_type("eval-ctf/x.txt")
+    assert "error" not in out and out["type"] == "text"
+
+
+def test_file_type_error_is_actionable(tmp_path, monkeypatch):
+    """失败信息必须可操作：已尝试路径 / cwd / /samples 映射目标 / 同目录候选。
+
+    只说"文件不存在"四个字，模型只能反复重试同一个错路径——实测就是这样
+    烧掉整轮预算的。
+    """
+    from penagent import sandbox as sb
+    from penagent.ctf_tools import file_type
+
+    root = tmp_path / "data"
+    (root / "eval-ctf").mkdir(parents=True)
+    (root / "eval-ctf" / "real.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(sb, "_data_root", str(root))
+
+    out = file_type("/samples/eval-ctf/typo.txt")
+    err = out["error"]
+    assert "文件不存在" in err
+    assert "已尝试" in err and "cwd=" in err and "/samples 映射到" in err
+    assert "real.txt" in out["candidates"]        # 候选帮模型一次纠正
+
+
 def test_checksec_runs_in_sandbox_image():
     """真跑一次（Docker + 专用镜像就绪时；否则 skip，与容器类用例同口径）。
 

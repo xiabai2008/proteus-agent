@@ -32,6 +32,33 @@ CONTAINER_WORKDIR = "/work"
 #   <用户主目录>/nuclei-templates → /root/nuclei-templates （nuclei 的默认模板目录）
 CONTAINER_TOOLS_DIR = "/opt/host-tools"
 CONTAINER_TEMPLATES_DIR = "/root/nuclei-templates"
+# 宿主 data 目录在容器内的只读挂载点（R-38/R-43）：
+#   容器化 MCP 工具（binwalk / yara / capa）与 checksec_bin 的**容器视角路径**
+#   统一是 `/samples/...`。此前沙箱包装漏了这条挂载——checksec_bin 的描述承诺了
+#   `/samples`，实际容器里并不存在（描述与实现不符）。宿主侧工具（file_type）
+#   也按同一映射解析 `/samples` 前缀，两种视角因此等价。
+CONTAINER_SAMPLES_DIR = "/samples"
+# 宿主 data 目录的缺省位置（相对进程 cwd——preset 与 CLI 都把 cwd 设为仓库根，
+# 与 `http_session.DATA_DIR` 同口径）。入口可经 configure_data_root() 显式覆盖。
+DEFAULT_DATA_ROOT = "data"
+
+_data_root: str = ""
+
+
+def configure_data_root(path) -> None:
+    """注入宿主 data 目录（容器视图 `/samples` 的宿主侧来源）。
+
+    与 `http_session.configure` 同构：由入口（CLI / MCP server）在装配时调用；
+    未注入时回落 `DEFAULT_DATA_ROOT`。
+    """
+    global _data_root
+    if path:
+        _data_root = str(path)
+
+
+def data_root() -> str:
+    """当前生效的宿主 data 目录（可能是相对 cwd 的相对路径）。"""
+    return _data_root or DEFAULT_DATA_ROOT
 
 
 def tool_needs_isolation(spec) -> bool:
@@ -87,6 +114,11 @@ def host_data_mounts() -> list[tuple[str, str]]:
 
     nuclei 那条特意挂到它的**默认**模板目录：这样不必给 spec 加 `-t`，宿主侧
     行为完全不变。
+
+    最后一条是 **data 目录 → `/samples`**（R-38/R-43 补）：容器化 MCP 工具
+    （binwalk / yara / capa）启动命令里本来就按这个约定挂，`checksec_bin` 的
+    描述也承诺它——但沙箱包装此前没挂，于是"描述里写了、容器里没有"，而这条
+    缺口一直被"Docker 不可用时整组容器用例 skip"掩盖。
     """
     from pathlib import Path
 
@@ -97,6 +129,10 @@ def host_data_mounts() -> list[tuple[str, str]]:
     templates = Path.home() / "nuclei-templates"
     if templates.is_dir():
         mounts.append((str(templates), CONTAINER_TEMPLATES_DIR))
+    root = Path(data_root())
+    if root.is_dir():
+        # docker 的 -v 需要宿主侧绝对路径：相对路径（缺省 `data`）先 resolve
+        mounts.append((str(root.resolve()), CONTAINER_SAMPLES_DIR))
     return mounts
 
 

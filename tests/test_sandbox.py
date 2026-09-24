@@ -110,6 +110,43 @@ def test_docker_level_passes_passive_tool_through():
     assert runner.wrapped == []            # 被动工具不进容器
 
 
+def test_docker_wrap_mounts_data_dir_as_samples(tmp_path, monkeypatch):
+    """data 目录必须只读挂到容器 `/samples`（R-43）。
+
+    `checksec_bin` 的描述承诺"data 目录只读挂载在 /samples"，容器化 MCP 工具
+    （binwalk / yara / capa）的启动命令也这么挂——但沙箱包装此前**漏了这条**：
+    描述里写了、容器里没有，而这条缺口一直被"Docker 不可用时整组容器用例
+    skip"掩盖（真机用例 `test_checksec_runs_in_sandbox_image` 用的就是
+    `/samples/...` 路径）。
+
+    这里用**真实 DockerRunner** 组装命令，不需要守护进程在线——判据落在
+    "挂载参数有没有写进 argv"上。
+    """
+    from penagent import sandbox as sb
+
+    root = tmp_path / "data"
+    root.mkdir()
+    monkeypatch.setattr(sb, "_data_root", str(root))
+
+    argv = sb.DockerRunner(image="proteus-sandbox:latest").wrap(
+        ["pwn", "checksec", "/samples/chall"], _cli_tool(dangerous=True))
+    joined = " ".join(argv)
+
+    assert f"{root.resolve()}:{sb.CONTAINER_SAMPLES_DIR}:ro" in joined
+    assert "/samples/chall" in joined          # 容器视角参数原样保留
+    assert "--network" in joined and "none" in joined   # 默认断网不受影响
+
+
+def test_host_data_mounts_skips_missing_data_root(tmp_path, monkeypatch):
+    """data 目录不存在时不挂（CI / 新机器没有 data/ 也要能跑）。"""
+    from penagent import sandbox as sb
+
+    monkeypatch.setattr(sb, "_data_root", str(tmp_path / "nope"))
+    mounts = sb.host_data_mounts()
+    assert all(container != sb.CONTAINER_SAMPLES_DIR
+               for _, container in mounts)
+
+
 # ----------------------------------------------------------------------
 # 2. 降级路径：容器不可用 -> 拒绝，绝不裸跑
 # ----------------------------------------------------------------------
@@ -762,9 +799,11 @@ def test_host_data_mounts_skips_missing_dirs(monkeypatch, tmp_path):
     """目录不存在就不挂——挂一个不存在的宿主路径会让 docker 直接起不来。"""
     import pathlib
 
+    from penagent import sandbox as sb
     from penagent.sandbox import CONTAINER_TOOLS_DIR, host_data_mounts
 
     monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)   # 无 nuclei-templates
+    monkeypatch.setattr(sb, "_data_root", str(tmp_path / "no-data"))   # 无 data
     monkeypatch.setenv("PENTEST_TOOLS", str(tmp_path / "nope"))
     assert host_data_mounts() == []
 
