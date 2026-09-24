@@ -271,3 +271,21 @@ RUN pwn version 2>&1 | head -1 \
  && vol --help >/dev/null 2>&1 \
  && binwalk --help >/dev/null 2>&1 \
  && gdb --version | head -1
+
+# ---- T2 扩层（2026-09-24）：SAST + OSINT 三件 -----------------------------
+# semgrep：代码审计（SAST，规则扫描 --config auto）；sherlock：OSINT 用户名
+# 枚举；theHarvester：情报收集。⚠️ PyPI 上的 theHarvester 是 0.0.1 占位假包
+# （无模块无 CLI，实测）；且 master 分支已要求 Python>=3.14——
+# 钉 4.11.1 tag（实测兼容 3.12）。
+# pypi 走清华镜像（直连实测读超时，同 docker/mcp 策略）。
+RUN pip install --no-cache-dir -i ${PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple} \
+      semgrep sherlock-project \
+ && pip install --no-cache-dir -i ${PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple} \
+      "https://gh-proxy.com/https://github.com/laramies/theHarvester/archive/refs/tags/4.11.1.zip"
+
+# 自检：严格模式（不用管道吞错——command -v / 显式退出码）
+RUN semgrep --version \
+ && sherlock --version >/dev/null 2>&1 \
+ && command -v theHarvester \
+ && theHarvester -h >/dev/null 2>&1 \
+ && echo "T2 三件就位"

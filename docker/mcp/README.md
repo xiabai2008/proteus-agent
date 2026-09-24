@@ -13,6 +13,7 @@ T0（规划：DSH高度融合与工具生态补强）落地的四个容器化 MC
 | `capa/` | `proteus-mcp-capa:latest` | 3（analyze/…） | stdio | 同 binwalk 挂载 |
 | `cyberchef-mcp/` | `proteus-mcp-cyberchef:latest` | 3（bake/batch_bake/magic） | stdio | 依赖 `proteus-cyberchef-server` 容器（见下） |
 | `hexstrike/` | `proteus-hexstrike:latest` | 上游 151 → **allow-list 6** | stdio（适配器） | 依赖 `proteus-hexstrike-server` 容器（见下） |
+| `yara/` | `proteus-mcp-yara:latest` | 5（scan/scan_with_rules/list_rulesets/…） | stdio | 内置 malware/crypto/packers/cve 规则集；样本经 `/samples` 只读挂载 |
 
 上游来源（均 MIT/Apache）：
 - 前三者：`ismailbozkurt/mcp-security-hub`（FuzzingLabs 维护；README 里的
@@ -20,6 +21,7 @@ T0（规划：DSH高度融合与工具生态补强）落地的四个容器化 MC
 - `cyberchef-mcp`：`slouchd/cyberchef-api-mcp-server`；
 - Chef 服务端：`gchq/CyberChef-server`（容器 `proteus-cyberchef-server`）；
 - `hexstrike/`：`0x4m4/hexstrike-ai` v6.0（server + MCP 适配器两文件纳管）。
+- `yara/`：`ismailbozkurt/mcp-security-hub` 的 binary-analysis/yara-mcp（同前三者）。
 
 ## 本地补丁（为什么不是直接上游构建）
 
@@ -42,6 +44,8 @@ T0（规划：DSH高度融合与工具生态补强）落地的四个容器化 MC
    install_python_package/execute_command` 等任意执行面，必须收紧后才准接入
    （allow：nmap_scan / nmap_advanced_scan / dirb_scan / hydra_attack /
    john_crack / hashcat_crack；密码攻击三件套是本仓当前缺口）。
+7. **yara 三补丁**：apk 走清华（dl-cdn 直连不稳）、规则克隆走 gh-proxy、
+   pip 钉 `mcp==1.18.0`（同全仓策略）。
 
 ## 构建
 
@@ -86,14 +90,16 @@ python examples/mcp_e2e_probe.py searchsploit   # 检索 "apache 2.4"
 python examples/mcp_e2e_probe.py capa           # 分析同一 ELF
 python examples/mcp_e2e_probe.py cyberchef      # hello → To Base64（需 chef-server 在跑）
 python examples/mcp_e2e_probe.py hexstrike      # nmap -sT 扫宿主 3110/4080（需 hexstrike-server 在跑）
+python examples/mcp_e2e_probe.py yara           # 内置规则集扫 fw_v2.bin
 ```
 
 ## 未纳管（诚实记录）
 
-- **yara-mcp**：基础镜像 python:3.12-alpine 本机无缓存且当时 Docker Hub 不可达；
-  优先级最低，未构建。需要时按同套补丁流程处理。
-- **radare2-mcp**：r2mcp v1.8.8 的 `tools/list` 死锁（上游缺陷，证据见
-  `examples/mcp_e2e_probe.py` 的 probe_radare2 注释），未接线。
+- **radare2-mcp**：r2mcp v1.8.8 的 `tools/list` 死锁（上游缺陷）。2026-09-24
+  尝试非 ASAN 重编验证「ASAN 导致死锁」假设：Makefile 把 r2 库列表塞在
+  LDFLAGS、ASAN 注入在 configure 生成的默认 CFLAGS，两次覆盖式重编分别
+  死于丢头文件/丢库——**验证成本超阈值，归档**。后续路径：上游 issue /
+  换 GhidraMCP。证据见 probe_radare2 注释。
 - **HexStrike 其余能力**（明确收窄，非遗漏）：nikto（bookworm 无包）、
   wpscan（Ruby 依赖重）、metasploit（体积 GB 级）、浏览器 agent（需 Chrome）、
   云工具（需云凭据）、`create_file/execute_command/install_python_package`

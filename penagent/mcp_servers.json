@@ -92,6 +92,16 @@
         "allow": ["nmap_scan", "nmap_advanced_scan", "dirb_scan",
                   "hydra_attack", "john_crack", "hashcat_crack"]
       }
+    },
+    "yara": {
+      "transport": "stdio",
+      "command": ["docker", "run", "-i", "--rm",
+                  "-v", "${PENTEST_WS}/proteus-agent/data:/samples:ro",
+                  "proteus-mcp-yara:latest"],
+      "description": "YARA 恶意软件检测与模式匹配（扫描/自定义规则/规则集列表；内置 malware/crypto/packers/cve 规则集，样本经 data 目录只读挂载到 /samples——filepath 用容器内视角 /samples/...）",
+      "timeout": 300,
+      "dangerous": false,
+      "modes": []
     }
   }
 }

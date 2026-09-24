@@ -24,6 +24,7 @@ IMAGES = {
     "capa": (MCP_DIR / "capa", "proteus-mcp-capa:latest"),
     "cyberchef": (MCP_DIR / "cyberchef-mcp", "proteus-mcp-cyberchef:latest"),
     "hexstrike": (MCP_DIR / "hexstrike", "proteus-hexstrike:latest"),
+    "yara": (MCP_DIR / "yara", "proteus-mcp-yara:latest"),
 }
 
 

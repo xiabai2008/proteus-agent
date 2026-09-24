@@ -245,3 +245,22 @@ F 项是"第四步"——深度融合；T 项是"工具面打开"——不再局
   教训在起作用），改三元无空格写法后过。全量 443 passed。
 - 至此**规划四步全部执行完毕**。剩余按需项：T2（GhidraMCP/OSINT/semgrep）、
   radare2-mcp 专项（上游 tools/list 死锁）、yara-mcp（低优先）。
+
+
+**T2 按需项收口 ✅（2026-09-24 上午）**
+- **yara-mcp ✅ 接线**：Docker Hub 恢复后补建（109MB，alpine 基础）；三补丁
+  （apk 清华 / gh-proxy 规则克隆 / mcp 钉 1.18）；5 工具注册，内核探针真调用
+  通过（内置 malware/crypto/packers/cve 规则集扫 fw_v2.bin）。构建件纳管
+  `docker/mcp/yara/`。
+- **沙箱扩层 ✅**：`proteus-sandbox` 加入 semgrep（SAST 代码审计）+ sherlock +
+  theHarvester（OSINT），external_tools.json 新增三条 CLI 工具（semgrep_scan /
+  sherlock_scan / theharvester_scan，均 network=true、dangerous=false）。
+  **踩坑：PyPI 的 theHarvester 是 0.0.1 占位假包（无模块无 CLI）**——真身走
+  gh-proxy 装源码包；同时把构建期自检从「管道吞错」改成严格退出码模式
+  （`command -v` / 显式非零），该漏洞让坏安装曾骗过自检层。
+- **radare2-mcp 归档定案**：非 ASAN 重编实验两次死于 Makefile 内部变量耦合
+  （r2 库列表在 LDFLAGS、ASAN 在 configure 默认 CFLAGS），验证成本超阈值；
+  后续路径 = 上游 issue / GhidraMCP。
+- **GhidraMCP 评估：暂不接**。需要 Ghidra（Java ~400MB + JDK）+ 桥接插件 +
+  headless 分析链；当前 RE 能力已由 binwalk/capa/yara 覆盖大半，深度 RE 场景
+  出现时再按需接（记为按需项，非缺口）。

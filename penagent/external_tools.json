@@ -310,6 +310,65 @@
       "timeout": 1200,
       "dangerous": true,
       "network": true
+    },
+    "semgrep_scan": {
+      "description": "semgrep：SAST 代码审计（--config auto 拉取社区规则；路径为沙箱内路径，相对 workdir）",
+      "parameters": {
+        "target": {
+          "type": "string"
+        }
+      },
+      "command": [
+        "semgrep",
+        "scan",
+        "--config",
+        "auto",
+        "{args}"
+      ],
+      "positional": true,
+      "timeout": 900,
+      "dangerous": false,
+      "network": true
+    },
+    "sherlock_scan": {
+      "description": "sherlock：OSINT 用户名跨平台枚举（400+ 站点）",
+      "parameters": {
+        "username": {
+          "type": "string"
+        }
+      },
+      "command": [
+        "sherlock",
+        "{args}",
+        "--print-found",
+        "--timeout",
+        "20"
+      ],
+      "positional": true,
+      "timeout": 600,
+      "dangerous": false,
+      "network": true
+    },
+    "theharvester_scan": {
+      "description": "theHarvester：OSINT 情报收集（邮箱/子域/主机，keyless 源）",
+      "parameters": {
+        "domain": {
+          "type": "string"
+        }
+      },
+      "command": [
+        "theHarvester",
+        "-d",
+        "{args}",
+        "-b",
+        "crtsh,duckduckgo,otx,baidu",
+        "-l",
+        "50"
+      ],
+      "positional": true,
+      "timeout": 600,
+      "dangerous": false,
+      "network": true
     }
   }
 }

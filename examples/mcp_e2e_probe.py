@@ -115,6 +115,14 @@ def probe_hexstrike() -> int:
                                            "ports": "3110,4080"}))
 
 
+def probe_yara() -> int:
+    # 用内置规则集扫 fw_v2.bin（预期 0 命中但调用链路全通）；入参名是 target
+    return _probe("yara", "",
+                  lambda reg: reg.execute("yara_yara_scan",
+                                          {"target":
+                                           "/samples/ctf/ghostpatch/fw_v2.bin"}))
+
+
 PROBES = {"rayscan": probe_rayscan,
           "chameleon": probe_chameleon,
           "seckb": probe_seckb,
@@ -123,7 +131,8 @@ PROBES = {"rayscan": probe_rayscan,
           "searchsploit": probe_searchsploit,
           "capa": probe_capa,
           "cyberchef": probe_cyberchef,
-          "hexstrike": probe_hexstrike}
+          "hexstrike": probe_hexstrike,
+          "yara": probe_yara}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in PROBES:
