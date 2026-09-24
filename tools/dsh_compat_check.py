@@ -26,7 +26,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PRESET_DIR = ROOT / "dsh" / ".agent-presets" / "proteus"
+PRESET_DIR = ROOT / "dsh" / ".agent-presets"
+SHARED_DIR = PRESET_DIR / "_shared"
+TEMPLATE = SHARED_DIR / "agent.cordis.template.yml"
+TOOLS_POLICY = SHARED_DIR / "proteus-tools-policy.mjs"
 BRIDGE_PKG = ROOT / "dsh" / "proteus-bridge" / "package.json"
 LOCK = ROOT / "dsh" / "DSH_VERSION.lock"
 
@@ -103,9 +106,11 @@ def parse_rows(yml: str) -> list[dict]:
 
 
 def check_pkgs() -> None:
-    yml = read_text(PRESET_DIR / "agent.cordis.yml")
+    # P0-6 起组合文件由模板渲染：仓库里的事实来源是模板（三个 preset 只差占位符），
+    # 已装副本在 $DSH_HOME（本检查只看仓库侧触面，安装一致性归 dsh_install --check）
+    yml = read_text(TEMPLATE)
     if not yml:
-        record("FAIL", "C1 包存在性", f"preset 组合文件缺失：{PRESET_DIR / 'agent.cordis.yml'}")
+        record("FAIL", "C1 包存在性", f"preset 组合模板缺失：{TEMPLATE}")
         return
     nm = profiles_nm()
     enabled, disabled, missing = set(), set(), set()
