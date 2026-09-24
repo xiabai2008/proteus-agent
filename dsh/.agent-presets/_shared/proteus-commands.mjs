@@ -213,6 +213,27 @@ async function handleScope(invocation) {
   }
 }
 
+/** P2-3：审计层级视图（spawn 内核 CLI `penagent tree`，与 CLI 单一实现）。 */
+async function handleTree(invocation) {
+  const root = repoRoot()
+  const py = process.env.PENTEST_PY312 || ''
+  if (!root) {
+    return { kind: 'error', text: 'PENTEST_WS 未设置，定位不到 Proteus 仓库根。' }
+  }
+  if (!py) {
+    return { kind: 'error', text: 'PENTEST_PY312 未设置（内核解释器目录）。' }
+  }
+  const mission = String(invocation.rawInput || '').trim()
+  const args = ['-m', 'penagent', 'tree']
+  if (mission) args.push('--mission', mission)
+  try {
+    const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()
+    return { kind: 'success', text: out.slice(0, 4000) || '(空输出)' }
+  } catch (e) {
+    return { kind: 'error', text: `内核命令执行失败: ${String(e.message || e)}` }
+  }
+}
+
 /** F5：审计通道快览（纯 node fs 读，不起进程）。 */
 function handleAudit() {
   const root = repoRoot()
@@ -295,6 +316,12 @@ export function apply(ctx, config = {}) {
     description: '查看/追加会话授权目标（人工入口；模型不能自我授权）',
     input: { hint: '[add <host[,host]> | remove <host> | clear]' },
     handler: (invocation) => handleScope(invocation)
+  })
+  ctx.commands.register({
+    name: 'proteus-tree',
+    description: '审计层级视图：任务 → 动作 → 产出（可选任务 id）',
+    input: { hint: '[<mission-id>]' },
+    handler: (invocation) => handleTree(invocation)
   })
   ctx.commands.register({
     name: 'proteus-audit',

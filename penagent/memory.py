@@ -106,11 +106,16 @@ class Memory:
         self._save_mission(rec)
 
     def finish(self, mission_id: str, outcome: str,
-               reflection: str = "") -> None:
+               reflection: str = "",
+               evidence_refs: Optional[list] = None) -> None:
         rec = self._load_mission(mission_id)
         rec["outcome"] = outcome
         rec["reflection"] = reflection
         rec["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if evidence_refs is not None:
+            # 结论引用了哪些证据——层级视图与评测都要它；此前只在链上，
+            # 作战记录里查不到（P2-3 补齐）
+            rec["evidence_refs"] = [int(x) for x in evidence_refs]
         self._save_mission(rec)
 
     def get_mission(self, mission_id: str) -> dict:

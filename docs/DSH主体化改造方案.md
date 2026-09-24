@@ -189,7 +189,7 @@ roster 校验 / `--check` 全部按列表循环；`dsh/start-proteus.cmd` 的同
 | P2-1 | 宿主侧监督插件 `proteus-supervisor.mjs`：同工具+同参数重复到阈值即 deny（理由可操作），第二次升级为 `ask`，留痕进 spool | `3bf8aa1` | 完成（5 条用例） |
 | P2-4 | 注入护栏写进两套人格：工具返回的目标内容一律不可信；只有人的消息才算指令 | 同上 | 完成（软约束，机制侧仍是白名单+审批） |
 | P2-2 | CTF 评测分档（unguided / subtask / subtask-guided） | `—` | **完成（2026-09-24）**：里程碑由题集真值派生（不手写 33 份）、判据落在**工具输出**上；`benchmark --suite ctf` 出分档行。实测参考解 33/33 且里程碑均值 100% |
-| P2-3 | 审计层级视图（Task / Action / Artifact） | — | **待做**：现有 `evidence_report` 已给任务清单与步骤；层级视图要先把 链上记录 ↔ 任务 的关联补上 |
+| P2-3 | 审计层级视图（Task / Action / Artifact） | — | **完成（2026-09-24）**：链记录带 `mission`/`step` 归属 + `evidence_seq` 关联；`penagent tree` / `/proteus-tree` 出三层视图，无归属记录单独列出不静默丢；顺带修掉"作战记录只扫 default 分区"的盲区 |
 
 阶段 1+2（已完成部分）验收：全量 **499 passed / 16 skipped**；三个 preset
 `--check` 全绿、roster 均未 broken。

@@ -36,6 +36,7 @@ RUNNER = textwrap.dedent("""
       scopeAdd: await get('proteus-scope').handler(
         { rawInput: 'add example.com,10.0.0.5' }),
       scopeBad: await get('proteus-scope').handler({ rawInput: 'frobnicate x' }),
+      tree: await get('proteus-tree').handler({ rawInput: '' }),
       evidence: await get('proteus-evidence').handler({ rawInput: '' }),
       skills: await get('proteus-skills').handler({ rawInput: '' }),
       audit: get('proteus-audit').handler({}),
@@ -59,6 +60,9 @@ def fake_ws(tmp_path: Path) -> Path:
         "argv = sys.argv[1:]\n"
         "if argv[:1] == ['evidence']:\n"
         "    print('证据链：桩 · 校验 通过')\n"
+        "elif argv[:1] == ['tree']:\n"
+        "    print('任务 桩id · success · 127.0.0.1')\n"
+        "    print('  ├─ #1 codec_decode [OK]')\n"
         "elif argv[:1] == ['scope']:\n"
         "    path = os.path.join('data', 'session-scope.json')\n"
         "    cur = []\n"
@@ -117,7 +121,7 @@ def _run_plugin(ws: Path) -> dict:
 def test_commands_registered(fake_ws):
     assert _run_plugin(fake_ws)["names"] == [
         "proteus-mode", "proteus-evidence", "proteus-skills", "proteus-scope",
-        "proteus-audit"]
+        "proteus-tree", "proteus-audit"]
 
 
 def test_scope_command_is_human_authorization_entry(fake_ws):
@@ -135,6 +139,13 @@ def test_scope_command_is_human_authorization_entry(fake_ws):
 
     assert result["scopeBad"]["kind"] == "error"
     assert "未知子命令" in result["scopeBad"]["text"]
+
+
+def test_tree_command_spawns_kernel_cli(fake_ws):
+    """P2-3：/proteus-tree 走内核 CLI（与 `python -m penagent tree` 同一实现）。"""
+    tree = _run_plugin(fake_ws)["tree"]
+    assert tree["kind"] == "success", tree
+    assert "任务" in tree["text"] and "codec_decode" in tree["text"]
 
 
 def test_mode_flow(fake_ws):

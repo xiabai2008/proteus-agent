@@ -66,8 +66,9 @@
   三个场景 preset（模板渲染 + 共享实现 + `--session-key` 隔离）· 渗透三件套
   （`session_http` / `replay_request` / `report_gen`+SARIF）· CTF `checksec_bin` ·
   宿主侧监督层（循环检测与救场）· 注入护栏。待办编号 R-25..R-32。
-  方案与执行记录见 `docs/DSH主体化改造方案.md`。**剩余**：真机会话冒烟（选 preset 走
-  一轮"切模式 / 授权 / 裁决"）、P2-2 CTF 评测分档、P2-3 审计层级视图。
+  方案与执行记录见 `docs/DSH主体化改造方案.md`。**阶段 0/1/2 已全部完成**
+  （P2-2 评测分档、P2-3 审计层级视图均已落地）；剩余：UI 点击级验收（R-33，
+  桌面浏览器传输问题，用系统浏览器打开 token URL 即可绕过）。
 
 ## 4. ModeProfile 规范（阶段一的核心交付）
 

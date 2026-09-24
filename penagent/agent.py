@@ -303,15 +303,28 @@ class PenAgent:
                 ranked.insert(0, ranked.pop(idx))
         return ranked[-3:]
 
+    def _append_evidence(self, kind: str, mission_id: str, step: int,
+                         content: dict):
+        """带任务归属的留证（P2-3）。
+
+        为什么必须带：链是**扁平**的，而 `mission`/`step` 是层级视图
+        （Task → Action → Artifact）唯一的关联依据。此前链记录里没有任务号，
+        于是"这条 evidence 属于哪次任务"只能靠 seq 区间猜——`_mission_context`
+        就是这么做的（按 `since_seq` 划范围），一旦并发或分叉就不可靠。
+        """
+        payload = {"mission": mission_id, "step": step, **content}
+        return self.evidence.append(kind, payload)
+
     def _blocked(self, mission_id: str, step: int, tool: str, args: dict,
                  reason: str, level: str) -> dict:
         """记录被模式/护栏拦截的工具调用（证据链 + 作战记录），回灌消息。"""
-        self.evidence.append("tool_call", {"tool": tool, "args": args,
-                                           "blocked": True, "reason": reason,
-                                           "level": level})
+        record = self._append_evidence("tool_call", mission_id, step, {
+            "tool": tool, "args": args,
+            "blocked": True, "reason": reason, "level": level})
         self.memory.add_step(mission_id, {"step": step, "tool": tool,
                                           "args": args, "blocked": True,
-                                          "reason": reason})
+                                          "reason": reason,
+                                          "evidence_seq": record.seq})
         return {"role": "user", "content": f"护栏拦截: {reason}"}
 
     def _mission_context(self, since_seq: int) -> str:
@@ -412,8 +425,8 @@ class PenAgent:
                 exhaust_reason = (f"时长预算已用尽"
                                   f"（max_minutes={self.max_minutes} 分钟）")
                 time_exhausted = True
-                self.evidence.append("decision", {
-                    "step": step, "phase": "budget_exhausted",
+                self._append_evidence("decision", mission_id, step, {
+                    "phase": "budget_exhausted",
                     "thought": "时长预算耗尽，切换收口策略"})
                 break
             try:
@@ -427,8 +440,8 @@ class PenAgent:
                 self._record_skill_outcomes(False)
                 return self._finish(mission)
 
-            self.evidence.append("decision", {
-                "step": step, "thought": decision.get("thought", "")})
+            self._append_evidence("decision", mission_id, step, {
+                "thought": decision.get("thought", "")})
 
             if decision.get("done"):
                 # 收口判定交给注入的 verifier（模式决定判据）：
@@ -451,11 +464,12 @@ class PenAgent:
                 mission.outcome = "success"
                 mission.summary = decision.get("summary", "")
                 mission.evidence_refs = list(verdict.evidence_refs)
-                self.evidence.append("conclusion", {
+                self._append_evidence("conclusion", mission_id, step, {
                     "summary": mission.summary,
                     "evidence_refs": mission.evidence_refs,
                     "verdict": verdict.reason})
-                self.memory.finish(mission_id, mission.outcome)
+                self.memory.finish(mission_id, mission.outcome,
+                                   evidence_refs=mission.evidence_refs)
                 self._record_skill_outcomes(True)
                 return self._finish(mission)
 
@@ -486,7 +500,7 @@ class PenAgent:
                 continue
 
             tool_result = self.registry.execute(tool, args)
-            self.evidence.append("tool_call", {
+            record = self._append_evidence("tool_call", mission_id, step, {
                 "tool": tool, "args": args, "ok": tool_result.ok,
                 "output": str(tool_result.output)[:1500],
                 "error": tool_result.error,
@@ -494,6 +508,7 @@ class PenAgent:
             self.memory.add_step(mission_id, {
                 "step": step, "tool": tool, "args": args,
                 "ok": tool_result.ok, "output": str(tool_result.output)[:800],
+                "evidence_seq": record.seq,
             })
             self._emit(type="step", mission=mission_id, step=step,
                        tool=tool, ok=tool_result.ok)
@@ -505,8 +520,8 @@ class PenAgent:
         # 预算（步数/时长）耗尽：不硬退出，换策略——追加一轮"强制收口"，
         # 要求模型停止工具调用、基于已有证据给出最终结论，再交判定器裁决
         if not time_exhausted:
-            self.evidence.append("decision", {
-                "step": self.max_steps, "phase": "budget_exhausted",
+            self._append_evidence("decision", mission_id, self.max_steps, {
+                "phase": "budget_exhausted",
                 "thought": "步数预算耗尽，切换收口策略"})
         messages.append({"role": "user", "content": (
             f"{exhaust_reason}。切换策略："
@@ -529,11 +544,12 @@ class PenAgent:
             mission.outcome = "success"
             mission.summary = decision.get("summary", "")
             mission.evidence_refs = list(verdict.evidence_refs)
-            self.evidence.append("conclusion", {
+            self._append_evidence("conclusion", mission_id, self.max_steps, {
                 "summary": mission.summary,
                 "evidence_refs": mission.evidence_refs,
                 "verdict": verdict.reason, "phase": "budget_concluded"})
-            self.memory.finish(mission_id, mission.outcome)
+            self.memory.finish(mission_id, mission.outcome,
+                               evidence_refs=mission.evidence_refs)
             self._record_skill_outcomes(True)
             return self._finish(mission)
 

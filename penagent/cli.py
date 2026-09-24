@@ -307,6 +307,18 @@ def cmd_scope(args) -> int:
     return 0
 
 
+def cmd_tree(args) -> int:
+    """审计层级视图（P2-3）：Task → Action → Artifact。"""
+    from penagent.report import mission_tree, render_tree
+
+    tree = mission_tree(args.data, getattr(args, "mission", "") or "")
+    if getattr(args, "json", False):
+        print(json.dumps(tree, ensure_ascii=False, indent=1))
+    else:
+        print(render_tree(tree))
+    return 0
+
+
 def cmd_gaps(args) -> int:
     """技能盲区发现：工具使用统计 + 能力盲区建议。"""
     from penagent.gaps import analyze_gaps, analyze_gaps_llm
@@ -399,10 +411,12 @@ def main(argv: list[str] | None = None) -> int:
                       help="外部 MCP 发现的全局预算（秒，缺省 %(default)s）")
     p_ag.set_defaults(fn=cmd_agents)
 
+    p_scope = None
     for name, fn, help_t in (
         ("skills", cmd_skills, "经验库技能"),
         ("missions", cmd_missions, "作战记录"),
         ("scope", cmd_scope, "会话授权目标（只有人能写；/proteus-scope 用）"),
+        ("tree", cmd_tree, "审计层级视图：Task → Action → Artifact（P2-3）"),
         ("verify", cmd_verify, "证据链校验"),
         ("evidence", cmd_evidence, "证据链+作战记录汇总（人读，/proteus-evidence 用）"),
         ("dsh-sync", cmd_dsh_sync, "导入 DSH 会话事件到证据链（审计桥）"),
@@ -435,6 +449,11 @@ def main(argv: list[str] | None = None) -> int:
                            help="授权来源说明（写进文件，便于事后审计）")
             p.add_argument("--session-key", default="",
                            help="会话状态文件键（与 mcp 的 --session-key 一致）")
+        if name == "tree":
+            p.add_argument("--mission", default="",
+                           help="只看指定任务（缺省列出全部）")
+            p.add_argument("--json", action="store_true",
+                           help="输出 JSON（默认给人读的缩进文本）")
         if name == "skills":
             p.add_argument("--seed", action="store_true",
                            help="写入预置技能种子（幂等；来源见 "
