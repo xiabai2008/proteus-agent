@@ -108,3 +108,66 @@ def test_cli_args_expansion():
 
     assert TR._cli_args(None, {"target": "http://x", "verbose": True}) == [
         "--target", "http://x", "--verbose"]
+
+
+# ----------------------------------------------------------------------
+# 工具结果语义（2026-09-24 实测修复）
+#
+# 判据：**抛异常、或返回值带非空 `error` 键 = ok=False**。
+# 此前只按"是否抛异常"判失败，而 function 型工具用「返回 {"error": ...}」
+# 表达业务失败 → 失败被记成成功：证据链/作战记录/gaps 统计/评测评分卡全按
+# ok 读，MCP 层再给出 isError=false，DSH 会话里的外层模型看到"成功"不会改
+# 策略（实测重复了 57 次同一个失败调用，60 步预算耗尽）。
+# ----------------------------------------------------------------------
+def _error_dict_tool() -> ToolSpec:
+    return ToolSpec(name="fake_lookup", description="返回 error 字典",
+                    parameters={"key": {"type": "string"}},
+                    fn=lambda **kw: {"key": kw.get("key"), "error": "没找到"})
+
+
+def test_dict_error_maps_to_not_ok():
+    reg = ToolRegistry()
+    reg.register(_error_dict_tool())
+
+    r = reg.execute("fake_lookup", {"key": "x"})
+    assert not r.ok
+    assert r.error == "没找到"
+    # output 原样保留：错误正文仍要能被模型读到并自我纠正
+    assert r.output == {"key": "x", "error": "没找到"}
+    assert r.to_dict()["ok"] is False
+
+
+def test_ok_kept_for_empty_error_and_non_dict_output():
+    reg = ToolRegistry()
+    reg.register(ToolSpec(name="placeholder", parameters={},
+                          fn=lambda **kw: {"error": "", "v": 1}))
+    reg.register(ToolSpec(name="plain", parameters={},
+                          fn=lambda **kw: "纯文本输出"))
+    assert reg.execute("placeholder", {}).ok
+    assert reg.execute("plain", {}).ok
+
+
+def test_real_tools_report_failure_as_not_ok(tmp_path):
+    """真实工具契约：文件不存在 / 解码方式不支持 / HTTP 方法不支持 → 失败。"""
+    from penagent.builtin_tools import http_raw
+    from penagent.ctf_tools import codec_chain, file_type
+
+    reg = ToolRegistry()
+    reg.register(ToolSpec(name="file_type", fn=file_type,
+                          parameters={"path": {"type": "string"}}))
+    reg.register(ToolSpec(name="codec_chain", fn=codec_chain,
+                          parameters={"data": {"type": "string"},
+                                      "codecs": {"type": "string"}}))
+    reg.register(ToolSpec(name="http_raw", fn=http_raw,
+                          parameters={"url": {"type": "string"},
+                                      "method": {"type": "string"}}))
+
+    missing = reg.execute("file_type", {"path": str(tmp_path / "nope.txt")})
+    assert not missing.ok and "文件不存在" in missing.error
+
+    bad_codec = reg.execute("codec_chain", {"data": "abc", "codecs": "nope"})
+    assert not bad_codec.ok and "不支持的解码方式" in bad_codec.error
+
+    bad_method = reg.execute("http_raw", {"url": "http://127.0.0.1/",
+                                          "method": "TRACE"})
+    assert not bad_method.ok and "不支持的方法" in bad_method.error

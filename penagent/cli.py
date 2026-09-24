@@ -98,11 +98,43 @@ def cmd_run(args) -> int:
 
 
 def cmd_reflect(args) -> int:
+    """任务后反思（LLM 复盘 → 技能沉淀）。
+
+    任务按 `memory_namespace` 分区落盘，而 `Memory(data)` 默认只看 default
+    分区——所以这里**必须**先定位任务所在分区（P0 修复，2026-09-24 实测）：
+    此前 `reflect <id>` 对任何模式下跑出来的任务都报 `FileNotFoundError`，
+    技能沉淀闭环在正常使用下就是断的。`--mode` 用于显式指定分区。
+    """
     from penagent.reflect import Reflector
 
-    memory = Memory(args.data)
+    mission_id = args.mission
+    mode_id = getattr(args, "mode", "") or ""
+    if mode_id:
+        # 显式指定分区：与 `skills --mode` 同一口径（模式名 → 记忆分区）
+        from .modes import load_mode
+
+        try:
+            namespace = load_mode(mode_id).memory_namespace
+        except Exception as exc:                       # noqa: BLE001
+            print(f"模式不可用: {exc}")
+            return 1
+    else:
+        located = Memory.locate_mission(args.data, mission_id)
+        if located is None:
+            known = Memory(args.data).namespaces() or ["default"]
+            print(f"任务 {mission_id} 不存在（已查找分区：{known}）")
+            return 1
+        namespace, _ = located
+
+    memory = Memory(args.data, namespace=namespace)
     evidence = EvidenceChain(Path(args.data) / "chain.jsonl")
-    analysis, skill = Reflector().reflect(args.mission, memory, evidence)
+    try:
+        analysis, skill = Reflector().reflect(mission_id, memory, evidence)
+    except (OSError, ValueError) as exc:
+        # 读不到/损坏：给人读的提示，不抛裸 traceback
+        print(f"反思失败: {exc}")
+        return 1
+    print(f"分区: {namespace}")
     print(f"反思: {analysis}")
     if skill:
         print(f"技能已沉淀: {skill.title} "
@@ -395,6 +427,8 @@ def main(argv: list[str] | None = None) -> int:
     p_ref = sub.add_parser("reflect", help="任务后反思（LLM 复盘→技能沉淀）")
     p_ref.add_argument("mission")
     p_ref.add_argument("--data", default="data")
+    p_ref.add_argument("--mode", default="",
+                       help="任务所属模式（缺省自动跨分区查找；显式指定可避免歧义）")
     p_ref.set_defaults(fn=cmd_reflect)
 
     p_ag = sub.add_parser("agents", help="列出可用工具")

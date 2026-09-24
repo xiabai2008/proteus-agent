@@ -9,6 +9,11 @@
 安全护栏：所有工具执行前经**闸门**（目标白名单 + 高危授权 + 协议白名单，
 `penagent/policy_gate.py`）与**沙箱**（`penagent/sandbox.py`）两道裁决——两者都由
 注册表持有，裁决发生在 `execute()` 内部，任何调用方都绕不过去。
+
+结果语义：**抛异常、或返回值里带非空 `error` 键 = 失败（`ok=False`）**。
+后者由 `business_error()` 统一识别——function 型工具（`file_type` / `http_probe`
+/ `dns_lookup` / `codec_*` 等）用「返回 `{"error": "..."}`」表达业务失败，若只按
+异常判失败，失败会被记成成功（详见 `business_error` 的说明）。
 """
 from __future__ import annotations
 
@@ -60,6 +65,30 @@ class ToolResult:
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
+
+
+def business_error(output: Any) -> str:
+    """工具返回值里的**业务失败**原因（返回 dict 且带非空 `error` 键）。
+
+    为什么需要它（2026-09-24 真机实测）：`file_type` / `http_probe` /
+    `dns_lookup` / `robots_fetch` / `codec_decode` / `codec_chain` 等 function
+    工具用「返回 `{"error": "..."}`」表达业务失败（文件不存在、DNS 失败、
+    解码失败……），只有抛异常才算失败。于是**失败被记成 `ok=True`**：
+    证据链、作战记录、`gaps` 失败率与评测评分卡都按 `ok` 读，MCP 层再据此
+    给出 `isError=false`——DSH 会话里的外层模型看到的是"成功"。
+
+    实测后果：一次 CTF 会话里模型用错了路径，`file_type` 连失败 57 次全记
+    OK，模型因此毫无纠正信号，60 步预算耗尽、任务失败（见
+    `docs/DSH主体化交付说明.md` 相邻的实测记录）。
+
+    `output` **原样保留**（错误正文仍要能被模型读到并自我纠正），只改
+    `ok` / `error` 语义。空串 `error` 不算失败（部分工具用它占位）。
+    """
+    if isinstance(output, dict):
+        err = output.get("error")
+        if err:
+            return str(err)[:1000]
+    return ""
 
 
 class ToolRegistry:
@@ -139,6 +168,13 @@ class ToolRegistry:
                                     error=f"不支持的工具类型: {spec.kind}")
         except Exception as exc:
             result = ToolResult(tool=name, ok=False, error=str(exc))
+        if result.ok:
+            # 业务失败也判失败：返回值自带非空 error 键时映射为 ok=False，
+            # 供证据链 / 作战记录 / 评分卡 / MCP isError 一致消费
+            failure = business_error(result.output)
+            if failure:
+                result.ok = False
+                result.error = failure
         result.duration_ms = int((time.time() - started) * 1000)
         return result
 

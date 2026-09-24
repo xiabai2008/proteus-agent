@@ -64,6 +64,38 @@ def test_tool_call_unknown_tool(server):
 
 
 # ----------------------------------------------------------------------
+# pentest_reflect 必须能反思模式分区里的任务（2026-09-24 实测修复）
+#
+# 任务按 memory_namespace 分区落盘，而服务端 `self.memory` 是 default 分区：
+# DSH 三个 preset 的默认模式都不是 default，于是此前**必然**报
+# FileNotFoundError——技能沉淀闭环整条断掉（连带 /proteus-skills 导出为空）。
+# ----------------------------------------------------------------------
+def test_reflect_reads_mode_partitioned_mission(server, tmp_path, monkeypatch):
+    from penagent.memory import Memory
+
+    mem = Memory(tmp_path / "data", namespace="ctf-crypto")
+    mid = mem.new_mission("data/eval-ctf/encoding-chain.txt", "解出 flag")
+    mem.add_step(mid, {"step": 1, "tool": "codec_chain", "ok": True})
+
+    monkeypatch.setattr("penagent.reflect.chat_json", lambda *a, **kw: {
+        "outcome_analysis": "编码链解出", "skill": None})
+    payload = _payload(_call(server, "tools/call",
+                             {"name": "pentest_reflect",
+                              "arguments": {"mission_id": mid}}, msg_id=9))
+    assert payload["namespace"] == "ctf-crypto"
+    assert "编码链解出" in payload["analysis"]
+
+
+def test_reflect_unknown_mission_is_readable_error(server):
+    payload = _payload(_call(server, "tools/call",
+                             {"name": "pentest_reflect",
+                              "arguments": {"mission_id": "deadbeef"}},
+                             msg_id=10))
+    assert payload["ok"] is False
+    assert "不存在" in payload["error"] and "分区" in payload["error"]
+
+
+# ----------------------------------------------------------------------
 # 工具面按模式裁剪（P0-3，2026-09-24）
 #
 # 此前 `tools/list` 用的是启动时的全量注册表（不带模式）：

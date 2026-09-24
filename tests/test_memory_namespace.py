@@ -281,3 +281,56 @@ def test_reflect_extracts_skill_category(monkeypatch, tmp_path):
     _, skill = Reflector().reflect(mid, mem, ev)
     assert skill is not None
     assert skill.category == "sqli"
+
+
+# ----------------------------------------------------------------------
+# 跨分区定位任务（reflect 闭环，2026-09-24 实测修复）
+#
+# 任务按 memory_namespace 分区落盘，而 `Memory(root)` 默认只看 default 分区：
+# `reflect` 与 MCP `pentest_reflect` 此前都按默认分区找任务，于是任何模式下
+# 跑出来的任务都找不到——DSH 会话里三个 preset 的默认模式都不是 default，
+# 技能沉淀闭环整条是断的（连带 /proteus-skills 导出目录永远为空）。
+# ----------------------------------------------------------------------
+def test_locate_mission_across_namespaces(tmp_path):
+    ctf = Memory(tmp_path, namespace="ctf-crypto")
+    mid = ctf.new_mission("data/eval-ctf/encoding-chain.txt", "解出 flag")
+
+    # 默认分区看不到模式分区的任务（修复前的失败形态）
+    with pytest.raises(FileNotFoundError):
+        Memory(tmp_path).get_mission(mid)
+
+    located = Memory.locate_mission(tmp_path, mid)
+    assert located is not None
+    namespace, record = located
+    assert namespace == "ctf-crypto"
+    assert record["objective"] == "解出 flag"
+
+
+def test_locate_mission_rejects_traversal_and_unknown(tmp_path):
+    Memory(tmp_path, namespace="ctf-web").new_mission("t", "o")
+    assert Memory.locate_mission(tmp_path, "no-such-id") is None
+    # mission_id 可能来自模型/命令行输入：路径穿越必须被拒（否则等于任意文件读取）
+    assert Memory.locate_mission(tmp_path, "../../etc/passwd") is None
+    assert Memory.locate_mission(tmp_path, "..\\x") is None
+    assert Memory.locate_mission(tmp_path, "") is None
+
+
+def test_cli_reflect_finds_mode_partition(tmp_path, monkeypatch, capsys):
+    """CLI reflect 对模式分区任务可用（此前必然 FileNotFoundError）。"""
+    from penagent import cli
+
+    mem = Memory(tmp_path, namespace="pentest-standard")
+    mid = mem.new_mission("http://127.0.0.1:8080", "侦察")
+    mem.add_step(mid, {"step": 1, "tool": "http_probe", "ok": True})
+
+    monkeypatch.setattr("penagent.reflect.chat_json", lambda *a, **kw: {
+        "outcome_analysis": "成功", "skill": None})
+    rc = cli.main(["reflect", mid, "--data", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "分区: pentest-standard" in out and "成功" in out
+
+    # 不存在的任务：给人读的提示 + 非零退出，不抛裸 traceback
+    rc2 = cli.main(["reflect", "deadbeef", "--data", str(tmp_path)])
+    assert rc2 == 1
+    assert "不存在" in capsys.readouterr().out

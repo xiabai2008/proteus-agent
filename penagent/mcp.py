@@ -428,9 +428,26 @@ class PentestMCPServer:
             if name == "pentest_missions":
                 return self._result(msg_id, self.memory.list_missions())
             if name == "pentest_reflect":
+                # 任务按 memory_namespace 分区落盘，必须先定位分区（2026-09-24
+                # 实测）：此前用服务端的 default 分区 Memory 找任务，DSH 会话里
+                # 三个 preset 的默认模式都不是 default，于是**必然**报
+                # FileNotFoundError——技能沉淀闭环整条断掉。
+                mission_id = str(args.get("mission_id") or "")
+                located = Memory.locate_mission(self.data_dir, mission_id)
+                if located is None:
+                    known = self.memory.namespaces() or ["default"]
+                    return self._result(msg_id, {
+                        "ok": False,
+                        "error": (f"任务 {mission_id!r} 不存在"
+                                  f"（已查找分区：{known}）")},
+                        is_error=True)
+                namespace, _ = located
                 analysis, skill = Reflector(self.llm).reflect(
-                    args.get("mission_id", ""), self.memory, self.evidence)
+                    mission_id, Memory(self.data_dir, namespace=namespace),
+                    self.evidence)
                 return self._result(msg_id, {
+                    # 分区回传：技能会沉淀进该分区（mode.skills 按它过滤）
+                    "namespace": namespace,
                     "analysis": analysis,
                     "skill": skill.to_dict() if skill else None})
             # 底层工具：按当前模式裁剪后的注册表执行（P0-3）——被模式禁用的

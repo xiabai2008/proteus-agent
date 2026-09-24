@@ -87,6 +87,37 @@ class Memory:
                 found.update(p.name for p in base.iterdir() if p.is_dir())
         return sorted(found)
 
+    @classmethod
+    def locate_mission(cls, root: str | Path,
+                       mission_id: str) -> Optional[tuple[str, dict]]:
+        """跨分区查找任务：返回 `(namespace, 记录)`，找不到返回 None。
+
+        为什么要跨分区（2026-09-24 真机实测）：任务按 `memory_namespace` 分区
+        落盘，而 `Memory(root)` 默认只看 `default` 分区。`python -m penagent
+        reflect` 与 MCP 的 `pentest_reflect` 此前都按 `Memory(data)` 找任务，
+        于是**任何模式下跑出来的任务都找不到**——DSH 会话里必然如此（三个 preset
+        的默认模式都不是 default），技能沉淀闭环直接断掉，连带
+        `/proteus-skills` 导出目录永远是空的。
+
+        视图侧早已按分区扫（`report._all_missions`），这里把同一口径补到"读单条"。
+
+        `mission_id` 只允许普通 id（拒绝路径分隔符与 `..`）——它可能来自模型或
+        命令行输入，不做校验就等于把任务读取变成任意文件读取。
+        """
+        if (not mission_id or "/" in mission_id or "\\" in mission_id
+                or ".." in mission_id):
+            return None
+        base = cls(root)
+        for namespace in base.namespaces() or [base.namespace]:
+            path = base.root / "missions" / namespace / f"{mission_id}.json"
+            if not path.is_file():
+                continue
+            try:
+                return namespace, json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"任务文件损坏：{path}（{exc}）") from exc
+        return None
+
     # ------------------------------------------------------------------
     # 作战记录
     def new_mission(self, target: str, objective: str) -> str:
