@@ -156,19 +156,25 @@ def test_gate_denies_dangerous_tool_without_operator_authorization():
 
 
 def test_gate_enforces_mode_capability_when_mode_present():
-    """带上模式时，capability 禁用同样在闸门处生效（不只靠注册表过滤）。"""
+    """带上模式时，capability 禁用同样在闸门处生效（不只靠注册表过滤）。
+
+    两条路径都钉：① 命中 `capability.deny`（nuclei_scan）；
+    ② 未命中 `capability.allow`（semgrep_scan，P0-2 后 CTF 模式不再放行它）。
+    """
     from penagent.modes import load_mode
 
-    mode = load_mode("ctf-web")            # 该模式 deny 了 http_probe 一族
+    mode = load_mode("ctf-web")
     registry = ToolRegistry(gate=_gate(targets=LOOPBACK, mode=mode))
-    registry.register(ToolSpec(
-        name="http_probe", description="探测",
-        parameters={"url": {"type": "string"}},
-        fn=lambda **kw: {"executed": True}))
+    for name in ("nuclei_scan", "semgrep_scan"):
+        registry.register(ToolSpec(
+            name=name, description="扫描",
+            parameters={"url": {"type": "string"}},
+            fn=lambda **kw: {"executed": True}))
 
-    result = registry.execute("http_probe", {"url": "http://127.0.0.1/"})
-    assert not result.ok
-    assert "禁用" in result.error
+    for name in ("nuclei_scan", "semgrep_scan"):
+        result = registry.execute(name, {"url": "http://127.0.0.1/"})
+        assert not result.ok, f"{name} 应被模式 capability 拦下"
+        assert "禁用" in result.error
 
 
 # ----------------------------------------------------------------------

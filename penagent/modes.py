@@ -11,6 +11,7 @@ scope / verifier / skills / memory_namespace / sandbox。
 """
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,21 @@ _PERMISSION_KEYS = {"default", "auto_approve", "require_confirm", "hard_deny"}
 _BUDGET_KEYS = {"max_steps", "max_minutes", "max_cost_usd", "model_tier"}
 _SCOPE_KEYS = {"target_allowlist", "network_egress"}
 _VERIFIER_KEYS = {"type", "pattern", "auto_retry", "require_poc"}
+
+
+def _matches(pattern: str, tool: str) -> bool:
+    """工具名匹配：精确名，或 fnmatch 通配（`*` / `chameleon_*`）。
+
+    工具名只含 `[a-z0-9_]`（注册中心统一小写下划线），因此 fnmatch 的字符类
+    语法不会被误用；引入通配是为了让模式文件表达"某个 server / 某一族的全部
+    工具"——容器 MCP 的工具数随镜像演进，逐条列举必然漂移，而**写错名字不会
+    报错，只会静默拒绝**（2026-09-24 P0-2 的 bug 就属这一类）。
+    """
+    return fnmatch.fnmatchcase(tool, pattern)
+
+
+def _any_match(patterns: tuple[str, ...], tool: str) -> bool:
+    return any(_matches(p, tool) for p in patterns)
 
 
 class ModeError(ValueError):
@@ -129,8 +145,15 @@ class Persona:
 class Capability:
     """工具白名单 / 黑名单 / 参数冻结。
 
-    allow 支持 "*" 通配；deny 优先于 allow；allow 为空表示全部不可用
-    （fail-closed，避免漏配即放行）。
+    allow 支持通配：`"*"`（全部）或前缀式 `"chameleon_*"`（某个 server 的全部
+    工具）。deny 优先于 allow；allow 为空表示全部不可用（fail-closed，避免
+    漏配即放行）。
+
+    为什么需要前缀通配（2026-09-24，P0-2）：容器 MCP 的工具数随镜像演进
+    （binwalk 7 / yara 5 / capa 3 …），逐条列举必然漂移；而写错名字**不会
+    报错**——只会静默拒绝，正是"CTF 模式连 http_raw 都发不出去"那个 bug 的
+    成因。通配让模式文件能表达"这一族都要"，配 `tests/test_modes.py` 的
+    真名核对用例一起用。
     """
 
     allow: tuple[str, ...] = ()
@@ -138,19 +161,20 @@ class Capability:
     constraints: Mapping[str, str] = MappingProxyType({})
 
     def allows(self, tool: str) -> bool:
-        if tool in self.deny:
+        if _any_match(self.deny, tool):
             return False
         if not self.allow:
             return False
-        return "*" in self.allow or tool in self.allow
+        return _any_match(self.allow, tool)
 
     def constraint_for(self, tool: str) -> str:
         """该模式的参数冻结串（无则空串），供工具执行前追加。"""
         return self.constraints.get(tool, "")
 
     def denial_reason(self, tool: str) -> str:
-        if tool in self.deny:
-            return f"工具 {tool} 被当前模式 capability.deny 禁用"
+        hit = [p for p in self.deny if _matches(p, tool)]
+        if hit:
+            return f"工具 {tool} 被当前模式 capability.deny 禁用（命中 {hit}）"
         if not self.allow:
             return "当前模式 capability.allow 为空，未放行任何工具"
         return (f"工具 {tool} 不在当前模式 capability.allow "
@@ -159,7 +183,11 @@ class Capability:
 
 @dataclass(frozen=True)
 class Permission:
-    """权限档位：hard_deny > auto_approve > require_confirm > default。"""
+    """权限档位：hard_deny > auto_approve > require_confirm > default。
+
+    三个名单与 `capability` 用同一套匹配（精确名或前缀通配），避免"写了
+    `seckb_*` 却没生效"这类静默失效。
+    """
 
     default: str = "ask"
     auto_approve: tuple[str, ...] = ()
@@ -167,11 +195,11 @@ class Permission:
     hard_deny: tuple[str, ...] = ()
 
     def level_for(self, tool: str) -> str:
-        if tool in self.hard_deny:
+        if _any_match(self.hard_deny, tool):
             return "deny"
-        if tool in self.auto_approve:
+        if _any_match(self.auto_approve, tool):
             return "ok"
-        if tool in self.require_confirm:
+        if _any_match(self.require_confirm, tool):
             return "ask"
         return self.default
 

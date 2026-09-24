@@ -4,14 +4,22 @@ label: CTF Web 模式
 inherits: base
 persona: {system_prompt: prompts/ctf.md, output_format: raw_flag}
 capability:
-  # 前半为原始抽象名（保持语义不变），后半为阶段二实装后真实存在的工具名
-  # ——allow 是工具名精确匹配，抽象名不落到真实注册表就永远解不出题
-  allow: [http_test, browser_auto, script_run, file_read, crypto_tools, python_solve, codec_decode, codec_chain, file_type, rsactf_attack]
+  # 只写真名或前缀通配（2026-09-24 P0-2 修正）。
+  # 历史 bug：这里曾写抽象契约名（http_test / browser_auto / script_run /
+  # file_read / crypto_tools），与真实注册名对不上——allow 是精确匹配，
+  # 于是 **CTF 模式连 http_raw 都被拒绝**，且 --authorize 也抬不动
+  # （allow 未命中与 hard_deny 同类）。实测与修法见
+  # docs/修复待办清单.md R-26。
+  allow: [http_raw, http_probe, dns_lookup, robots_fetch, port_scan,
+          codec_decode, codec_chain, file_type, python_solve, rsactf_attack,
+          chameleon_*, seckb_*, binwalk_*, capa_*, yara_*, searchsploit_*,
+          cyberchef_*]
   deny: [nuclei, fscan, sqlmap]
 permission:
   default: ask
-  auto_approve: [codec_decode, codec_chain, file_type]
-  require_confirm: [python_solve, rsactf_attack]
+  auto_approve: [codec_decode, codec_chain, file_type, http_probe, http_raw,
+                 dns_lookup, robots_fetch, seckb_*]
+  require_confirm: [python_solve, rsactf_attack, port_scan]
   hard_deny: []
 # max_cost_usd 为预留字段（当前不生效），详见 modes/base.yaml 的注释
 budget: {max_steps: 60, max_minutes: 20, max_cost_usd: 1.0}

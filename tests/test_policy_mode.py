@@ -239,7 +239,7 @@ def test_required_allowlist_keeps_runtime_targets():
     policy = Policy(allowed_targets=["127.0.0.1"],
                     mode=load_mode("pentest-standard"))
     assert policy.allowed_targets == ["127.0.0.1"]
-    assert policy.check("httpx", ToolSpec(name="httpx"),
+    assert policy.check("httpx_probe", ToolSpec(name="httpx_probe"),
                         {"host": "127.0.0.1"})[0]
 
 

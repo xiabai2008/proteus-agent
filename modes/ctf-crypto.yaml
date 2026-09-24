@@ -4,11 +4,14 @@ label: CTF Crypto 模式
 inherits: base
 persona: {system_prompt: prompts/ctf.md, output_format: raw_flag}
 capability:
-  allow: [rsactf_attack, python_solve, codec_decode, codec_chain, file_type]
+  # 只写真名或前缀通配（2026-09-24 P0-2 统一口径，见 ctf-web.yaml 注释）
+  allow: [rsactf_attack, python_solve, codec_decode, codec_chain, file_type,
+          http_raw, dns_lookup,
+          binwalk_*, capa_*, yara_*, seckb_*]
   deny: [nuclei, fscan, sqlmap]
 permission:
   default: ask
-  auto_approve: [codec_decode, codec_chain, file_type]
+  auto_approve: [codec_decode, codec_chain, file_type, seckb_*]
   require_confirm: [python_solve, rsactf_attack]
   hard_deny: []
 # max_cost_usd 为预留字段（当前不生效），详见 modes/base.yaml 的注释

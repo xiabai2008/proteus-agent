@@ -102,7 +102,7 @@ def test_build_registry_applies_mode_availability():
 def test_mode_capability_and_declared_availability_stack(tmp_path):
     """两层过滤叠加：声明级可用性 + ModeProfile.capability。"""
     center = ToolCenter()
-    center.register_spec(ToolSpec(name="http_test"), source=SOURCE_FUNCTION,
+    center.register_spec(ToolSpec(name="codec_decode"), source=SOURCE_FUNCTION,
                          origin="test", modes=("ctf-web",))
     center.register_spec(ToolSpec(name="nuclei"), source=SOURCE_FUNCTION,
                          origin="test", modes=("ctf-web",))
@@ -112,7 +112,7 @@ def test_mode_capability_and_declared_availability_stack(tmp_path):
                      EvidenceChain(tmp_path / "chain.jsonl"), LLMConfig(),
                      mode=load_mode("ctf-web"))
     names = agent.registry.names()
-    assert names == ["http_test"]          # nuclei 被模式 capability 拦下
+    assert names == ["codec_decode"]       # nuclei 被模式 capability 拦下
 
 
 # ----------------------------------------------------------------------

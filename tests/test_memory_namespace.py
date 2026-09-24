@@ -184,11 +184,11 @@ def test_budget_exhausted_conclude_still_verified(monkeypatch, tmp_path):
 def test_budget_exhausted_in_ctf_mode_still_needs_flag(monkeypatch, tmp_path):
     """CTF 模式换策略后仍以 flag 收口为准。"""
     _mock_llm(monkeypatch, [
-        {"thought": "试探 1", "tool": "http_test", "args": {"url": "http://127.0.0.1"}},
-        {"thought": "试探 2", "tool": "http_test", "args": {"url": "http://127.0.0.1"}},
+        {"thought": "试探 1", "tool": "codec_decode", "args": {"url": "http://127.0.0.1"}},
+        {"thought": "试探 2", "tool": "codec_decode", "args": {"url": "http://127.0.0.1"}},
         {"thought": "收口", "done": True, "summary": "flag{budget-ok}"},
     ])
-    agent = _agent(tmp_path, load_mode("ctf-web"), tools=("http_test",),
+    agent = _agent(tmp_path, load_mode("ctf-web"), tools=("codec_decode",),
                    max_steps=2)
     result = agent.run("http://127.0.0.1", "解题")
 

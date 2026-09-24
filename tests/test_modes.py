@@ -57,8 +57,8 @@ def test_load_modes_from_repo_directory():
     assert pentest.sandbox == "docker"
     assert pentest.capability.constraint_for("nuclei") == \
         "-severity low,medium,high -c 25"
-    assert pentest.permission.level_for("httpx") == "ok"
-    assert pentest.permission.level_for("sqlmap") == "ask"
+    assert pentest.permission.level_for("httpx_probe") == "ok"
+    assert pentest.permission.level_for("sqlmap_auto") == "ask"
     assert pentest.permission.level_for("mimikatz") == "deny"
     assert pentest.verifier.type == "evidence_chain"
     assert pentest.verifier.require_poc is True
@@ -178,26 +178,26 @@ def test_missing_required_field_rejected(tmp_path):
 # 4. capability 过滤：被禁工具不进 schema，也不可能被执行
 # ----------------------------------------------------------------------
 def test_denied_tool_absent_from_schema(tmp_path):
-    registry = _registry("nuclei", "sqlmap", "http_test", "fscan")
+    registry = _registry("nuclei", "sqlmap", "codec_decode", "fscan")
     mode = load_mode("ctf-web")
 
     schemas = mode.tool_schemas(registry)
     names = [s["name"] for s in schemas]
-    assert names == ["http_test"]            # 仅 allow 放行且未被 deny
+    assert names == ["codec_decode"]         # 仅 allow 放行且未被 deny
     assert "nuclei" not in names and "sqlmap" not in names
 
     filtered = mode.filtered_registry(registry)
     assert filtered.get("nuclei") is None    # 执行前即不可达（机制性拦截）
-    assert filtered.get("http_test") is not None
+    assert filtered.get("codec_decode") is not None
     assert registry.get("nuclei") is not None   # 原注册表不被破坏
 
 
 def test_denied_tool_absent_from_agent_prompt(tmp_path):
     mode = load_mode("ctf-web")
-    agent = _agent(tmp_path, mode, "nuclei", "http_test", "sqlmap")
+    agent = _agent(tmp_path, mode, "nuclei", "codec_decode", "sqlmap")
 
     prompt = agent._system_prompt([])
-    assert "http_test" in prompt
+    assert "codec_decode" in prompt
     assert "nuclei" not in prompt and "sqlmap" not in prompt
     assert agent.registry.get("sqlmap") is None
 
@@ -212,14 +212,110 @@ def test_pentest_mode_keeps_wildcard_but_blocks_denied(tmp_path):
 
 
 # ----------------------------------------------------------------------
+# 4.5 工具名单必须指向真实名字（P0-2，2026-09-24）
+#
+# 历史 bug：ctf-web 的 capability.allow 写的是抽象契约名
+# （http_test / browser_auto / script_run / file_read / crypto_tools），
+# allow 是精确匹配 —— 于是 **CTF 模式连 http_raw 都被拒绝**，且 --authorize
+# 也抬不动（allow 未命中与 hard_deny 同类）。写错名字不报错、只静默拒绝，
+# 所以判据必须落在 pytest 里：allow 与 auto_approve 的每一项都要能解析到
+# 真实工具名（或指向已声明的 MCP server 家族）。
+# ----------------------------------------------------------------------
+def _real_tool_names() -> set[str]:
+    """当前仓库里"确实存在"的工具名：注册中心基数 + 服务端高层能力。"""
+    from penagent.mcp import SERVER_TOOLS
+    from penagent.registry import build_center
+
+    names = {e.name for e in build_center().all_entries()}
+    names |= {str(t.name) for t in SERVER_TOOLS}
+    return names
+
+
+def _declared_server_names() -> set[str]:
+    """mcp_servers.json 声明的 server 名（前缀通配的合法目标）。"""
+    from penagent.registry import ToolCenter
+
+    center = ToolCenter()
+    center.load_mcp_servers()
+    return {s.name for s in center.servers()}
+
+
+def test_mode_tool_lists_reference_real_names():
+    """所有已发布模式的 allow / auto_approve 必须可解析——写错即失败。"""
+    real = _real_tool_names()
+    servers = _declared_server_names()
+    problems: list[str] = []
+
+    for mode in load_modes().values():
+        if mode.id == "base":
+            continue                          # 公共默认，不直接运行
+        for field, entries in (("capability.allow", mode.capability.allow),
+                               ("permission.auto_approve",
+                                mode.permission.auto_approve)):
+            for entry in entries:
+                if entry == "*":
+                    continue                  # 全放行，不是家族通配
+                if "*" in entry:
+                    family = entry.rstrip("*").rstrip("_")
+                    if family not in servers:
+                        problems.append(
+                            f"{mode.id}.{field}: 通配 {entry!r} 不对应任何"
+                            f"已声明的 server（声明有 {sorted(servers)}）")
+                elif entry not in real:
+                    problems.append(
+                        f"{mode.id}.{field}: {entry!r} 不是真实注册名")
+    assert not problems, "模式工具名单含不可解析项：\n  " + "\n  ".join(problems)
+
+
+def test_ctf_web_allows_http_and_denies_heavy_scanners(tmp_path):
+    """P0-2 的 bug 复现判据：CTF 模式下 http_raw 可执行、重型扫描器仍被拒。"""
+    from penagent.agent import Policy
+    from penagent.registry import build_center
+
+    mode = load_mode("ctf-web")
+    registry = build_center().build_registry(mode)
+    policy = Policy(allowed_targets=["127.0.0.1"], authorize=True, mode=mode)
+
+    http_raw = registry.get("http_raw")
+    assert http_raw is not None
+    ok, reason = policy.check("http_raw", http_raw, {"url": "http://127.0.0.1/"})
+    assert ok, f"CTF 模式下 http_raw 应可执行，实际被拒：{reason}"
+
+    nuclei = registry.get("nuclei_scan")
+    ok, reason = policy.check("nuclei_scan", nuclei, {"target": "http://127.0.0.1/"})
+    assert not ok and "禁用" in reason
+
+
+def test_capability_wildcard_matches():
+    """allow/deny/permission 三张表都支持前缀通配（同一套匹配）。"""
+    from penagent.modes import Capability, Permission
+
+    cap = Capability(allow=("codec_*", "seckb_kb_search"))
+    assert cap.allows("codec_decode") and cap.allows("codec_chain")
+    assert cap.allows("seckb_kb_search")
+    assert not cap.allows("codec")            # 前缀通配不等于裸前缀
+    assert not cap.allows("nuclei_scan")
+
+    cap2 = Capability(allow=("*",), deny=("chameleon_*",))
+    assert cap2.allows("http_raw") and not cap2.allows("chameleon_scrape_url")
+    assert "chameleon_*" in cap2.denial_reason("chameleon_scrape_url")
+
+    perm = Permission(default="ask", auto_approve=("seckb_*",),
+                      hard_deny=("mimikatz",))
+    assert perm.level_for("seckb_kb_get") == "ok"
+    assert perm.level_for("mimikatz") == "deny"
+    assert perm.level_for("nuclei_scan") == "ask"
+
+
+# ----------------------------------------------------------------------
 # 5. persona 注入
 # ----------------------------------------------------------------------
 def test_persona_injected_from_mode(tmp_path):
     mode = load_mode("ctf-web")
-    with_mode = _agent(tmp_path / "with", mode, "http_test")
+    with_mode = _agent(tmp_path / "with", mode, "codec_decode")
     assert with_mode._system_prompt([]).startswith("你是 XPentest")
     assert "CTF 比赛模式" in with_mode._system_prompt([])
 
-    without_mode = _agent(tmp_path / "without", None, "http_test")
+    without_mode = _agent(tmp_path / "without", None, "codec_decode")
     assert "多模式" not in without_mode._system_prompt([])
     assert without_mode._system_prompt([]).startswith("你是 XPentest——一个 LLM")
