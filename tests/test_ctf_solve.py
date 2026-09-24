@@ -12,6 +12,7 @@
 表，本文件的 parametrize 从 `challenge_ids()` 派生，自动覆盖新题。
 """
 import json
+import struct
 import sys
 import urllib.parse
 from pathlib import Path
@@ -217,16 +218,49 @@ def test_file_type_error_is_actionable(tmp_path, monkeypatch):
     assert "real.txt" in out["candidates"]        # 候选帮模型一次纠正
 
 
-def test_checksec_runs_in_sandbox_image():
+def _minimal_elf() -> bytes:
+    """结构合法的最小 64 位 ELF（仅文件头，无程序头 / 节表）。
+
+    为什么要按字节构造：沙箱镜像里没有编译器（实测 gcc / cc / as / ld 全无），
+    没法 `docker run ... gcc` 现编一个。但**必须是合法 ELF**——本用例早先写的是
+    `b"\\x7fELF" + b"\\x00" * 124`，EI_CLASS 落成 0x00，`pwn checksec` 直接
+    `Invalid EI_CLASS` 退出，`RELRO` 断言根本走不到；而这条用例一直被
+    "Docker 不可用即 skip"掩盖，直到 R-43 复核对齐容器时才暴露。
+    """
+    ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\x00" * 8   # 64 位 / 小端 / v1
+    header = struct.pack(
+        "<HHIQQQIHHHHHH",
+        2,           # e_type    = ET_EXEC
+        0x3E,        # e_machine = EM_X86_64
+        1,           # e_version
+        0x400000,    # e_entry
+        64,          # e_phoff（紧随文件头）
+        0,           # e_shoff（无节表）
+        0,           # e_flags
+        64,          # e_ehsize
+        56,          # e_phentsize
+        0,           # e_phnum
+        64,          # e_shentsize
+        0,           # e_shnum
+        0,           # e_shstrndx
+    )
+    return ident + header
+
+
+def test_checksec_runs_in_sandbox_image(monkeypatch):
     """真跑一次（Docker + 专用镜像就绪时；否则 skip，与容器类用例同口径）。
 
-    判据是 checksec 的标准输出字段（RELRO 是最稳的一条）。
+    用**生产规格**（`ctf_tools.json` 的 checksec_bin）而不是内联副本：本条的
+    价值就在"`/samples` 挂载约定 + 生产命令行在容器里真跑得通"（R-43 补的挂载
+    正是这条描述承诺的）；内联副本一旦与生产漂移，覆盖的就是假路径。判据取
+    checksec 标准输出里的 RELRO 字段。
     """
-    import subprocess
     import sys
     from pathlib import Path
 
-    from penagent.sandbox import DockerRunner
+    from penagent import sandbox as sb
+    from penagent.registry import build_center
+    from penagent.sandbox import SandboxPolicy
     from penagent.tools import ToolRegistry
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -236,18 +270,16 @@ def test_checksec_runs_in_sandbox_image():
     repo = Path(__file__).resolve().parent.parent
     samples = repo / "data" / "ctf-demo"
     samples.mkdir(parents=True, exist_ok=True)
-    target = samples / "checksec-demo"
-    if not target.is_file():
-        target.write_bytes(b"\x7fELF" + b"\x00" * 124)   # 最小 ELF 头
+    (samples / "checksec-demo").write_bytes(_minimal_elf())
+    # 显式指向仓库 data——`/samples` 的宿主侧来源；不依赖进程 cwd
+    monkeypatch.setattr(sb, "_data_root", str(repo / "data"))
 
-    spec = ToolSpec(name="checksec_bin", kind="cli", sandbox="docker",
-                    parameters={"file": {"type": "string"}},
-                    command=("pwn", "checksec", "{args}"), positional=True,
-                    timeout=120)
+    spec = {e.name: e for e in build_center().discover(
+        mode_id="ctf-crypto")}["checksec_bin"].spec
     registry = ToolRegistry(sandbox=SandboxPolicy("docker", runner=runner))
     registry.register(spec)
     result = registry.execute("checksec_bin",
-                              {"file": "/samples/checksec-demo"})
+                              {"file": "/samples/ctf-demo/checksec-demo"})
     assert result.ok, result.error
     assert "RELRO" in str(result.output)
 
