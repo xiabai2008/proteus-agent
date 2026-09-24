@@ -11,6 +11,7 @@
 题集规模由 `eval_ctf_solve` 的声明式规格决定——加题只需改那边的 `*_CASES`
 表，本文件的 parametrize 从 `challenge_ids()` 派生，自动覆盖新题。
 """
+import json
 import sys
 import urllib.parse
 from pathlib import Path
@@ -300,3 +301,94 @@ def test_stego_verdict_comes_from_tool_output(tmp_path, challenges,
     assert result.outcome == "success"
     assert meta["flag"] not in str(result.summary)
     assert meta["flag"] in agent._mission_context(0)
+
+
+# ----------------------------------------------------------------------
+# P2-2：分档评分（里程碑由题集真值派生，判据落在工具输出上）
+#
+# 背景（Cybench 的启发）：二值评分在 33 题规模上信息量太低——"8/33" 看不出
+# 是"全流程都在、最后差一步"还是"根本没入门"。里程碑给的是"差多少"。
+# ----------------------------------------------------------------------
+def _fresh_root(tmp_path):
+    root = tmp_path / "graded"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_milestone_shape_per_category(tmp_path, challenges, host_direct_sandbox):
+    """里程碑条数由类别与题面结构决定（不手写 33 份）。"""
+    from eval_ctf_solve import milestones_for
+
+    read = lambda meta: [{"tool": "file_type", "ok": True,
+                          "args": {"path": str(meta["file"])}}]
+
+    single = milestones_for("enc-b64", challenges["enc-b64"], read(challenges["enc-b64"]),
+                            verified=False)
+    multi = milestones_for("enc-hex-b64", challenges["enc-hex-b64"],
+                           read(challenges["enc-hex-b64"]), verified=False)
+    stego = milestones_for("b64-stego", challenges["b64-stego"],
+                           read(challenges["b64-stego"]), verified=False)
+    rsa = milestones_for("simple-rsa", challenges["simple-rsa"],
+                         read(challenges["simple-rsa"]), verified=False)
+
+    assert [m["id"] for m in single] == ["inspect", "flag"]          # 单层无中间态
+    assert [m["id"] for m in multi] == ["inspect", "peel-outer", "flag"]
+    assert [m["id"] for m in stego] == ["inspect", "locate-block", "flag"]
+    assert [m["id"] for m in rsa] == ["inspect", "decrypt", "flag"]
+    # 只读了题面：首条完成、其余未完成
+    assert [m["ok"] for m in multi] == [True, False, False]
+
+
+def test_grade_discriminates_partial_progress():
+    """分档必须能区分"差一步"与"没入门"——这是它存在的理由。"""
+    from eval_ctf_solve import encode_chain, grade_run
+
+    meta = {"file": "x.txt", "flag": "flag{abc}", "category": "encoding",
+            "chain": ["hex", "base64"]}
+    read = [{"tool": "file_type", "ok": True, "args": {"path": "x.txt"}}]
+    # 剥掉外层后的中间态必须真的出现在**工具输出**里（判据落在输出上）
+    intermediate = encode_chain("flag{abc}", ["hex"])
+    peel = read + [{"tool": "codec_chain", "ok": True,
+                    "args": {"data": "aGk="},
+                    "output": json.dumps({"result": intermediate})}]
+
+    nothing = grade_run("t", meta, [], verified=False)
+    half = grade_run("t", meta, read, verified=False)
+    almost = grade_run("t", meta, peel, verified=False)
+    done = grade_run("t", meta, peel, verified=True)
+
+    assert (nothing["subtask"], half["subtask"], almost["subtask"],
+            done["subtask"]) == ("0/3", "1/3", "2/3", "3/3")
+    assert nothing["subtask_score"] < almost["subtask_score"] < 1.0
+    # 前三个都没有收口；只有最后一个 unguided 与 subtask_guided 同时为真
+    assert not any(x["unguided"] for x in (nothing, half, almost))
+    assert done["unguided"] and done["subtask_guided"]
+
+
+def test_read_source_matches_windows_paths(tmp_path, host_direct_sandbox):
+    """路径判据不能用 f-string 打 dict（反斜杠会被转义成 `\\\\`）——实测踩中。"""
+    from eval_ctf_solve import _read_source
+
+    win = r"C:\Users\x\AppData\Local\Temp\enc-b64.txt"
+    calls = [{"tool": "file_type", "ok": True, "args": {"path": win}}]
+    assert _read_source(calls, win) is True
+    assert _read_source(calls, r"C:\other\path.txt") is False
+    # 被拦下的调用不算"读过"
+    blocked = [{"tool": "file_type", "ok": True, "blocked": True,
+                "args": {"path": win}}]
+    assert _read_source(blocked, win) is False
+
+
+def test_all_challenges_score_full_on_the_reference_path(tmp_path, challenges,
+                                                         host_direct_sandbox):
+    """脚本化参考解在 33 题上都应拿满分档——分档与二值口径不矛盾。"""
+    from eval_ctf_solve import solve_graded
+
+    root = _fresh_root(tmp_path)
+    lagging = {}
+    for cid, meta in build_challenges(root).items():
+        out = solve_graded(root, cid, meta, mode_id="ctf-crypto")
+        grade = out["grade"]
+        if grade["subtask_score"] < 1.0:
+            lagging[cid] = grade["subtask"]
+    assert lagging == {}, f"这些题没能拿满分档：{lagging}"

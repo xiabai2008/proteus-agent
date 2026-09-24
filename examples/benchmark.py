@@ -64,6 +64,10 @@ class CaseResult:
     expected: str = ""             # 期望结果（flag / 预期发现摘要）
     got: str = ""                  # 实际拿到什么
     detail: str = ""               # 失败原因或补充说明
+    # P2-2 分档评分（仅 CTF 套件用；其他套件留空 = 不参与）
+    subtask: str = ""              # 里程碑完成比例，如 "2/3"（"" = 无分档）
+    subtask_score: float = 0.0     # 0..1
+    subtask_guided: bool = False   # 只看最后一个里程碑（= flag 收口）
 
     @property
     def skipped(self) -> bool:
@@ -213,6 +217,20 @@ class Scorecard:
                      f" · 通过率 {self.pass_rate:.0%}"
                      f" · 平均步数 {self.avg_steps:.1f}"
                      f" · 总耗时 {self.total_elapsed_s:.1f}s")
+        # P2-2 分档：里程碑完成比例（"差多少"），与二值通过率并列
+        graded = [r for r in self.results if r.subtask]
+        if graded:
+            score = sum(r.subtask_score for r in graded) / len(graded)
+            full = sum(1 for r in graded if r.subtask_score >= 1.0)
+            guided = sum(1 for r in graded if r.subtask_guided)
+            lines.append(f"  分档（{len(graded)} 题）里程碑均值 {score:.0%}"
+                         f" · 里程碑全完成 {full}/{len(graded)}"
+                         f" · 收口（末条里程碑）{guided}/{len(graded)}")
+            lagging = sorted((r for r in graded if r.subtask_score < 1.0),
+                             key=lambda r: r.subtask_score)
+            for r in lagging[:5]:
+                lines.append(f"    {r.case_id:<24} {r.subtask}"
+                             f"（差在最后一步：{r.detail[:40] or '见里程碑'}）")
         for cat, stat in self.by_category().items():
             lines.append(f"    {cat:<20} {stat['passed']}/{stat['attempted']}"
                          f" ({stat['pass_rate']:.0%})")
@@ -235,7 +253,7 @@ def run_ctf_suite(root: Path, driver: str = "scripted",
     examples = ROOT / "examples"
     if str(examples) not in sys.path:
         sys.path.insert(0, str(examples))
-    from eval_ctf_solve import build_challenges, solve  # noqa: E402
+    from eval_ctf_solve import build_challenges, solve_graded  # noqa: E402
 
     root = Path(root)
     challenges = build_challenges(root)
@@ -247,7 +265,8 @@ def run_ctf_suite(root: Path, driver: str = "scripted",
         category = str(meta.get("category", "") or "")
         started = time.time()
         try:
-            result, _agent = solve(root, cid, meta, mode_id="ctf-crypto")
+            out = solve_graded(root, cid, meta, mode_id="ctf-crypto")
+            result, grade = out["result"], out["grade"]
             elapsed = time.time() - started
             got = meta["flag"] if meta["flag"] in str(result.summary) else ""
             results.append(CaseResult(
@@ -257,6 +276,10 @@ def run_ctf_suite(root: Path, driver: str = "scripted",
                 steps=result.steps, elapsed_s=round(elapsed, 2),
                 expected=meta["flag"], got=got or str(result.summary)[:80],
                 detail="" if result.outcome == "success" else result.summary[:80],
+                # P2-2：分档（里程碑由题集真值派生，判据落在工具输出上）
+                subtask=grade["subtask"],
+                subtask_score=grade["subtask_score"],
+                subtask_guided=grade["subtask_guided"],
             ))
         except Exception as exc:                          # noqa: BLE001
             results.append(CaseResult(
