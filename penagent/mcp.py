@@ -24,6 +24,7 @@ from penagent.memory import Memory
 from penagent.policy_gate import PolicyGate
 from penagent.reflect import Reflector
 from penagent.registry import ToolCenter, build_center
+from penagent.scope import read_scope as read_session_scope
 from penagent.tools import ToolSpec
 
 MCP_VERSION = "2025-06-18"
@@ -86,7 +87,11 @@ class PentestMCPServer:
         # 授权目标与高危授权：服务端级（操作员给），不来自调用参数。
         # 目标规范化必须做：CLI 的 --targets 是 "a,b" 字符串，直接 list() 会
         # 炸成单字符、把白名单打成筛子（见 Policy.normalize_targets）
-        self.allowed_targets = Policy.normalize_targets(allowed_targets)
+        # `--targets` = 操作员级**基线**；会话授权（P0-4，人工命令写
+        # data/session-scope.json）在同一进程里追加，见 _refresh_scope()
+        self._operator_targets = Policy.normalize_targets(allowed_targets)
+        self._session_scope: list[str] = []
+        self.allowed_targets = list(self._operator_targets)
         self.authorize = bool(authorize)
         # 工具清单统一来自注册中心：内置 function + external_tools.json 的 CLI
         # + 已发现的 MCP server 工具（discover_mcp 前不连接任何外部服务）
@@ -118,6 +123,27 @@ class PentestMCPServer:
         self._last_mode_notified: Optional[str] = None
         # 按模式缓存的"可执行工具面"（模式不可变，可安全复用）
         self._mode_registries: dict[str, object] = {}
+        # 启动时先吸收一次会话授权（P0-4）
+        self._refresh_scope()
+
+    # ------------------------------------------------------------------
+    def _refresh_scope(self) -> None:
+        """会话授权变了就重建闸门与工具面（P0-4）。
+
+        每个请求前调一次：`/proteus-scope` 命令与 CLI 都是**外部写文件**，
+        内核只能靠比对发现变化。变化时重建 Policy 与带 mode 的工具面，
+        使新授权对底层工具、pentest_run、沙箱裁决**同时**生效（不需要重启）。
+        """
+        scope = read_session_scope(self.data_dir)
+        if scope == self._session_scope:
+            return
+        self._session_scope = scope
+        self.allowed_targets = Policy.normalize_targets(
+            list(self._operator_targets) + list(scope))
+        self.policy = Policy(allowed_targets=self.allowed_targets,
+                             authorize=self.authorize)
+        self.registry.gate = PolicyGate(self.policy)
+        self._mode_registries.clear()
 
     # ------------------------------------------------------------------
     def _session_mode_path(self) -> Path:
@@ -289,6 +315,7 @@ class PentestMCPServer:
                                          "message": "非法 JSON"}})
         msg_id = msg.get("id")
         method = msg.get("method", "")
+        self._refresh_scope()          # 会话授权可能被外部改过（P0-4）
 
         if method == "initialize":
             return json.dumps({"jsonrpc": "2.0", "id": msg_id, "result": {

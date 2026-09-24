@@ -318,6 +318,9 @@
     targets: ['127.0.0.1', 'localhost']
     shellTools: ['pwsh', 'bash']
     spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+    # P0-4：会话授权文件（人工命令 /proteus-scope 写）——与内核读同一份，
+    # 生效白名单 = 上面的基线 ∪ 这份清单
+    scopePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-scope.json'
 
 # ── Proteus 专属行 3/4：人机命令（F2/F3，2026-09-23） ──────────────────────
 #

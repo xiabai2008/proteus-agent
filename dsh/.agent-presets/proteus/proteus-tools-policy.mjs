@@ -24,7 +24,7 @@
  *    目标动作按 `kernelGuard` 收紧（缺省 deny，可 warn / off）。
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 /** Cordis 诊断用的插件名。 */
@@ -165,6 +165,38 @@ function withinTargets(host, targets) {
   })
 }
 
+/**
+ * 读会话授权清单（与内核 `penagent/scope.py` 同口径：缺失/损坏 → 空）。
+ *
+ * P0-4：内核与裁决行读**同一份文件**——否则会出现"内核放行、宿主拦截"或
+ * 反过来的裂缝。读失败按空处理（= 只有 --targets 基线），不静默放宽。
+ */
+function readScopeTargets(scopePath) {
+  if (scopePath === '') return []
+  try {
+    const data = JSON.parse(readFileSync(scopePath, 'utf8'))
+    const list = Array.isArray(data.targets) ? data.targets : []
+    return list.map((t) => String(t)).filter((t) => t !== '')
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 自我授权防线（P0-4）：宿主 shell 不得改写授权文件本身。
+ *
+ * 内核**从不**写 `session-scope.json`；写入口只有人的命令（/proteus-scope
+ * 或内核 CLI）。模型若用 shell 直接改它，等于绕开"模型不能自我授权"——
+ * 这里按文件名一律拒绝（写入动词 + 文件名同现即命中，宁可误伤）。
+ */
+const SCOPE_FILE_RE = /session-scope\.json/i
+const WRITE_VERBS_RE =
+  /\b(set-content|add-content|out-file|new-item|remove-item|del|erase|rm|mv|move|copy|cp|tee|sed|echo|printf|python|node|truncate)\b/i
+
+function looksLikeScopeTamper(command) {
+  return SCOPE_FILE_RE.test(command) && WRITE_VERBS_RE.test(command)
+}
+
 function readStringArray(value, fallback) {
   if (!Array.isArray(value)) return fallback
   const items = value.filter((v) => typeof v === 'string' && v !== '')
@@ -266,6 +298,8 @@ export function apply(ctx, config = {}) {
   const mode = typeof config.mode === 'string' ? config.mode : 'ask'
   const role = typeof config.role === 'string' ? config.role : 'both'
   const targets = readStringArray(config.targets, ['127.0.0.1', 'localhost'])
+  // P0-4：会话授权（人工命令写的文件）与基线取并集——与内核同一份来源
+  const scopePath = typeof config.scopePath === 'string' ? config.scopePath : ''
   const shellTools = readStringArray(config.shellTools, ['pwsh', 'bash'])
   // 只记这些 preset 的会话（空 = 全记但打标）；归属未知的会话一律保留
   const presets = readStringArray(config.presets, [])
@@ -346,10 +380,25 @@ export function apply(ctx, config = {}) {
     if (!shellTools.includes(name)) return next()
     const command = String(
       exec?.arguments?.command ?? exec?.arguments?.script ?? '')
-    if (command === '' || !isNetworkCommand(command)) return next()
+    if (command === '') return next()
+
+    // 自我授权防线：改写授权文件一律拒绝（与"模型不能自我授权"同源）
+    if (looksLikeScopeTamper(command)) {
+      const reason = '拒绝：授权文件（session-scope.json）只能由人通过 '
+        + '/proteus-scope 命令或内核 CLI 修改，宿主 shell 不得改写'
+        + '——模型不能自我授权。'
+      write({ ts: Date.now(), kind: 'policy', tool: name, decision: 'deny',
+              hosts: [], outside: [], reason, command: clip(command, 300),
+              kernel: 'n/a', preset: presetOfAgent(exec?.agent) })
+      return { kind: 'deny', reason }
+    }
+
+    if (!isNetworkCommand(command)) return next()
 
     const hosts = targetsIn(command)
-    const outside = hosts.filter((host) => !withinTargets(host, targets))
+    // 生效白名单 = 基线 ∪ 会话授权（每次调用重读，人工授权立即生效）
+    const effective = [...new Set([...targets, ...readScopeTargets(scopePath)])]
+    const outside = hosts.filter((host) => !withinTargets(host, effective))
     const kernel = kernelAvailability(ctx, exec?.agent, kernelPrefix)
 
     // 留痕统一走这里：裁决结果与"当时内核在不在"一起落盘——审计链要能回答
@@ -381,8 +430,9 @@ export function apply(ctx, config = {}) {
     }
 
     const base = outside.length > 0
-      ? `目标 ${outside.join(', ')} 不在内核授权白名单（${targets.join(', ')}）内；`
-        + '内核闸门不会放行这类目标，若确需访问请先显式授权。'
+      ? `目标 ${outside.join(', ')} 不在内核授权白名单（${effective.join(', ')}）内；`
+        + '内核闸门不会放行这类目标。若确需访问，由人在会话里执行 '
+        + `/proteus-scope add ${outside.join(',')} 显式授权（模型不能自我授权）。`
       : '目标动作建议走内核工具（mcp__proteus__http_raw / '
         + 'mcp__proteus__pentest_run 等）：内核侧有目标白名单、模式闸门与'
         + '证据链，宿主 shell 直连的结论不可机验。'

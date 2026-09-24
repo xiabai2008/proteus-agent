@@ -31,6 +31,10 @@ RUNNER = textwrap.dedent("""
       show: get('proteus-mode').handler({ rawInput: '' }),
       set: get('proteus-mode').handler({ rawInput: 'ctf-web' }),
       bad: get('proteus-mode').handler({ rawInput: 'ghost-mode' }),
+      scopeShow: await get('proteus-scope').handler({ rawInput: '' }),
+      scopeAdd: await get('proteus-scope').handler(
+        { rawInput: 'add example.com,10.0.0.5' }),
+      scopeBad: await get('proteus-scope').handler({ rawInput: 'frobnicate x' }),
       evidence: await get('proteus-evidence').handler({ rawInput: '' }),
       skills: await get('proteus-skills').handler({ rawInput: '' }),
       audit: get('proteus-audit').handler({}),
@@ -50,10 +54,22 @@ def fake_ws(tmp_path: Path) -> Path:
     pkg.mkdir()
     (pkg / "__init__.py").write_text("", encoding="utf-8")
     (pkg / "__main__.py").write_text(
-        "import sys, os\n"
+        "import sys, os, json\n"
         "argv = sys.argv[1:]\n"
         "if argv[:1] == ['evidence']:\n"
         "    print('证据链：桩 · 校验 通过')\n"
+        "elif argv[:1] == ['scope']:\n"
+        "    path = os.path.join('data', 'session-scope.json')\n"
+        "    cur = []\n"
+        "    if os.path.exists(path):\n"
+        "        cur = json.load(open(path, encoding='utf-8')).get('targets', [])\n"
+        "    if '--add' in argv:\n"
+        "        for x in argv[argv.index('--add') + 1].split(','):\n"
+        "            if x and x not in cur:\n"
+        "                cur.append(x)\n"
+        "        os.makedirs('data', exist_ok=True)\n"
+        "        json.dump({'targets': cur}, open(path, 'w', encoding='utf-8'))\n"
+        "    print(json.dumps({'targets': cur}))\n"
         "elif argv[:1] == ['skills'] and '--export' in argv:\n"
         "    out = argv[argv.index('--out') + 1]\n"
         "    os.makedirs(out, exist_ok=True)\n"
@@ -99,7 +115,25 @@ def _run_plugin(ws: Path) -> dict:
 
 def test_commands_registered(fake_ws):
     assert _run_plugin(fake_ws)["names"] == [
-        "proteus-mode", "proteus-evidence", "proteus-skills", "proteus-audit"]
+        "proteus-mode", "proteus-evidence", "proteus-skills", "proteus-scope",
+        "proteus-audit"]
+
+
+def test_scope_command_is_human_authorization_entry(fake_ws):
+    """P0-4：/proteus-scope 是"永久授权"的人工入口（模型不能自我授权）。"""
+    result = _run_plugin(fake_ws)
+
+    assert result["scopeShow"]["kind"] == "success"
+    assert "会话授权目标" in result["scopeShow"]["text"]
+    assert "模型不能自我授权" in result["scopeShow"]["text"]
+
+    assert result["scopeAdd"]["kind"] == "success", result["scopeAdd"]
+    scope_file = fake_ws / "proteus-agent" / "data" / "session-scope.json"
+    assert json.loads(scope_file.read_text(encoding="utf-8"))["targets"] == \
+        ["example.com", "10.0.0.5"]
+
+    assert result["scopeBad"]["kind"] == "error"
+    assert "未知子命令" in result["scopeBad"]["text"]
 
 
 def test_mode_flow(fake_ws):

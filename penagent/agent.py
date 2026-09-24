@@ -169,7 +169,11 @@ class Policy:
                 continue
             if not self._in_scope(value):
                 return False, (f"目标 {value!r} 不在授权范围 "
-                               f"{self.allowed_targets}")
+                               f"{self.allowed_targets}。"
+                               f"若确需访问，由人在会话里执行 "
+                               f"/proteus-scope add {value}（或 CLI："
+                               f"python -m penagent scope --add {value}）"
+                               f"显式授权后重试——模型不能自我授权")
         return True, ""
 
     def _in_scope(self, value: str) -> bool:

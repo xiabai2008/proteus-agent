@@ -281,6 +281,30 @@ def cmd_mcp(args) -> int:
     return 0
 
 
+def cmd_scope(args) -> int:
+    """会话授权目标管理（P0-4）：只有人能写，内核只读。"""
+    from penagent import scope
+
+    data = args.data
+    if args.clear:
+        print(json.dumps({"targets": scope.clear_scope(data)},
+                         ensure_ascii=False))
+        return 0
+    if args.add:
+        current = scope.add_targets(data, args.add, note=args.note)
+        print(json.dumps({"targets": current}, ensure_ascii=False))
+        return 0
+    if args.remove:
+        current = scope.remove_targets(data, args.remove)
+        print(json.dumps({"targets": current}, ensure_ascii=False))
+        return 0
+    current = scope.read_scope(data)
+    print(json.dumps({"targets": current,
+                      "file": str(scope.scope_path(data))},
+                     ensure_ascii=False))
+    return 0
+
+
 def cmd_gaps(args) -> int:
     """技能盲区发现：工具使用统计 + 能力盲区建议。"""
     from penagent.gaps import analyze_gaps, analyze_gaps_llm
@@ -376,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     for name, fn, help_t in (
         ("skills", cmd_skills, "经验库技能"),
         ("missions", cmd_missions, "作战记录"),
+        ("scope", cmd_scope, "会话授权目标（只有人能写；/proteus-scope 用）"),
         ("verify", cmd_verify, "证据链校验"),
         ("evidence", cmd_evidence, "证据链+作战记录汇总（人读，/proteus-evidence 用）"),
         ("dsh-sync", cmd_dsh_sync, "导入 DSH 会话事件到证据链（审计桥）"),
@@ -397,6 +422,15 @@ def main(argv: list[str] | None = None) -> int:
                                 "独立于内核任务链）")
             p.add_argument("--flush-open", action="store_true",
                            help="把仍未配对的调用按 ok=None 落链（会话已结束时用）")
+        if name == "scope":
+            p.add_argument("--add", default="",
+                           help="追加授权目标（逗号分隔）")
+            p.add_argument("--remove", default="",
+                           help="移除授权目标（逗号分隔）")
+            p.add_argument("--clear", action="store_true",
+                           help="清空会话授权（回到 --targets 基线）")
+            p.add_argument("--note", default="",
+                           help="授权来源说明（写进文件，便于事后审计）")
         if name == "skills":
             p.add_argument("--seed", action="store_true",
                            help="写入预置技能种子（幂等；来源见 "
