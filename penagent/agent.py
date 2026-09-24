@@ -34,6 +34,17 @@ SYSTEM_PROMPT = """你是 XPentest——一个 LLM 驱动的渗透测试 Agent�
 相关历史技能（可复用，仅参考）：
 {skills}"""
 
+# 内核侧重复失败检测（R-39）的缺省阈值：同工具 + 同参数**连续**失败到该次数，
+# 下一次同调用不再执行，改为回灌纠正指令（含上次失败理由 + 换思路）。
+# 与宿主侧监督层（`dsh/.agent-presets/_shared/proteus-supervisor.mjs` 的
+# sameToolLimit）同源，但内核更早介入：宿主侧数的是**会话内重复**（无论成败），
+# 内核数的是**连续失败**——每次失败都有模型可见的输出，"连续 3 次同参失败"
+# 基本可断定模型没读失败信息（实测：一次 CTF 会话里 `file_type` 用了错路径，
+# 同参失败 57 次）。
+# 刻意不进 ModeProfile：这是对模型行为的纠偏，不是模式语义，各模式的判据相同；
+# 新增配置面要有真实消费场景（见 docs/修复待办清单.md R-39）。
+REPEAT_FAILURE_LIMIT = 3
+
 
 @dataclass
 class MissionResult:
@@ -247,6 +258,11 @@ class PenAgent:
                             if mode is not None else None)
         self.skill_policy = skill_policy   # RL 技能选择策略（可选）
         self._used_skills: list = []
+        # 重复失败检测（R-39）计数：指纹 -> 连续失败次数 / 上次失败原因 /
+        # 已拦截次数。按任务重置（见 run 开头），跨任务不继承。
+        self._repeat_failures: dict[str, int] = {}
+        self._repeat_errors: dict[str, str] = {}
+        self._repeat_blocks: dict[str, int] = {}
 
     def _record_skill_outcomes(self, success: bool) -> None:
         """任务结束后把结果回写到本次复用的技能（M3 成功率进化）。"""
@@ -317,15 +333,73 @@ class PenAgent:
 
     def _blocked(self, mission_id: str, step: int, tool: str, args: dict,
                  reason: str, level: str) -> dict:
-        """记录被模式/护栏拦截的工具调用（证据链 + 作战记录），回灌消息。"""
+        """记录被模式/护栏/重复失败检测拦截的工具调用（证据链 + 作战记录），
+        回灌消息。
+
+        `level` 取护栏档位（ok/ask/deny）或 "loop"（重复失败检测，见 `_loop_reason`）；
+        证据链与作战记录都带上它，审计视图才能区分"被哪种判据拦的"。
+        """
         record = self._append_evidence("tool_call", mission_id, step, {
             "tool": tool, "args": args,
             "blocked": True, "reason": reason, "level": level})
         self.memory.add_step(mission_id, {"step": step, "tool": tool,
                                           "args": args, "blocked": True,
-                                          "reason": reason,
+                                          "reason": reason, "level": level,
                                           "evidence_seq": record.seq})
         return {"role": "user", "content": f"护栏拦截: {reason}"}
+
+    # ------------------------------------------------------------------
+    # 内核侧重复失败检测（R-39）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _fingerprint(tool: str, args: dict) -> str:
+        """调用指纹：工具名 + 规范化参数（键序无关，嵌套同样排序）。
+
+        与宿主侧监督层同构（`proteus-supervisor.mjs` 的 `fingerprint`）：
+        两边口径一致，"内核数的是哪一次调用"与"宿主数的是哪一次"是同一件事。
+        """
+        try:
+            body = json.dumps(args or {}, sort_keys=True,
+                              ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            body = str(args)
+        return f"{tool}::{body}"
+
+    def _loop_reason(self, tool: str, args: dict) -> str:
+        """同工具 + 同参数连续失败到阈值 -> 纠正指令文案；未达阈值返回空串。
+
+        命中即**拒绝执行**（与宿主侧监督层的 deny 同语义）：再发一次只会拿到
+        同一个失败，白烧一步预算；模型缺的信号是"上次为什么失败 + 换思路"。
+        纯判断、无副作用（拦截计数就地累加，便于文案说明是第几次），计数与
+        留痕由调用方做。
+        """
+        key = self._fingerprint(tool, args)
+        fails = self._repeat_failures.get(key, 0)
+        if fails < REPEAT_FAILURE_LIMIT:
+            return ""
+        blocks = self._repeat_blocks.get(key, 0) + 1
+        self._repeat_blocks[key] = blocks
+        last = self._repeat_errors.get(key, "")
+        return (f"同一调用（{tool} 同参数）已连续失败 {fails} 次，"
+                f"本次为第 {blocks} 次拦截——重复调用不会带来新信息。"
+                f"上次失败原因：{last or '（工具未给出原因）'}。"
+                "换思路：改写参数（例如只取需要的片段、缩小范围）、"
+                "换一个工具验证同一个假设，或停下把卡点如实告诉人；"
+                "确实无路可走时直接输出 done 并说明未完成。")
+
+    def _record_tool_outcome(self, tool: str, args: dict, result) -> None:
+        """按执行结果维护重复失败计数：失败累加，成功清零（只清本指纹）。
+
+        只清本指纹而不清全局：别的调用成功过，不代表这个仍在失败的调用已经
+        解除循环——一起清掉会让循环更容易躲过判据（交替调用即可反复清零）。
+        """
+        key = self._fingerprint(tool, args)
+        if result.ok:
+            self._repeat_failures.pop(key, None)
+            self._repeat_errors.pop(key, None)
+            return
+        self._repeat_failures[key] = self._repeat_failures.get(key, 0) + 1
+        self._repeat_errors[key] = str(result.error or "")[:200]
 
     def _mission_context(self, since_seq: int) -> str:
         """本任务期间观察到的工具输出原文（供按任务输出判定的判定器使用）。
@@ -393,6 +467,10 @@ class PenAgent:
         mission_id = self.memory.new_mission(target, objective)
         mission = MissionResult(mission_id=mission_id, target=target,
                                 objective=objective)
+        # 重复失败计数按任务重置："连续"指的是本任务内的连续
+        self._repeat_failures = {}
+        self._repeat_errors = {}
+        self._repeat_blocks = {}
         skills = self.memory.find_skills(fingerprint or target)
         # 模式技能包过滤：mode.skills 声明之外的类别不注入（R-3）
         skills = self._filter_mode_skills(skills)
@@ -499,7 +577,17 @@ class PenAgent:
                     self.policy.level_for(tool, spec)))
                 continue
 
+            # 内核侧重复失败检测（R-39）：同工具 + 同参数连续失败到阈值后，
+            # 这一次不再执行——回灌纠正指令（含上次失败理由 + 换思路），
+            # 留痕为 blocked（level=loop，与护栏拦截同一条审计口径）
+            loop_reason = self._loop_reason(tool, args)
+            if loop_reason:
+                messages.append(self._blocked(mission_id, step, tool, args,
+                                              loop_reason, "loop"))
+                continue
+
             tool_result = self.registry.execute(tool, args)
+            self._record_tool_outcome(tool, args, tool_result)
             record = self._append_evidence("tool_call", mission_id, step, {
                 "tool": tool, "args": args, "ok": tool_result.ok,
                 "output": str(tool_result.output)[:1500],

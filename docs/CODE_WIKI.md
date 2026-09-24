@@ -92,10 +92,10 @@
 
 ### 2.2 一次任务的完整生命周期（ReAct 主循环）
 
-以 `PenAgent.run(target, objective)`（[agent.py](../penagent/agent.py#L391-L561)）为主线：
+以 `PenAgent.run(target, objective)`（[agent.py](../penagent/agent.py#L465-L649)）为主线：
 
-1. **建任务**：`memory.new_mission(target, objective)` 生成 mission_id，写 `data/missions/<ns>/<id>.json`。
-2. **检索技能**：`memory.find_skills(fingerprint)` → `_filter_mode_skills`（按 `mode.skills` 技能包过滤，[agent.py](../penagent/agent.py#L261-L276)）→ `_rank_skills`（默认按成功率降序；`stealth=True` 按 exposure 升序；RL 策略命中则置顶）。
+1. **建任务**：`memory.new_mission(target, objective)` 生成 mission_id，写 `data/missions/<ns>/<id>.json`；重复失败计数（R-39）在此按任务重置。
+2. **检索技能**：`memory.find_skills(fingerprint)` → `_filter_mode_skills`（按 `mode.skills` 技能包过滤，[agent.py](../penagent/agent.py#L277-L292)）→ `_rank_skills`（默认按成功率降序；`stealth=True` 按 exposure 升序；RL 策略命中则置顶）。
 3. **装配 system prompt**：`mode.read_system_prompt()` 读 `prompts/*.md`，替换 `{tools}`（已按模式裁剪的 `registry.schemas()`）与 `{skills}`。
 4. **逐步骤循环**（上限 `mode.budget.max_steps`，无模式时 12）：
    - 时长预算检查：`max_minutes` 超限即跳出循环进入强制收口（换策略而非硬退出）。
@@ -103,7 +103,7 @@
    - 决策为 `done` → 交 `verifier.verify(decision, evidence, context=本任务期间工具输出)`：
      - 反幻觉不过 → 直接失败（不可重试）；判定未过但可重试 → 回灌原因继续循环。
      - 通过 → 记 `conclusion` 证据、`memory.finish(...)`、回写技能成功率、返回 `MissionResult`。
-   - 决策为工具调用 → `policy.apply_constraints`（模式冻结参数并入 args）→ `registry.get(tool)` 查不到即给出**机制性拒绝原因** → `policy.check` 护栏裁决 → `registry.execute` → 证据固化（`tool_call`）→ 作战记录追加步骤 → 结果回灌消息。
+   - 决策为工具调用 → `policy.apply_constraints`（模式冻结参数并入 args）→ `registry.get(tool)` 查不到即给出**机制性拒绝原因** → `policy.check` 护栏裁决 → **重复失败检测**（`_loop_reason`：同工具 + 同参数连续失败到 `REPEAT_FAILURE_LIMIT` 即拦下并回灌"上次失败原因 + 换思路"，记 `blocked=True / level="loop"`）→ `registry.execute` → 证据固化（`tool_call`）→ 作战记录追加步骤 → 结果回灌消息。
 5. **预算耗尽收口**：追加一轮「不要再调工具，基于已有证据给结论」，用 reason 档模型收口，再交判定器；仍未通过则如实失败。
 
 ---
@@ -238,17 +238,21 @@ proteus-agent/
 | 符号 | 位置 | 签名 / 要点 |
 |---|---|---|
 | `SYSTEM_PROMPT` | [L21](../penagent/agent.py#L21) | 无模式时的默认提示词模板（含 `{tools}` / `{skills}` 占位符） |
-| `MissionResult` | [L38](../penagent/agent.py#L38) | `mission_id / target / objective / outcome(success\|failed\|blocked) / steps / summary / evidence_refs / injected_skills / reflection` + `to_dict()` |
-| `Policy` | [L54](../penagent/agent.py#L54) | 模式能力/权限裁决 + 授权目标 + 高危确认；规则写死，不参与决策 |
-| `Policy.normalize_targets(value)` | [L75](../penagent/agent.py#L75) | 静态方法：`"a,b"` 或可迭代 → 列表；**必须做**（字符串本身是 iterable，`list("127.0.0.1")` 会炸成单字符列表把白名单打成筛子）；空值回落 `["127.0.0.1","localhost"]` |
-| `Policy._narrow_by_mode(runtime_targets, mode)` | [L96](../penagent/agent.py#L96) | 模式白名单**只可收紧**：与运行期显式授权取交集 |
-| `Policy.bind_mode(mode)` | [L110](../penagent/agent.py#L110) | 返回挂载模式裁决的副本（不改原实例） |
-| `Policy.level_for(tool, spec=None)` | [L115](../penagent/agent.py#L115) | `ok / ask / deny` 档位 |
-| `Policy.apply_constraints(tool, args)` | [L126](../penagent/agent.py#L126) | 把模式冻结参数写进 `FROZEN_ARGS_KEY`（执行前机制性生效） |
-| `Policy.check(tool, spec, args) -> (bool, str)` | [L142](../penagent/agent.py#L142) | 裁决顺序：capability 禁用 → permission `deny` → `ask` 未授权 → 出网开关 → 高危未授权 → `host/url/domain/target/base_url` 白名单；拒绝理由带**授权指引**（`/proteus-scope add ...`，「模型不能自我授权」） |
-| `Policy._in_scope(value)` | [L179](../penagent/agent.py#L179) | URL / `host:port` / 路径三种形态归一后按 `host == t or host.endswith("." + t)` 匹配 |
-| `PenAgent.__init__(...)` | [L195](../penagent/agent.py#L195) | 见下方装配清单 |
-| `PenAgent.run(target, objective, fingerprint="", stealth=False)` | [L391](../penagent/agent.py#L391) | 主循环（第 2.2 节） |
+| `REPEAT_FAILURE_LIMIT` | [L46](../penagent/agent.py#L46) | 内核侧重复失败检测阈值（缺省 3）：同工具 + 同参数连续失败到此数即拦（R-39；刻意不做成 ModeProfile 字段） |
+| `MissionResult` | [L50](../penagent/agent.py#L50) | `mission_id / target / objective / outcome(success\|failed\|blocked) / steps / summary / evidence_refs / injected_skills / reflection` + `to_dict()` |
+| `Policy` | [L65](../penagent/agent.py#L65) | 模式能力/权限裁决 + 授权目标 + 高危确认；规则写死，不参与决策 |
+| `Policy.normalize_targets(value)` | [L87](../penagent/agent.py#L87) | 静态方法：`"a,b"` 或可迭代 → 列表；**必须做**（字符串本身是 iterable，`list("127.0.0.1")` 会炸成单字符列表把白名单打成筛子）；空值回落 `["127.0.0.1","localhost"]` |
+| `Policy._narrow_by_mode(runtime_targets, mode)` | [L108](../penagent/agent.py#L108) | 模式白名单**只可收紧**：与运行期显式授权取交集 |
+| `Policy.bind_mode(mode)` | [L121](../penagent/agent.py#L121) | 返回挂载模式裁决的副本（不改原实例） |
+| `Policy.level_for(tool, spec=None)` | [L126](../penagent/agent.py#L126) | `ok / ask / deny` 档位 |
+| `Policy.apply_constraints(tool, args)` | [L137](../penagent/agent.py#L137) | 把模式冻结参数写进 `FROZEN_ARGS_KEY`（执行前机制性生效） |
+| `Policy.check(tool, spec, args) -> (bool, str)` | [L153](../penagent/agent.py#L153) | 裁决顺序：capability 禁用 → permission `deny` → `ask` 未授权 → 出网开关 → 高危未授权 → `host/url/domain/target/base_url` 白名单；拒绝理由带**授权指引**（`/proteus-scope add ...`，「模型不能自我授权」） |
+| `Policy._in_scope(value)` | [L190](../penagent/agent.py#L190) | URL / `host:port` / 路径三种形态归一后按 `host == t or host.endswith("." + t)` 匹配 |
+| `PenAgent.__init__(...)` | [L206](../penagent/agent.py#L206) | 见下方装配清单 |
+| `PenAgent._fingerprint(tool, args)` | [L355](../penagent/agent.py#L355) | 静态方法：调用指纹 = 工具名 + `json.dumps(sort_keys=True)` 规范化参数（键序无关，与宿主侧 supervisor 同构） |
+| `PenAgent._loop_reason(tool, args)` | [L368](../penagent/agent.py#L368) | 连续失败达阈值即返回纠正指令文案（含上次失败原因 + 换思路），否则空串；命中即拒绝执行（R-39） |
+| `PenAgent._record_tool_outcome(tool, args, result)` | [L390](../penagent/agent.py#L390) | 失败累加、成功清零（**只清本指纹**，避免"交替失败"躲过判据） |
+| `PenAgent.run(target, objective, fingerprint="", stealth=False)` | [L465](../penagent/agent.py#L465) | 主循环（第 2.2 节） |
 
 **`PenAgent.__init__` 的装配语义（每条都是硬约束的落点）**：
 
@@ -322,7 +326,7 @@ proteus-agent/
 | reflect.py | `REFLECT_PROMPT`（[L16](../penagent/reflect.py#L16)）、`Reflector(llm=None).reflect(mission_id, memory, evidence) -> (analysis, Skill\|None)`（[L46](../penagent/reflect.py#L46)） | LLM 复盘产出成败归因与可复用技能；**技能入库前校验 `evidence_refs` 真实存在**，否则拒绝入库 |
 | skill_seeds.py | `SEED_SKILLS`（[L36](../penagent/skill_seeds.py#L36)）、`seed_skills(memory, refresh=False)`（[L117](../penagent/skill_seeds.py#L117)） | 预置技能（产品知识）幂等写入；`refresh=True` 覆盖正文但保留学习统计 |
 | skill_export.py | `export_skills(data_dir, out_dir, namespace="")`（[L85](../penagent/skill_export.py#L85)） | 导出为 `<namespace>-<id8>.md` + YAML frontmatter（对齐 DSH 扁平技能发现），供 preset 的 `customSkillDirs` 消费 |
-| gaps.py | `analyze_gaps(memory, evidence=None)`（[L15](../penagent/gaps.py#L15)）、`analyze_gaps_llm(memory, llm=None)`（[L77](../penagent/gaps.py#L77)） | 工具调用热力 / 失败率 / 拦截次数 → 规则化建议；LLM 模式产出能力盲区清单 |
+| gaps.py | `analyze_gaps(memory, evidence=None)`（[L15](../penagent/gaps.py#L15)）、`analyze_gaps_llm(memory, llm=None)`（[L85](../penagent/gaps.py#L85)） | 工具调用热力 / 失败率 / 拦截次数（`blocked` 与 `loop` 分列——循环拦截不是"高危未授权"，建议文案各说各的）→ 规则化建议；LLM 模式产出能力盲区清单 |
 | rl.py | `SkillPolicy`（[L20](../penagent/rl.py#L20)） | 轻量 Q-learning：ε-greedy 选技能、Q 表更新、`best_skill(fingerprint)`、JSON 持久化 |
 | ppo.py | `state_key / state_id / state_feature / feature_state`（[L28-L51](../penagent/ppo.py#L28-L51)）、`ActorCritic(nn.Module)`（[L57](../penagent/ppo.py#L57)）、`PPOSkillPolicy`（[L83](../penagent/ppo.py#L83)） | PPO clip 训练 + `.pt` 持久化；`torch` 为**可选依赖**（未安装时相关用例 `importorskip` 跳过） |
 

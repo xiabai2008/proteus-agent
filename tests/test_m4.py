@@ -40,6 +40,38 @@ def test_gaps_no_missions(tmp_path):
     assert r["suggestions"] == []
 
 
+def test_gaps_loop_block_not_misreported_as_authorization(tmp_path):
+    """R-39 的循环拦截与"护栏拦截"分开计数、分开给建议。
+
+    否则会输出"高危工具 file_type 被护栏拦截——请在授权目标上显式授权"，
+    而重复失败检测是模型在循环，显式授权根本放不开（误导读者）。
+    """
+    m = Memory(tmp_path)
+    mid = m.new_mission("http://x", "循环")
+    m.add_step(mid, {"step": 1, "tool": "file_type", "blocked": True,
+                     "level": "loop", "reason": "同一调用已连续失败 3 次"})
+    m.add_step(mid, {"step": 2, "tool": "file_type", "blocked": True,
+                     "level": "loop", "reason": "同一调用已连续失败 3 次"})
+    m.finish(mid, "failed")
+    r = analyze_gaps(m)
+    assert r["tool_usage"]["file_type"]["loop"] == 2
+    assert any("file_type" in s and "同参连续失败" in s
+               for s in r["suggestions"])
+    assert not any("显式授权" in s for s in r["suggestions"])
+
+
+def test_gaps_guard_block_still_suggests_authorization(tmp_path):
+    """普通护栏拦截（无 level=loop）的建议文案不变（向后兼容）。"""
+    m = Memory(tmp_path)
+    mid = m.new_mission("http://x", "越权")
+    m.add_step(mid, {"step": 1, "tool": "sqlmap", "blocked": True,
+                     "reason": "目标不在授权范围"})
+    m.finish(mid, "failed")
+    r = analyze_gaps(m)
+    assert r["tool_usage"]["sqlmap"]["loop"] == 0
+    assert any("sqlmap" in s and "显式授权" in s for s in r["suggestions"])
+
+
 def test_gaps_llm_mode_no_data(tmp_path):
     from penagent.gaps import analyze_gaps_llm
 

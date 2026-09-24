@@ -25,10 +25,14 @@ def analyze_gaps(memory: Memory,
         for step in m.get("steps", []):
             t = step.get("tool", "?")
             st = tool_stats.setdefault(
-                t, {"calls": 0, "ok": 0, "blocked": 0, "fail": 0})
+                t, {"calls": 0, "ok": 0, "blocked": 0, "fail": 0, "loop": 0})
             st["calls"] += 1
             if step.get("blocked"):
                 st["blocked"] += 1
+                # 重复失败检测（R-39）的拦截与被护栏拦截原因不同：前者是
+                # 模型在循环，显式授权也放不开——分开计数，避免建议文案误导
+                if step.get("level") == "loop":
+                    st["loop"] += 1
             elif step.get("ok"):
                 st["ok"] += 1
             else:
@@ -41,10 +45,14 @@ def analyze_gaps(memory: Memory,
             suggestions.append(
                 f"工具 {t} 失败率 {fail_rate:.0%}（{st['fail']}/{st['calls']}），"
                 "建议检查参数或更新工具版本")
-        if st["blocked"]:
+        if st["blocked"] - st["loop"]:
             suggestions.append(
-                f"高危工具 {t} 被护栏拦截 {st['blocked']} 次——"
+                f"高危工具 {t} 被护栏拦截 {st['blocked'] - st['loop']} 次——"
                 "若是必要能力，请在授权目标上显式授权使用")
+        if st["loop"]:
+            suggestions.append(
+                f"工具 {t} 因同参连续失败被内核拦截 {st['loop']} 次——"
+                "模型在重复调用同一形态，建议检查参数取值或换工具")
 
     unused = [
         s.title for s in memory.list_skills()
