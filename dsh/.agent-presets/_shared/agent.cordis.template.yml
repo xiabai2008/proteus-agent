@@ -112,10 +112,11 @@
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
   config:
-    # F4 技能融合：内核经验库导出目录也纳入 DSH 技能发现。
+    # F4 技能融合 + P1-5 双套：本 preset 只挂自己那份导出目录
+    # （data/dsh-skills/<会话键>），场景之间不互串。
     # 产出方式：python -m penagent skills --export（或 /proteus-skills 命令）。
     # !!js 表达式里禁止 ": "（YAML 会拆映射键）——三元冒号后不带空格是刻意的。
-    customSkillDirs: !!js process.env.PENTEST_WS ? [(process.env.PENTEST_WS + '/proteus-agent/data/dsh-skills')]:[]
+    customSkillDirs: !!js process.env.PENTEST_WS ? [(process.env.PENTEST_WS + '/proteus-agent/data/dsh-skills/{{SESSION_KEY}}')]:[]
 
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'

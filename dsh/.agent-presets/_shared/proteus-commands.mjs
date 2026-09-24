@@ -137,8 +137,11 @@ async function handleSkills(invocation) {
     return { kind: 'error', text: 'PENTEST_PY312 未设置（内核解释器目录）。' }
   }
   const namespace = String(invocation.rawInput || '').trim()
-  const args = ['-m', 'penagent', 'skills', '--export',
-                '--out', join(root, 'data', 'dsh-skills')]
+  // P1-5：导出到**本 preset 的**技能目录（与 skill-filesystem 的
+  // customSkillDirs 指向同一处），场景之间不互串
+  const outDir = join(root, 'data', 'dsh-skills',
+                      sessionKey || 'default')
+  const args = ['-m', 'penagent', 'skills', '--export', '--out', outDir]
   if (namespace) args.push('--export-namespace', namespace)
   try {
     const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()

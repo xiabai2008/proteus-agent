@@ -173,6 +173,25 @@ def _mask_headers(headers: dict) -> list[list[str]]:
     return out
 
 
+def mask_response_headers(items) -> list[list[str]]:
+    """证据里记录**响应头**时脱敏 `Set-Cookie` 的**值**。
+
+    为什么必须做（2026-09-24，P1-1 的测试当场抓出来）：登录响应里
+    `Set-Cookie: PHPSESSID=abc123` 的值**就是凭据本身**——原样回吐，等于把
+    会话令牌写进模型上下文与证据链。只保留 cookie 名与长度：证据价值
+    （"服务端确实发了会话 cookie"）在，秘密不在。
+    """
+    out = []
+    for k, v in items:
+        text = str(v)
+        if str(k).lower() in ("set-cookie", "set-cookie2"):
+            name = text.split("=", 1)[0].strip()
+            out.append([k, f"{name}=…（已脱敏，共 {len(text)} 字符）"])
+        else:
+            out.append([k, text[:300]])
+    return out
+
+
 #: grep 的扫描上限（字符）：够覆盖常见目录列表/HTML 页，又不至于把内存吃满
 GREP_SCAN_CAP = 65536
 
@@ -280,8 +299,8 @@ def http_raw(url: str, method: str = "GET", body: str = "",
                 "status": getattr(resp, "status", None)
                           or getattr(resp, "code", None),
                 "reason": str(getattr(resp, "reason", "") or ""),
-                "headers": [[k, str(v)[:300]]
-                            for k, v in list(resp.headers.items())],
+                "headers": mask_response_headers(
+                    list(resp.headers.items())),
                 "location": resp.headers.get("Location", ""),
                 "body": text_body,
                 "truncated": truncated,
@@ -312,8 +331,52 @@ def http_raw(url: str, method: str = "GET", body: str = "",
                    if header_problems else {})}
 
 
+def report_gen(mission_id: str = "", format: str = "markdown",
+               out: str = "", data_dir: str = "") -> dict:
+    """从证据链/作战记录产出报告（markdown）或 SARIF 2.1.0（机器可读）。
+
+    - `format="markdown"`：人读汇总（证据链校验 + 任务明细），与
+      `/proteus-evidence`、`pentest_evidence` 同一实现；
+    - `format="sarif"`：标准容器（一条证据 = 一条 result），给 CI/工单消费；
+    - `out`：可选，写到 `<data_dir>/reports/<name>`（只允许文件名，禁止路径
+      穿越）；不传则只返回文本，由调用方决定落哪。
+    """
+    from penagent.report import evidence_report, sarif_report
+
+    data = data_dir or DATA_DIR
+    fmt = (format or "markdown").strip().lower()
+    if fmt not in ("markdown", "sarif"):
+        return {"ok": False, "error": f"不支持的 format: {format}"
+                                      f"（markdown / sarif）"}
+    if fmt == "markdown":
+        text = evidence_report(data, mission_id)
+    else:
+        import json as _json
+
+        text = _json.dumps(sarif_report(data, mission_id), ensure_ascii=False,
+                           indent=1)
+
+    result: dict = {"ok": True, "format": fmt, "chars": len(text),
+                    "report": text[:12000]}
+    if len(text) > 12000:
+        result["truncated"] = True
+    name = str(out or "").strip()
+    if name:
+        if any(ch in name for ch in ("/", "\\", "..")):
+            return {"ok": False, "error": "out 只能是文件名（禁止路径分隔符）"}
+        target = Path(data) / "reports" / name
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+            result["path"] = str(target)
+        except OSError as exc:
+            result["write_error"] = str(exc)[:200]
+    return result
+
+
 def register_builtins(registry) -> None:
     """注册内置工具到注册表。"""
+    from penagent.http_session import replay_request, session_http
     from penagent.tools import ToolSpec
 
     specs = [
@@ -350,6 +413,39 @@ def register_builtins(registry) -> None:
                              "timeout": {"type": "number"},
                              "max_body": {"type": "number"}},
                  fn=http_raw),
+        ToolSpec(name="session_http",
+                 description=("带会话态 HTTP（cookie jar）：登录一次后自动带 "
+                              "cookie，Set-Cookie 自动吸收；返回 request_id 供"
+                              "重放。多身份用不同 session 名隔离。凭据只在 "
+                              "data/http-sessions/ 里，不回显值"),
+                 parameters={"url": {"type": "string"},
+                             "method": {"type": "string"},
+                             "body": {"type": "string"},
+                             "headers": {"type": "object"},
+                             "cookie": {"type": "string"},
+                             "session": {"type": "string"},
+                             "grep": {"type": "string"},
+                             "timeout": {"type": "number"},
+                             "max_body": {"type": "number"},
+                             "update_cookies": {"type": "boolean"}},
+                 fn=session_http),
+        ToolSpec(name="replay_request",
+                 description=("把此前那条请求（按 request_id）原样重发并比对"
+                              "状态码与正文哈希——可复现 PoC 的执行动作；"
+                              "不一致时给出『结论不可复现』的判定提示"),
+                 parameters={"request_id": {"type": "string"},
+                             "session": {"type": "string"},
+                             "compare_body": {"type": "boolean"},
+                             "timeout": {"type": "number"}},
+                 fn=replay_request),
+        ToolSpec(name="report_gen",
+                 description=("从证据链产出报告：markdown（人读汇总）或 "
+                              "sarif（SARIF 2.1.0，机器可读）。可选 out 落盘到"
+                              " <data>/reports/"),
+                 parameters={"mission_id": {"type": "string"},
+                             "format": {"type": "string"},
+                             "out": {"type": "string"}},
+                 fn=report_gen),
     ]
     for s in specs:
         registry.register(s)

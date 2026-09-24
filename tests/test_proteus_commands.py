@@ -161,8 +161,38 @@ def test_skills_command_spawns_export(fake_ws):
     sk = _run_plugin(fake_ws)["skills"]
     assert sk["kind"] == "success", sk
     assert "技能导出" in sk["text"] and "2 条" in sk["text"]
-    out_dir = fake_ws / "proteus-agent" / "data" / "dsh-skills"
+    # 未配 sessionKey → default 目录（配了则按 preset 分开，见下一条）
+    out_dir = fake_ws / "proteus-agent" / "data" / "dsh-skills" / "default"
     assert out_dir.is_dir()
+
+
+def test_skills_export_dir_follows_session_key(fake_ws):
+    """P1-5：技能导出按会话键分目录，与 skill-filesystem 的 customSkillDirs 同源。"""
+    repo = fake_ws / "proteus-agent"
+    runner = repo / "runner.mjs"
+    runner.write_text(textwrap.dedent("""
+        const { pathToFileURL } = await import('node:url')
+        const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href)
+        const captured = []
+        mod.apply({ commands: { register: (d) => captured.push(d) } },
+                  { sessionKey: 'ctf-web' })
+        const cmd = captured.find((c) => c.name === 'proteus-skills')
+        console.log(JSON.stringify(await cmd.handler({ rawInput: '' })))
+    """), encoding="utf-8")
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SystemRoot": os.environ.get("SystemRoot", ""),
+        "PLUGIN_PATH": str(PLUGIN),
+        "PENTEST_WS": str(fake_ws),
+        "PENTEST_PY312": str(Path(sys.executable).parent),
+        "PYTHONIOENCODING": "utf-8",
+    }
+    proc = subprocess.run([NODE, str(runner)], env=env, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace",
+                          timeout=60, cwd=str(repo))
+    assert proc.returncode == 0, proc.stderr[:400]
+    assert json.loads(proc.stdout.strip().splitlines()[-1])["kind"] == "success"
+    assert (repo / "data" / "dsh-skills" / "ctf-web").is_dir()
 
 
 def test_audit_command_reads_spool_and_chain(fake_ws):

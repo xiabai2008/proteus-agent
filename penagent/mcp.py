@@ -111,6 +111,10 @@ class PentestMCPServer:
         self.registry.gate = PolicyGate(self.policy)
         self.memory = Memory(data_dir)
         self.evidence = EvidenceChain(Path(data_dir) / "chain.jsonl")
+        # 会话态 HTTP（session_http/replay_request）的 jar 目录（P1-1）
+        from penagent.http_session import configure as configure_http
+
+        configure_http(data_dir)
         self.llm = LLMConfig.from_env()
         # 服务端级默认模式：pentest_run 未显式指定 mode 时的回落。
         # 空串 = 保持向后兼容（无模式路径：全量注册表 + 证据链判定器）；
