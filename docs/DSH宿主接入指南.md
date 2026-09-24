@@ -30,21 +30,31 @@ preset 里再挂一次，要么与根 realm 冲突（`provide()` 二次注册同
 ```
 proteus-agent/
 ├── dsh/
-│   ├── .agent-presets/proteus/          # preset（AGENT 平面）
-│   │   ├── agent.cordis.yml             # preset 本体：3 行 Proteus 专属内容
-│   │   ├── proteus-persona.mjs          # 本地插件：读人格文件并注册分区
-│   │   ├── proteus-tools-policy.mjs     # 本地插件：目标动作裁决 + 内核缺位守卫
-│   │   └── preset.yml                   # 显示名/描述/排序
+│   ├── .agent-presets/                  # preset 源（AGENT 平面）
+│   │   ├── _shared/                     # ★ 单一实现来源（三个 preset 共用）
+│   │   │   ├── agent.cordis.template.yml    #   组合模板（占位符渲染）
+│   │   │   ├── proteus-persona.mjs          #   本地插件：读人格文件并注册分区
+│   │   │   ├── proteus-tools-policy.mjs     #   本地插件：目标动作裁决 + 内核缺位守卫
+│   │   │   └── proteus-commands.mjs         #   人机命令（mode/scope/evidence/skills/audit）
+│   │   ├── proteus-pentest/preset.yml       # 场景一：渗透（order 5）
+│   │   ├── proteus-ctf-web/preset.yml       # 场景二：CTF Web（order 6）
+│   │   └── proteus-ctf-crypto/preset.yml    # 场景三：CTF Crypto（order 7）
 │   ├── proteus-bridge/                  # host 平面 bundle：会话事件审计入 spool
 │   └── proteus.cordis.patch.yml         # host 平面补丁：审批档位绑定
-├── prompts/dsh-persona.md               # 宿主侧人格提示词（persona 的唯一来源）
-└── tools/dsh_install.py                 # 同步 + 漂移校验 + roster 健康检查
+├── prompts/dsh-persona.md               # 渗透场景人格
+├── prompts/dsh-persona-ctf.md           # CTF 场景人格
+└── tools/dsh_install.py                 # 渲染 + 同步 + 漂移校验 + roster 健康检查
 ```
+
+> **三个 preset 由同一份模板渲染**（`{{DEFAULT_MODE}}` / `{{PERSONA_PROMPT}}` /
+> `{{SESSION_KEY}}` 等在同步时替换）——组合文件是官方 standard preset 的 300+ 行
+> fork，三份拷贝就是三次升级合成与三处漂移。共享 `.mjs` 也只存一份：DSH 只认
+> "preset 本目录相对文件"，所以同步时拷进每个 preset 目录，但**源头唯一**。
 
 **同步（推荐）**——幂等；`--check` 只校验不改动：
 
 ```bash
-python tools/dsh_install.py          # 同步 preset 到 $DSH_HOME，并校验
+python tools/dsh_install.py          # 渲染 + 同步三个 preset 到 $DSH_HOME，并校验
 python tools/dsh_install.py --check  # 只检查：与仓库是否同步 / 补丁 / 审计桥接线
 ```
 
@@ -60,12 +70,12 @@ python tools/dsh_install.py --check  # 只检查：与仓库是否同步 / 补�
 > 消失且无任何提示**。所以只能是真实目录 + "启动前同步"。备份也必须放在 preset
 > 根**之外**（`$DSH_HOME/backups/`），否则会被发现机制当成一个 preset。
 
-**手工同步（等价，仅在不能跑脚本时）**——注意是**四个**文件，漏一个即 broken：
+**手工同步（等价，仅在不能跑脚本时）**——由安装器**渲染生成**，手工时最容易漏占位符替换；
+只建议在"核对手工副本"时用：
 
 ```bash
-mkdir -p ~/.dsh/.agent-presets/proteus
-cp dsh/.agent-presets/proteus/{agent.cordis.yml,proteus-persona.mjs,proteus-tools-policy.mjs,preset.yml} \
-   ~/.dsh/.agent-presets/proteus/
+python tools/dsh_install.py          # 老老实实跑脚本；它会把渲染结果写进 $DSH_HOME
+ls ~/.dsh/.agent-presets/proteus-pentest/   # 期望 5 个文件（三个 .mjs + 两个 yml）
 ```
 
 **审计层（host 平面 bundle）走官方安装路径**，装完**重启 DSH 进程**：
@@ -131,9 +141,17 @@ dsh --profile web --patch <仓库>/dsh/proteus.cordis.patch.yml
 <REPO>\dsh\start-proteus.cmd
 ```
 
-启动器做四件事：校验环境变量 → **同步并校验 preset** → **若已有实例在跑就先关掉它**
-→ 带 host 补丁启动 web profile。启动后终端打印带 token 的地址，在会话的 preset 选择器里选
-**「Proteus 千面」（order: 5）**，新会话即挂载本 preset。
+启动器做四件事：校验环境变量 → **渲染并同步三个 preset** → **若已有实例在跑就先关掉它**
+→ 带 host 补丁启动 web profile。启动后终端打印带 token 的地址，在会话的 preset 选择器里
+**按场景选一个**：
+
+| 选择器条目 | 默认模式 | 用途 |
+|---|---|---|
+| **Proteus 渗透**（order 5） | `pentest-standard` | 授权范围内的渗透测试与侦察（工具面 33 个） |
+| **Proteus CTF-Web**（order 6） | `ctf-web` | CTF Web 题（工具面 14 个：codec/HTTP/容器 RE/知识库） |
+| **Proteus CTF-Crypto**（order 7） | `ctf-crypto` | CTF Crypto/Misc/RE（工具面 11 个） |
+
+会话内：`/proteus-mode` 切模式（工具面与宿主裁决档同时变）、`/proteus-scope` 人工授权新目标。
 
 > **为什么必须先关旧实例**（2026-09-22 实测两次踩中）：4080 被占时新实例会
 > `dsh: startup failed: webserver (required) listen EADDRINUSE 127.0.0.1:4080`
@@ -284,16 +302,21 @@ node verify-proteus.mjs && rm verify-proteus.mjs
 
 ## 六、工具清单与命名
 
-实测（本机 2026-09-22，用 5.2 的命令并加 `--discover-mcp`）：**45 个工具**，
-公开名一律 `mcp__proteus__<原名>`。
+公开名一律 `mcp__proteus__<原名>`；**工具面随模式动态裁剪**（P0-3，2026-09-24）：
+被当前模式 `capability` 挡下的工具**不出现在列表里**，也调不到；`/proteus-mode` 切换后
+内核发 `notifications/tools/list_changed`，DSH 自动重取。
 
-| 类别 | 数量 | 工具 |
+| 场景（默认模式） | 工具数 | 内容 |
 |---|---|---|
-| 高层能力（内核驱动） | 4 | `pentest_run` / `pentest_skills` / `pentest_missions` / `pentest_reflect` |
-| 内置被动侦察 | 5 | `port_scan` / `http_probe` / `http_raw` / `dns_lookup` / `robots_fetch` |
-| 外部 CLI（本机已安装的才注册） | 16 | `httpx_probe` / `nuclei_scan` / `sqlmap_auto` / `ffuf_fuzz` / `gobuster_dir` / `fscan_scan` / `naabu_scan` / `dalfox_xss` / `subfinder_enum` / `dnsx_lookup` / `katana_crawl` / `ehole_finger` / `pocsuite_poc` / `poxiao_scan` / `poxiao_recon` / `ruoyi_scan` |
-| 适配器（PacketForge） | 3 | `pf_nmap_scan` / `pf_nmap_services` / `pf_nmap_vuln` |
-| 外部 MCP（需 `--discover-mcp`） | 17 | chameleon 12（`chameleon_scrape_url` / `chameleon_crawl_site` 等）+ seckb 4（`seckb_kb_search` 等）+ rayscan 1（`rayscan_scan`） |
+| `proteus-pentest`（pentest-standard） | **33** | 内置侦察 5（`port_scan` / `http_probe` / `http_raw` / `dns_lookup` / `robots_fetch`）+ 外部 CLI 18（httpx / nuclei / sqlmap / ffuf / gobuster / fscan / naabu / dalfox / subfinder / dnsx / katana / ehole / pocsuite / semgrep / sherlock / theHarvester / poxiao×2 / ruoyi）+ 适配器 4（`pf_nmap_*` / `rayscan_scan`）+ 服务端能力 6（`pentest_run` / `pentest_set_mode` / `pentest_evidence` / `pentest_missions` / `pentest_skills` / `pentest_reflect`） |
+| `proteus-ctf-web`（ctf-web） | **14** | CTF 五件套（`codec_decode` / `codec_chain` / `file_type` / `python_solve` / `rsactf_attack`）+ `http_raw` / `http_probe` / `dns_lookup` / `robots_fetch` / `port_scan` + 元能力 4（`pentest_set_mode` / `pentest_evidence` / `pentest_missions` / `pentest_skills`）；重型扫描器（nuclei / sqlmap / ffuf…）被 `capability.deny` 挡下 |
+| `proteus-ctf-crypto`（ctf-crypto） | **11** | 上表 CTF 五件套 + `http_raw` / `dns_lookup` + 元能力 4 |
+
+发现外部 MCP（`--discover-mcp`，preset 已开）后**按家族扩充**（allow 里写的是
+`chameleon_*` / `seckb_*` / `binwalk_*` / `capa_*` / `yara_*` / `searchsploit_*` /
+`cyberchef_*` 这类前缀通配）：容器 MCP 27（binwalk 7 / searchsploit 3 / capa 3 /
+cyberchef 3 / hexstrike 6 / yara 5）+ chameleon 12 + seckb 4。发现阶段有**全局预算**
+（缺省 180s，`--discover-budget` 可调），不可达的 server 快速跳过并记入 `summary().notes`。
 
 工具清单来自内核的统一注册中心（`penagent/registry.py`）：新增工具改配置即可，
 内核与宿主两侧都不用改代码。
