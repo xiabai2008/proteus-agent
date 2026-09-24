@@ -210,6 +210,7 @@ python tools/dsh_compat_check.py         # 2) 升级后：FAIL 的每一项就�
 | 22fd6cd | R-42 其余小项：supervisor 删死代码 · CLI 行缓冲 · suggest 同分定序 · tree 注明 flag 引用 |
 | 80b39fa | R-39 内核侧补重复失败检测：同工具 + 同参数连续失败到阈值即拦并回灌纠正指令 |
 | 0c601b6 | R-40 LLM 输出不可解析不再废掉整轮：分出 `LLMOutputError`，回灌纠正提示重试 3 次且不记步数 |
+| daebb06 | R-41 `dsh-session` 回放判分加门槛：无匹配会话 / 证据不足记 `skipped` 而非 `failed`，`--preset` 支持 fnmatch 家族通配（待修清零） |
 
 **测试基线**：450 → **564 passed / 0 failed / 1 skipped**（每个提交都带回归用例；那 1 条
 skip 是等 DVWA 的 CSRF token，lab 标记用例的端口误判已由 R-42 的 `identifies()`
