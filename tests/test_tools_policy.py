@@ -46,6 +46,7 @@ RUNNER = textwrap.dedent("""
         shellTools: ['pwsh', 'bash'],
         spoolPath: process.env.SPOOL,
         scopePath: process.env.SCOPE,
+        modePath: process.env.MODE,
       })
       return listeners['tools/pre-execute'][0]
     }
@@ -69,6 +70,31 @@ RUNNER = textwrap.dedent("""
     console.log(JSON.stringify(out))
 """)
 
+# P0-5：模式驱动的档位——用同一个 runner 再跑一遍（会话模式 = ctf-web），
+# 以及"CTF 模式 + 越界目标"（越界不走放行表）
+MODE_RUNNER = textwrap.dedent("""
+    const { pathToFileURL } = await import('node:url')
+    const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href)
+    const listeners = {}
+    mod.apply({
+      on: (name, fn) => { (listeners[name] ||= []).push(fn) },
+      tools: { schemas: () => [{ name: 'mcp__proteus__http_raw' }] },
+    }, {
+      role: 'policy', mode: 'ask', kernelGuard: 'deny',
+      targets: ['127.0.0.1', 'localhost'], shellTools: ['pwsh'],
+      spoolPath: process.env.SPOOL, scopePath: process.env.SCOPE,
+      modePath: process.env.MODE,
+    })
+    const pre = listeners['tools/pre-execute'][0]
+    const next = async () => ({ kind: 'next' })
+    const run = async (command) =>
+      await pre({ name: 'pwsh', arguments: { command }, agent: null }, next)
+    console.log(JSON.stringify({
+      inScope: await run('curl http://127.0.0.1:3000/'),
+      outScope: await run('curl http://evil.example.com/'),
+    }))
+""")
+
 
 @pytest.fixture()
 def ws(tmp_path: Path) -> Path:
@@ -80,15 +106,21 @@ def ws(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _run(ws: Path) -> dict:
+def _run(ws: Path, script: str = RUNNER, mode: str = "") -> dict:
     runner = ws / "runner.mjs"
-    runner.write_text(RUNNER, encoding="utf-8")
+    runner.write_text(script, encoding="utf-8")
+    mode_file = ws / "data" / "session-mode.json"
+    if mode:
+        mode_file.write_text(json.dumps({"mode": mode}), encoding="utf-8")
+    elif mode_file.exists():
+        mode_file.unlink()
     env = {
         "PATH": os.environ.get("PATH", ""),
         "SystemRoot": os.environ.get("SystemRoot", ""),
         "PLUGIN_PATH": str(PLUGIN),
         "SPOOL": str(ws / "data" / "dsh-events.jsonl"),
         "SCOPE": str(ws / "data" / "session-scope.json"),
+        "MODE": str(mode_file),
     }
     proc = subprocess.run([NODE, str(runner)], env=env, capture_output=True,
                           text=True, encoding="utf-8", errors="replace",
@@ -145,3 +177,28 @@ def test_policy_records_land_in_spool(ws):
     kinds = {r["kind"] for r in records}
     assert "policy" in kinds
     assert any(r.get("decision") == "deny" for r in records)
+
+
+def test_ctf_mode_allows_in_scope_target_actions(ws):
+    """P0-5：会话模式 = ctf-web 时，范围内目标动作放行（仍然留痕）。"""
+    r = _run(ws, MODE_RUNNER, mode="ctf-web")
+    assert r["inScope"] == {"kind": "next"}
+
+    records = [json.loads(line) for line in
+               (ws / "data" / "dsh-events.jsonl").read_text(
+                   encoding="utf-8").strip().splitlines()]
+    allowed = [x for x in records if x.get("decision") == "allow"]
+    assert allowed and "ctf-web" in allowed[0]["reason"]
+
+
+def test_ctf_mode_does_not_allow_out_of_scope(ws):
+    """放行表不覆盖越界：CTF 模式下白名单外目标仍然要审批。"""
+    r = _run(ws, MODE_RUNNER, mode="ctf-web")
+    assert r["outScope"]["kind"] == "ask"
+    assert "/proteus-scope" in r["outScope"]["reason"]
+
+
+def test_unknown_mode_falls_back_to_static_tier(ws):
+    """未知/未设置的会话模式 → 沿用静态 mode（ask），不放行。"""
+    r = _run(ws, MODE_RUNNER, mode="")
+    assert r["inScope"]["kind"] == "ask"

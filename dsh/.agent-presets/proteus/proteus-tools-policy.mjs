@@ -166,6 +166,37 @@ function withinTargets(host, targets) {
 }
 
 /**
+ * 读会话模式（与内核 `penagent/mcp.py::_read_session_mode` 同口径：
+ * 缺失/损坏 → 空串）。P0-5：模式要同时驱动宿主侧裁决，否则"切了模式"只
+ * 影响内核工具面，宿主 shell 那条路还是老样子。
+ */
+function readSessionMode(modePath) {
+  if (modePath === '') return ''
+  try {
+    const data = JSON.parse(readFileSync(modePath, 'utf8'))
+    return String(data.mode || '')
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 按会话模式决定"范围内目标动作"的档位（P0-5）。
+ *
+ * 缺省映射：CTF 模式放行（CTF 环境本身即授权范围、工具密集，逐步打断没有
+ * 收益——与 `proteus-ctf` 档位 `approval: never` 的取向一致）；其余模式沿用
+ * 静态 `mode` 配置（缺省 ask）。可用 config.modePolicy 覆盖。
+ *
+ * **越界目标不走这张表**：白名单外一律至少 ask（见 apply 里的 tier 计算）。
+ */
+const DEFAULT_MODE_POLICY = { 'ctf-web': 'allow', 'ctf-crypto': 'allow' }
+
+function tierForMode(modePolicy, sessionMode, fallback) {
+  const value = modePolicy[sessionMode]
+  return typeof value === 'string' && value !== '' ? value : fallback
+}
+
+/**
  * 读会话授权清单（与内核 `penagent/scope.py` 同口径：缺失/损坏 → 空）。
  *
  * P0-4：内核与裁决行读**同一份文件**——否则会出现"内核放行、宿主拦截"或
@@ -300,6 +331,11 @@ export function apply(ctx, config = {}) {
   const targets = readStringArray(config.targets, ['127.0.0.1', 'localhost'])
   // P0-4：会话授权（人工命令写的文件）与基线取并集——与内核同一份来源
   const scopePath = typeof config.scopePath === 'string' ? config.scopePath : ''
+  // P0-5：会话模式（同一个 /proteus-mode 写、内核读的文件）
+  const modePath = typeof config.modePath === 'string' ? config.modePath : ''
+  const modePolicy = (config.modePolicy && typeof config.modePolicy === 'object')
+    ? config.modePolicy
+    : DEFAULT_MODE_POLICY
   const shellTools = readStringArray(config.shellTools, ['pwsh', 'bash'])
   // 只记这些 preset 的会话（空 = 全记但打标）；归属未知的会话一律保留
   const presets = readStringArray(config.presets, [])
@@ -440,10 +476,25 @@ export function apply(ctx, config = {}) {
     const reason = kernel === 'no' && kernelGuard === 'warn'
       ? base + '【注意】内核工具未挂载，本次动作没有内核校验与证据链。'
       : base
-    const decision = mode === 'deny'
-      ? { kind: 'deny', reason }
-      : { kind: 'ask', reason }
-    record(decision.kind, reason, kernel === 'no' ? { kernel: 'missing' } : {})
+
+    // P0-5：档位由**会话模式**决定（越界目标不走这张表——至少 ask）
+    const sessionMode = readSessionMode(modePath)
+    const tier = outside.length > 0
+      ? (mode === 'deny' ? 'deny' : 'ask')
+      : tierForMode(modePolicy, sessionMode, mode)
+    const modeNote = sessionMode === ''
+      ? ''
+      : `【会话模式 ${sessionMode}】`
+    if (tier === 'allow') {
+      // 范围内 + 模式放行：不弹审批，但**仍然留痕**（审计要能回答"放过了什么"）
+      record('allow', modeNote + base)
+      return next()
+    }
+    const decision = tier === 'deny'
+      ? { kind: 'deny', reason: modeNote + reason }
+      : { kind: 'ask', reason: modeNote + reason }
+    record(decision.kind, modeNote + reason,
+           kernel === 'no' ? { kernel: 'missing' } : {})
     return decision
   })
 }
