@@ -391,7 +391,13 @@ def main(argv: list[str] | None = None) -> int:
 
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            # line_buffering：重定向/管道下 stdout 默认是**块缓冲**（几 KB 才刷一次），
+            # 于是 `python -m penagent run ... > log` 或后台跑时，进度要到进程结束
+            # 才一起出现——实测长任务里日志文件长时间为空，看不出走到哪一步（R-42）。
+            # 终端下本来就行缓冲，这里只是把同一语义补到重定向场景；一次覆盖全部
+            # print，不必给每个 print 加 flush=True。
+            stream.reconfigure(encoding="utf-8", errors="replace",
+                               line_buffering=True)
         except (AttributeError, ValueError):
             pass
     parser = argparse.ArgumentParser(

@@ -56,9 +56,18 @@ async function probeTriggers() {
     for (const item of data.suggestions) hits[item.id] = item.hits
     renderModes(hits)
     const top = data.suggestions[0]
-    $('dispatch-note').textContent = top
-      ? `关键词推荐：${top.label}（命中 ${top.hits.join('、')}）`
-      : '关键词未命中任何模式'
+    const tied = data.suggestions.filter((item) => item.tied)
+    if (!top) {
+      $('dispatch-note').textContent = '关键词未命中任何模式'
+    } else if (tied.length > 1) {
+      // 同分并列（如一句"帮我解一道 CTF 题"同时命中 ctf-web 与 ctf-crypto）：
+      // 说明真实情况让人选，不要把排序结果当成推荐（R-42）
+      $('dispatch-note').textContent =
+        `关键词命中并列：${tied.map((item) => item.label).join('、')}——请自己选一个`
+    } else {
+      $('dispatch-note').textContent =
+        `关键词推荐：${top.label}（命中 ${top.hits.join('、')}）`
+    }
   } catch (error) {
     $('dispatch-note').textContent = `推荐失败：${error.message}`
   }

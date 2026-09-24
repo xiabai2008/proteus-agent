@@ -94,7 +94,17 @@ class ConsoleService:
         return out
 
     def suggest(self, text: str) -> list[dict]:
-        """按关键词触发推荐模式（命中数降序）。"""
+        """按关键词触发推荐模式：命中数降序，**同分按 id 升序**。
+
+        为什么要钉死同分的次序（R-42）：`ctf-crypto` 与 `ctf-web` 的触发词里
+        都有泛词 `ctf`，一句"帮我解一道 CTF 题"让两者各得 1 分。此前同分靠
+        `self._modes` 的插入序（即 `modes/*.yaml` 的加载次序）决定谁排前面——
+        **多放一个模式文件就可能悄悄改变推荐结果**，而这种改变没有任何痕迹。
+        现在次序只由 (score, id) 决定，与文件加载顺序无关。
+
+        并列项标 `tied=True`：并列本来就需要人来选，不该由排序替人决定
+        （界面据此提示"并列，请自己选"，而不是把第一个当成推荐）。
+        """
         scored = []
         for mode_id, mode in self._modes.items():
             if mode_id == "base":
@@ -103,7 +113,13 @@ class ConsoleService:
             if hits:
                 scored.append({"id": mode_id, "label": mode.label,
                                "hits": hits, "score": len(hits)})
-        return sorted(scored, key=lambda item: -item["score"])
+        ranked = sorted(scored, key=lambda item: (-item["score"], item["id"]))
+        if ranked:
+            top = ranked[0]["score"]
+            tied = sum(1 for item in ranked if item["score"] == top) > 1
+            for item in ranked:
+                item["tied"] = bool(tied and item["score"] == top)
+        return ranked
 
     def mode(self, mode_id: str) -> ModeProfile:
         if mode_id not in self._modes:

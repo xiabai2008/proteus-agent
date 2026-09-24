@@ -15,6 +15,11 @@
  * 边界（诚实声明）：
  * - 只数与拦，**不改工具结果**；不判断"这次调用是否有意义"（那要靠模型）。
  * - 会话 id 取不到时按 `unknown` 计——可能跨会话累计，宁可多拦一次也不漏。
+ * - **不按工具名过滤：监督覆盖会话里的全部工具**（含宿主自己的、非内核的）。
+ *   刻意如此：一次会话的循环可能发生在任何工具上，只盯内核工具等于给"换个
+ *   工具继续绕"留口子。曾有过一个 `toolPrefix` 配置项想做这层过滤，但从未被
+ *   任何判据使用——2026-09-24 删掉：**写进配置却不生效比没有更坏**，它会让
+ *   读配置的人以为过滤存在（见 docs/修复待办清单.md R-42）。
  * - 留痕进 spool（kind=`supervisor`），审计链能回答"谁在什么时候被拦了"。
  */
 
@@ -26,8 +31,6 @@ export const inject = []
 
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-
-const KERNEL_PREFIX = 'mcp__proteus__'
 
 function clip(value, limit = 400) {
   const text = typeof value === 'string' ? value : JSON.stringify(value ?? '')
@@ -49,7 +52,7 @@ function fingerprint(name, args) {
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx - 宿主上下文。
  * @param {{spoolPath?: string, sameToolLimit?: number, totalLimit?: number,
- *          escalate?: string, toolPrefix?: string}} [config] - 行配置。
+ *          escalate?: string}} [config] - 行配置。
  */
 export function apply(ctx, config = {}) {
   const spoolPath = typeof config.spoolPath === 'string' ? config.spoolPath : ''
@@ -59,8 +62,6 @@ export function apply(ctx, config = {}) {
     ? Number(config.totalLimit) : 30
   const escalate = typeof config.escalate === 'string' && config.escalate !== ''
     ? config.escalate : 'ask'
-  const toolPrefix = typeof config.toolPrefix === 'string' && config.toolPrefix !== ''
-    ? config.toolPrefix : KERNEL_PREFIX
 
   /** 会话 → { repeats: Map<指纹, 次数>, total: 次数, intervened: 次数 } */
   const sessions = new Map()

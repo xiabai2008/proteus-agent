@@ -54,6 +54,24 @@ def test_suggest_ranks_by_keyword_hits(service):
     assert service.suggest("毫无相干的文本") == []
 
 
+def test_suggest_tie_is_deterministic_and_flagged(service):
+    """同分不靠模式文件加载序定序，且并列要显式标出来（R-42）。
+
+    "帮我解一道 CTF 题"让 ctf-crypto 与 ctf-web 各命中泛词 `ctf`（各 1 分）：
+    次序只由 (score, id) 决定，同时标 `tied` 让人自己选，而不是把排序结果当推荐。
+    """
+    hits = service.suggest("帮我解一道 CTF 题")
+    assert [h["score"] for h in hits] == [1, 1]
+    assert [h["id"] for h in hits] == ["ctf-crypto", "ctf-web"]
+    assert all(h["tied"] for h in hits)
+
+    # 分数能分出高下时不打并列标记
+    ranked = service.suggest("CTF 比赛 flag 解题")
+    assert ranked[0]["id"] == "ctf-web" and ranked[0]["score"] > ranked[1]["score"]
+    assert not any(h["tied"] for h in ranked)
+    assert not any(h["tied"] for h in service.suggest("对目标做资产侦察与漏洞验证"))
+
+
 def test_unknown_mode_rejected(service):
     with pytest.raises(KeyError):
         service.mode("not-a-mode")

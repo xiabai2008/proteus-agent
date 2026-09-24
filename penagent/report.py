@@ -39,6 +39,11 @@ def _mission_detail(m: dict) -> str:
 SARIF_LEVELS = {"conclusion": "warning", "observation": "note",
                 "decision": "note", "tool_call": "none"}
 
+# FlagRegexVerifier 命中时的 verdict 文案前缀（penagent/verifier.py）。层级视图
+# 据此区分两种"引用为空"：判据本来就不要求引用（flag 判定），还是该引却没引——
+# 此前都显示"证据引用（无）"，成功任务被读成"没有证据"（R-42）。
+FLAG_VERDICT_PREFIX = "flag 命中"
+
 
 def _digest(text: str) -> str:
     import hashlib
@@ -131,6 +136,10 @@ def mission_tree(data_dir: str, mission_id: str = "") -> dict:
                         in ("", mid)}
         wanted_refs = {int(x) for x in (mission.get("evidence_refs") or [])}
         cited |= wanted_refs
+        # 该任务是否由 flag 判定收口（判据不要求引用；见 FLAG_VERDICT_PREFIX）
+        flag_judged = any(
+            str((rec.content or {}).get("verdict", "")).startswith(
+                FLAG_VERDICT_PREFIX) for rec in conclusions)
 
         actions = []
         seen_seq: set[int] = set()
@@ -175,6 +184,7 @@ def mission_tree(data_dir: str, mission_id: str = "") -> dict:
             "summary": str(mission.get("summary") or
                            mission.get("reflection") or "")[:300],
             "evidence_refs": sorted(cited),
+            "flag_judged": flag_judged,
             "actions": actions,
             "conclusions": [{
                 "seq": rec.seq,
@@ -203,9 +213,18 @@ def render_tree(tree: dict) -> str:
                      f"{task['target']}"
                      f"{(' · 分区 ' + task['namespace']) if task.get('namespace') else ''}")
         lines.append(f"  目标: {str(task['objective'])[:80]}")
+        refs = task["evidence_refs"]
+        if refs:
+            ref_text = str(refs)
+        elif task.get("flag_judged"):
+            # flag 判定（verdict 文案见 FLAG_VERDICT_PREFIX）本就不要求结论引用
+            # 证据，空引用是正常形态——不注明会被读成"这次任务没有证据"（R-42）
+            ref_text = "（无——flag 判定不要求引用）"
+        else:
+            ref_text = "（无）"
         lines.append(f"  时间: {task['started_at']} → "
                      f"{task['finished_at'] or '进行中'}"
-                     f" · 证据引用 {task['evidence_refs'] or '（无）'}")
+                     f" · 证据引用 {ref_text}")
         for action in task["actions"]:
             mark = "拦" if action["blocked"] else \
                 ("OK" if action["ok"] else "FAIL")

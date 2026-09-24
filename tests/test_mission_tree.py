@@ -116,6 +116,25 @@ def test_unlinked_records_are_listed_not_dropped(tmp_path):
     assert "未归属记录 1 条" in text
 
 
+NO_REF_DECISIONS = [
+    {"thought": "结论直接给出 flag", "done": True,
+     "summary": "解出：flag{tree_no_ref}"},
+]
+
+
+def test_flag_verdict_empty_refs_is_annotated(tmp_path):
+    """flag 判定不要求结论引用证据：空引用要注明，别读成"没有证据"（R-42）。"""
+    _result, _agent, data = _run_agent(tmp_path, NO_REF_DECISIONS)
+
+    task = mission_tree(str(data))["tasks"][0]
+    assert task["outcome"] == "success"
+    assert task["flag_judged"] is True      # 由 flag 判定收口
+    assert task["evidence_refs"] == []      # 无引用是正常形态，不是缺证据
+
+    text = render_tree(mission_tree(str(data)))
+    assert "证据引用 （无——flag 判定不要求引用）" in text
+
+
 def test_cli_tree_renders_and_emits_json(tmp_path, capsys):
     result, _agent, data = _run_agent(tmp_path, DECISIONS)
 
