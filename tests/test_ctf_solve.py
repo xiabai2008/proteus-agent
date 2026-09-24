@@ -120,6 +120,78 @@ def test_control_mode_denies_rsa_tool():
     assert not result.ok and "未知工具" in result.error
 
 
+# ----------------------------------------------------------------------
+# P1-2（2026-09-24）：pwn 题第一步——ELF 保护检查进 CTF 工具面
+# ----------------------------------------------------------------------
+def test_checksec_declares_container_requirement():
+    """`checksec_bin` 声明 docker 档：容器不可用时被拒，不回落宿主直跑。"""
+    from penagent.sandbox import SandboxPolicy, tool_needs_isolation
+    from penagent.tools import ToolRegistry
+
+    sys.path.insert(0, str(PROJECT_ROOT / "tests"))
+    from test_sandbox import StubRunner  # noqa: E402
+
+    center = build_center()
+    entries = {e.name: e for e in center.discover(mode_id="ctf-crypto")}
+    spec = entries["checksec_bin"].spec
+    assert spec.sandbox == "docker"
+    assert spec.network is False
+    assert tool_needs_isolation(spec) is True
+    # 命令形态：pwn checksec <file>（单参数按位置传，没有 shell 拼接）
+    assert ToolRegistry._cli_args(spec, {"file": "/samples/chall"}) == \
+        ["/samples/chall"]
+
+    registry = ToolRegistry(sandbox=SandboxPolicy(
+        "docker", runner=StubRunner(available=False)))
+    registry.register(spec)
+    refused = registry.execute("checksec_bin", {"file": "/samples/chall"})
+    assert not refused.ok and "容器" in refused.error
+
+
+def test_checksec_is_visible_in_ctf_and_hidden_in_pentest():
+    """工具面按模式裁剪：CTF 会话看得见，渗透会话看不见。"""
+    center = build_center()
+    ctf = {e.name for e in center.discover(mode_id="ctf-web")}
+    pentest = {e.name for e in center.discover(mode_id="pentest-standard")}
+    assert "checksec_bin" in ctf
+    assert "checksec_bin" not in pentest
+
+
+def test_checksec_runs_in_sandbox_image():
+    """真跑一次（Docker + 专用镜像就绪时；否则 skip，与容器类用例同口径）。
+
+    判据是 checksec 的标准输出字段（RELRO 是最稳的一条）。
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from penagent.sandbox import DockerRunner
+    from penagent.tools import ToolRegistry
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_sandbox import _sandbox_image_or_skip
+
+    runner = _sandbox_image_or_skip()
+    repo = Path(__file__).resolve().parent.parent
+    samples = repo / "data" / "ctf-demo"
+    samples.mkdir(parents=True, exist_ok=True)
+    target = samples / "checksec-demo"
+    if not target.is_file():
+        target.write_bytes(b"\x7fELF" + b"\x00" * 124)   # 最小 ELF 头
+
+    spec = ToolSpec(name="checksec_bin", kind="cli", sandbox="docker",
+                    parameters={"file": {"type": "string"}},
+                    command=("pwn", "checksec", "{args}"), positional=True,
+                    timeout=120)
+    registry = ToolRegistry(sandbox=SandboxPolicy("docker", runner=runner))
+    registry.register(spec)
+    result = registry.execute("checksec_bin",
+                              {"file": "/samples/checksec-demo"})
+    assert result.ok, result.error
+    assert "RELRO" in str(result.output)
+
+
 def test_rsactf_attack_review_locks_host_direct_tier():
     """F-E2E-3 定档契约：rsactf_attack 保持宿主直跑，人工把关由权限档位承担。
 

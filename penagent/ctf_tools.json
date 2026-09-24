@@ -32,6 +32,19 @@
       "sandbox": "docker",
       "timeout": 60,
       "modes": ["ctf-web", "ctf-crypto"]
+    },
+    "checksec_bin": {
+      "description": "ELF 保护检查（pwntools 的 `pwn checksec`）：RELRO / Canary / NX / PIE / RPATH。文件路径用容器内视角（data 目录只读挂载在 /samples）。pwn 题第一步就该跑它",
+      "command": ["pwn", "checksec", "{args}"],
+      "parameters": {
+        "file": {"type": "string", "description": "容器内路径，如 /samples/chall"}
+      },
+      "positional": true,
+      "dangerous": false,
+      "sandbox": "docker",
+      "network": false,
+      "timeout": 120,
+      "modes": ["ctf-web", "ctf-crypto"]
     }
   }
 }

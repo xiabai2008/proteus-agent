@@ -296,6 +296,27 @@ def test_normalize_discover_forms():
     assert normalize_discover(" a , ,b ") == ["a", "b"]
 
 
+def test_duplicate_tool_names_are_reported_not_silent():
+    """P1-3 去重器：同名工具被覆盖要留 note（RayScan 适配器 vs MCP 声明）。"""
+    center = ToolCenter()
+    center.register_spec(ToolSpec(name="rayscan_scan"), source=SOURCE_FUNCTION,
+                         origin="rayscan")
+    assert not any("冲突" in n for n in center.summary()["notes"])
+
+    center.register_spec(ToolSpec(name="rayscan_scan"), source=SOURCE_MCP,
+                         origin="rayscan-http", remote="scan")
+    notes = "\n".join(center.summary()["notes"])
+    assert "工具名冲突" in notes and "rayscan-http" in notes
+    # 后登记者生效（与 discover 覆盖适配器的既有语义一致）
+    entries = {e.name: e for e in center.discover()}
+    assert entries["rayscan_scan"].origin == "rayscan-http"
+
+    # 同 origin 的重复登记（配置重载等）不报噪音
+    center.register_spec(ToolSpec(name="rayscan_scan"), source=SOURCE_MCP,
+                         origin="rayscan-http")
+    assert sum("工具名冲突" in n for n in center.summary()["notes"]) == 1
+
+
 # ----------------------------------------------------------------------
 # 4. 验收点：新增工具不需要改内核代码
 # ----------------------------------------------------------------------

@@ -108,8 +108,22 @@ class ToolCenter:
     def register_spec(self, spec: ToolSpec, *, source: str, origin: str,
                       modes: Iterable[str] = (), kernel: bool = True,
                       remote: str = "") -> ToolEntry:
+        """登记一个工具；**同名冲突不静默**（P1-3 去重器，2026-09-24）。
+
+        同名覆盖是真实存在的：RayScan 既有本地适配器（`rayscan_scan`，走
+        宿主库）又有 MCP 声明（同名，走 HTTP 服务），后者在 discover 时覆盖
+        前者——"同一个名字在两处实现"，而旧实现只是 `dict[name] = entry`，
+        界面上完全看不出哪一份在生效。现在：覆盖照旧（后登记的优先级更高），
+        但把冲突记进 notes，`summary()` 与启动日志都能看到。
+        """
         if source not in SOURCES:
             raise ValueError(f"未知工具来源 {source!r}（可用 {SOURCES}）")
+        previous = self._entries.get(spec.name)
+        if previous is not None and previous.origin != origin:
+            self._notes.append(
+                f"工具名冲突：{spec.name} 由 {origin} 覆盖了 "
+                f"{previous.origin}（{previous.source}）——同名工具以"
+                f"后登记者为准，请确认这是预期")
         entry = ToolEntry(name=spec.name, source=source, origin=origin,
                           spec=spec, modes=tuple(modes), kernel=kernel,
                           remote=remote)

@@ -42,7 +42,7 @@
 
 # The preset's own persona, shadowing the deployment default for this agent.
 # `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
-# ── Proteus 专属行 1/4：人格 ───────────────────────────────────────────────
+# ── Proteus 专属行 1/5：人格 ───────────────────────────────────────────────
 # 人格由随 preset 的本地插件注册：挂载时读取 Proteus 仓库的 prompts/ 下人格
 # 文件，注册成 deployment:persona-prefix/suffix 分区，遮蔽部署默认人格。
 # 提示词以仓库文件为唯一来源，不在此复制。路径经 !!js 读环境变量
@@ -299,7 +299,7 @@
   name: '@deepseek-ai/dsh-plugin-manager/tools'
   disabled: true
 
-# ── Proteus 专属行 2/4：目标动作裁决（preset 作用域） ──────────────────────
+# ── Proteus 专属行 2/5：目标动作裁决（preset 作用域） ──────────────────────
 #
 # 为什么这一行必须在 preset 里而不是 host 平面 bundle 里：`tools/pre-execute`
 # 的派发是**作用域过滤**的——host 平面（bundle/root）的监听收不到 preset
@@ -334,7 +334,21 @@
     # 其余沿用 mode（ask）；越界目标不受这张表影响，一律至少 ask
     modePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-mode-{{SESSION_KEY}}.json'
 
-# ── Proteus 专属行 3/4：人机命令（F2/F3，2026-09-23） ──────────────────────
+# ── Proteus 专属行 3/5：监督层（P2-1） ─────────────────────────────────────
+#
+# 循环检测与救场：同一工具+同参数重复到阈值即 deny（理由带"换思路"提示），
+# 再触发升级为 ask。宿主侧插件（D3 决策）——只数与拦，不改工具结果。
+- id: proteus-supervisor
+  name: './proteus-supervisor.mjs'
+  config:
+    # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
+    # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
+    sameToolLimit: 5
+    totalLimit: 30
+    escalate: ask
+    spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+
+# ── Proteus 专属行 4/5：人机命令（F2/F3，2026-09-23） ──────────────────────
 #
 # /proteus-mode：查看/设置内核会话默认模式（写 data/session-mode-<key>.json，
 #   内核逐次读取——无需重启内核进程）。
@@ -347,7 +361,7 @@
     # 会话状态文件按 preset 分（P0-6）：三个 preset 共用 data/ 时不能互串
     sessionKey: '{{SESSION_KEY}}'
 
-# ── Proteus 专属行 4/4：内核 MCP 客户端 ────────────────────────────────────
+# ── Proteus 专属行 5/5：内核 MCP 客户端 ────────────────────────────────────
 #
 # 一个 mcp-client 实例 = 一个外部 MCP server。工具在会话里以
 # `mcp__<serverName>__<rawName>` 出现，因此 serverName 取 `proteus`，

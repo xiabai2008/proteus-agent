@@ -50,7 +50,7 @@ SRC_ROOT = REPO / "dsh" / ".agent-presets"
 SHARED = SRC_ROOT / "_shared"
 TEMPLATE = SHARED / "agent.cordis.template.yml"
 SHARED_FILES = ("proteus-persona.mjs", "proteus-tools-policy.mjs",
-                "proteus-commands.mjs")
+                "proteus-commands.mjs", "proteus-supervisor.mjs")
 PATCH = REPO / "dsh" / "proteus.cordis.patch.yml"
 BRIDGE_NAME = "dsh-proteus-bridge"
 BRIDGE_SRC = REPO / "dsh" / "proteus-bridge"
