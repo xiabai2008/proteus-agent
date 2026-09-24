@@ -92,14 +92,14 @@
 
 ### 2.2 一次任务的完整生命周期（ReAct 主循环）
 
-以 `PenAgent.run(target, objective)`（[agent.py](../penagent/agent.py#L465-L649)）为主线：
+以 `PenAgent.run(target, objective)`（[agent.py](../penagent/agent.py#L524-L708)）为主线：
 
 1. **建任务**：`memory.new_mission(target, objective)` 生成 mission_id，写 `data/missions/<ns>/<id>.json`；重复失败计数（R-39）在此按任务重置。
-2. **检索技能**：`memory.find_skills(fingerprint)` → `_filter_mode_skills`（按 `mode.skills` 技能包过滤，[agent.py](../penagent/agent.py#L277-L292)）→ `_rank_skills`（默认按成功率降序；`stealth=True` 按 exposure 升序；RL 策略命中则置顶）。
+2. **检索技能**：`memory.find_skills(fingerprint)` → `_filter_mode_skills`（按 `mode.skills` 技能包过滤，[agent.py](../penagent/agent.py#L288-L303)）→ `_rank_skills`（默认按成功率降序；`stealth=True` 按 exposure 升序；RL 策略命中则置顶）。
 3. **装配 system prompt**：`mode.read_system_prompt()` 读 `prompts/*.md`，替换 `{tools}`（已按模式裁剪的 `registry.schemas()`）与 `{skills}`。
 4. **逐步骤循环**（上限 `mode.budget.max_steps`，无模式时 12）：
    - 时长预算检查：`max_minutes` 超限即跳出循环进入强制收口（换策略而非硬退出）。
-   - `chat_json(...)` 取决策（模型按 `budget.model_tier` 的 recon 档路由）。
+   - `_decide(...)` 取决策（模型按 `budget.model_tier` 的 recon 档路由）：输出不可解析（`LLMOutputError`）时回灌"只输出一个 JSON 对象"提示并重试 `LLM_PARSE_RETRY_LIMIT` 次——**解析失败不记步数**，每次失败留证（`phase=llm_parse_retry`，含原始输出片段），连续到上限才收口；调用失败（网络/HTTP/超时）不在此重试（R-40）。
    - 决策为 `done` → 交 `verifier.verify(decision, evidence, context=本任务期间工具输出)`：
      - 反幻觉不过 → 直接失败（不可重试）；判定未过但可重试 → 回灌原因继续循环。
      - 通过 → 记 `conclusion` 证据、`memory.finish(...)`、回写技能成功率、返回 `MissionResult`。
@@ -239,20 +239,23 @@ proteus-agent/
 |---|---|---|
 | `SYSTEM_PROMPT` | [L21](../penagent/agent.py#L21) | 无模式时的默认提示词模板（含 `{tools}` / `{skills}` 占位符） |
 | `REPEAT_FAILURE_LIMIT` | [L46](../penagent/agent.py#L46) | 内核侧重复失败检测阈值（缺省 3）：同工具 + 同参数连续失败到此数即拦（R-39；刻意不做成 ModeProfile 字段） |
-| `MissionResult` | [L50](../penagent/agent.py#L50) | `mission_id / target / objective / outcome(success\|failed\|blocked) / steps / summary / evidence_refs / injected_skills / reflection` + `to_dict()` |
-| `Policy` | [L65](../penagent/agent.py#L65) | 模式能力/权限裁决 + 授权目标 + 高危确认；规则写死，不参与决策 |
-| `Policy.normalize_targets(value)` | [L87](../penagent/agent.py#L87) | 静态方法：`"a,b"` 或可迭代 → 列表；**必须做**（字符串本身是 iterable，`list("127.0.0.1")` 会炸成单字符列表把白名单打成筛子）；空值回落 `["127.0.0.1","localhost"]` |
-| `Policy._narrow_by_mode(runtime_targets, mode)` | [L108](../penagent/agent.py#L108) | 模式白名单**只可收紧**：与运行期显式授权取交集 |
-| `Policy.bind_mode(mode)` | [L121](../penagent/agent.py#L121) | 返回挂载模式裁决的副本（不改原实例） |
-| `Policy.level_for(tool, spec=None)` | [L126](../penagent/agent.py#L126) | `ok / ask / deny` 档位 |
-| `Policy.apply_constraints(tool, args)` | [L137](../penagent/agent.py#L137) | 把模式冻结参数写进 `FROZEN_ARGS_KEY`（执行前机制性生效） |
-| `Policy.check(tool, spec, args) -> (bool, str)` | [L153](../penagent/agent.py#L153) | 裁决顺序：capability 禁用 → permission `deny` → `ask` 未授权 → 出网开关 → 高危未授权 → `host/url/domain/target/base_url` 白名单；拒绝理由带**授权指引**（`/proteus-scope add ...`，「模型不能自我授权」） |
-| `Policy._in_scope(value)` | [L190](../penagent/agent.py#L190) | URL / `host:port` / 路径三种形态归一后按 `host == t or host.endswith("." + t)` 匹配 |
-| `PenAgent.__init__(...)` | [L206](../penagent/agent.py#L206) | 见下方装配清单 |
-| `PenAgent._fingerprint(tool, args)` | [L355](../penagent/agent.py#L355) | 静态方法：调用指纹 = 工具名 + `json.dumps(sort_keys=True)` 规范化参数（键序无关，与宿主侧 supervisor 同构） |
-| `PenAgent._loop_reason(tool, args)` | [L368](../penagent/agent.py#L368) | 连续失败达阈值即返回纠正指令文案（含上次失败原因 + 换思路），否则空串；命中即拒绝执行（R-39） |
-| `PenAgent._record_tool_outcome(tool, args, result)` | [L390](../penagent/agent.py#L390) | 失败累加、成功清零（**只清本指纹**，避免"交替失败"躲过判据） |
-| `PenAgent.run(target, objective, fingerprint="", stealth=False)` | [L465](../penagent/agent.py#L465) | 主循环（第 2.2 节） |
+| `LLM_PARSE_RETRY_LIMIT` | [L57](../penagent/agent.py#L57) | LLM 输出不可解析时的重试上限（缺省 3，共 4 次尝试）：回灌"只输出一个 JSON 对象"提示并重试，**不记步数**（R-40；同样刻意不做成 ModeProfile 字段） |
+| `MissionResult` | [L61](../penagent/agent.py#L61) | `mission_id / target / objective / outcome(success\|failed\|blocked) / steps / summary / evidence_refs / injected_skills / reflection` + `to_dict()` |
+| `Policy` | [L76](../penagent/agent.py#L76) | 模式能力/权限裁决 + 授权目标 + 高危确认；规则写死，不参与决策 |
+| `Policy.normalize_targets(value)` | [L98](../penagent/agent.py#L98) | 静态方法：`"a,b"` 或可迭代 → 列表；**必须做**（字符串本身是 iterable，`list("127.0.0.1")` 会炸成单字符列表把白名单打成筛子）；空值回落 `["127.0.0.1","localhost"]` |
+| `Policy._narrow_by_mode(runtime_targets, mode)` | [L119](../penagent/agent.py#L119) | 模式白名单**只可收紧**：与运行期显式授权取交集 |
+| `Policy.bind_mode(mode)` | [L132](../penagent/agent.py#L132) | 返回挂载模式裁决的副本（不改原实例） |
+| `Policy.level_for(tool, spec=None)` | [L137](../penagent/agent.py#L137) | `ok / ask / deny` 档位 |
+| `Policy.apply_constraints(tool, args)` | [L148](../penagent/agent.py#L148) | 把模式冻结参数写进 `FROZEN_ARGS_KEY`（执行前机制性生效） |
+| `Policy.check(tool, spec, args) -> (bool, str)` | [L164](../penagent/agent.py#L164) | 裁决顺序：capability 禁用 → permission `deny` → `ask` 未授权 → 出网开关 → 高危未授权 → `host/url/domain/target/base_url` 白名单；拒绝理由带**授权指引**（`/proteus-scope add ...`，「模型不能自我授权」） |
+| `Policy._in_scope(value)` | [L201](../penagent/agent.py#L201) | URL / `host:port` / 路径三种形态归一后按 `host == t or host.endswith("." + t)` 匹配 |
+| `PenAgent.__init__(...)` | [L217](../penagent/agent.py#L217) | 见下方装配清单 |
+| `PenAgent._fingerprint(tool, args)` | [L366](../penagent/agent.py#L366) | 静态方法：调用指纹 = 工具名 + `json.dumps(sort_keys=True)` 规范化参数（键序无关，与宿主侧 supervisor 同构） |
+| `PenAgent._loop_reason(tool, args)` | [L379](../penagent/agent.py#L379) | 连续失败达阈值即返回纠正指令文案（含上次失败原因 + 换思路），否则空串；命中即拒绝执行（R-39） |
+| `PenAgent._record_tool_outcome(tool, args, result)` | [L401](../penagent/agent.py#L401) | 失败累加、成功清零（**只清本指纹**，避免"交替失败"躲过判据） |
+| `PenAgent._parse_correction(exc)` | [L419](../penagent/agent.py#L419) | 静态方法：把 `LLMOutputError` 转成回灌给模型的纠正提示（点名禁 XML/工具调用标签 + 附上次输出片段） |
+| `PenAgent._decide(messages, mission_id, step, model=None)` | [L435](../penagent/agent.py#L435) | 取一步决策；`LLMOutputError` → 留证（`phase=llm_parse_retry`）+ 回灌提示 + 重试到 `LLM_PARSE_RETRY_LIMIT`；`LLMError`（调用失败）直接上抛（R-40） |
+| `PenAgent.run(target, objective, fingerprint="", stealth=False)` | [L524](../penagent/agent.py#L524) | 主循环（第 2.2 节） |
 
 **`PenAgent.__init__` 的装配语义（每条都是硬约束的落点）**：
 
@@ -337,7 +340,7 @@ RL 链路实测（2026-09-18，见 `docs/RL链路实测记录.md`）：`eval_evo
 | 模块 | 关键符号 | 说明 |
 |---|---|---|
 | [scope.py](../penagent/scope.py) | `SESSION_SCOPE_FILE`、`scope_path(data_dir, key="")`、`read_scope` / `write_scope` / `add_targets` / `remove_targets` / `clear_scope`（[L71-L116](../penagent/scope.py#L71-L116)） | 会话授权清单（`data/session-scope[-<key>].json`）。**内核从不写这个文件**：写入口只有 CLI 与 DSH 命令插件；读失败一律回落空清单（不阻塞、不静默放行）。与 `--targets` 取并集 |
-| [llm.py](../penagent/llm.py) | `LLMConfig`（[L52](../penagent/llm.py#L52)）、`LLMError`、`chat(...)`（[L98](../penagent/llm.py#L98)）、`_extract_json_block(text)`（[L167](../penagent/llm.py#L167)）、`chat_json(...)`（[L204](../penagent/llm.py#L204)）、`_allow_endpoint(base_url)`（[L29](../penagent/llm.py#L29)） | OpenAI 兼容 `/chat/completions`；503/429 退避重试；读超时单独兜住（不复用连接分支）；端点仅 http(s) 且拒绝链路本地/组播/保留段；`tier_models` 承载 cheap/strong 档位模型；`session_id` 作为 `x-opencode-session` 头 |
+| [llm.py](../penagent/llm.py) | `LLMConfig`（[L52](../penagent/llm.py#L52)）、`LLMError`（[L94](../penagent/llm.py#L94)）、`LLMOutputError`（[L98](../penagent/llm.py#L98)，输出不可解析，带 `raw`，R-40）、`chat(...)`（[L115](../penagent/llm.py#L115)）、`_extract_json_block(text)`（[L184](../penagent/llm.py#L184)）、`chat_json(...)`（[L221](../penagent/llm.py#L221)）、`_allow_endpoint(base_url)`（[L29](../penagent/llm.py#L29)） | OpenAI 兼容 `/chat/completions`；503/429 退避重试；读超时单独兜住（不复用连接分支）；端点仅 http(s) 且拒绝链路本地/组播/保留段；`tier_models` 承载 cheap/strong 档位模型；`session_id` 作为 `x-opencode-session` 头 |
 | [envcfg.py](../penagent/envcfg.py) | `read_env_file` / `load_env_file` / `expand(value)` / `expand_deep(obj)` / `local_needles()` / `local_path_pattern(value)` / `scrub_local_paths(text)` / `find_local_paths(text)` / `resolve_g07()` / `ensure_g07_on_path()`（[L23-L172](../penagent/envcfg.py#L23-L172)） | `.env` 装载与 `${VAR}` 展开（未定义变量原样保留）；路径脱敏原语（`tools/scrub_paths.py` 与 `tests/test_path_hygiene.py` 共用同一份解析）；07 靶场路径解析并注入 `sys.path` + `PYTHONPATH` |
 | [report.py](../penagent/report.py) | `evidence_report(data_dir, mission_id="")`（[L308](../penagent/report.py#L308)）、`mission_tree(data_dir, mission_id="")`（[L69](../penagent/report.py#L69)）、`render_tree(tree)`（[L194](../penagent/report.py#L194)）、`sarif_report(data_dir, mission_id="")`（[L236](../penagent/report.py#L236)）、`SARIF_LEVELS`、`_all_missions(data_dir)` | 人读汇总（CLI `evidence` 与 MCP `pentest_evidence` 共用一份实现）；扁平链 → Task→Action→Artifact 层级视图（无归属记录进 `unlinked`，不静默丢）；SARIF 2.1.0（一条证据 = 一条 result，`ruleId = proteus/<kind>`，**不是漏洞报告**） |
 | [dsh_bridge.py](../penagent/dsh_bridge.py) | `DEFAULT_SPOOL` / `DEFAULT_STATE`、`import_spool(spool, chain=None, chain_path="data/chain.jsonl", state_path=DEFAULT_STATE, replay=False, flush_open=False)`（[L92](../penagent/dsh_bridge.py#L92)）、`_pair_result(pending, event, call_id)`（[L66](../penagent/dsh_bridge.py#L66)）、`_read_new_lines(spool, offset)`（[L46](../penagent/dsh_bridge.py#L46)） | 把宿主桥 spool 并入内核链式哈希证据链：**链式哈希只在内核实现一份**；`call` 与 `result` 按 callId 三级匹配配对合并为一条 `tool_call`（形状与内核自有记录一致）；按字节偏移增量导入，未配对调用跨导入持久化，`flush_open` 收尾 |

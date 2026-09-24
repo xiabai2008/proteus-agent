@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from penagent.evidence import EvidenceChain
-from penagent.llm import LLMConfig, LLMError, chat_json
+from penagent.llm import LLMConfig, LLMError, LLMOutputError, chat_json
 from penagent.memory import Memory
 from penagent.modes import ModeProfile
 from penagent.tools import FROZEN_ARGS_KEY, ToolRegistry
@@ -44,6 +44,17 @@ SYSTEM_PROMPT = """你是 XPentest——一个 LLM 驱动的渗透测试 Agent�
 # 刻意不进 ModeProfile：这是对模型行为的纠偏，不是模式语义，各模式的判据相同；
 # 新增配置面要有真实消费场景（见 docs/修复待办清单.md R-39）。
 REPEAT_FAILURE_LIMIT = 3
+
+# LLM 输出不可解析（`LLMOutputError`）时的重试上限（R-40）：真机渗透任务
+# 第 13 步收到 `<｜｜DSML｜｜ invoke name="http_raw">` 形态的 XML 工具调用，
+# `chat_json` 抛"输出不是合法 JSON" → 13 步成果（8 分钟）当场作废。
+# 与调用失败（网络/HTTP/超时）不同，输出形态失误回灌一条"只输出 JSON"提示
+# 通常就能救回来，所以这里**重试而非收口**：每次失败都留证据（含原始输出
+# 片段）便于诊断，前 3 次不可解析都回灌纠正提示重试（共 4 次尝试），
+# 第 4 次仍拿不到 JSON 才判任务失败。
+# 与 REPEAT_FAILURE_LIMIT 同理，刻意不进 ModeProfile（模型行为纠偏，
+# 不是模式语义，各模式判据相同）。
+LLM_PARSE_RETRY_LIMIT = 3
 
 
 @dataclass
@@ -401,6 +412,54 @@ class PenAgent:
         self._repeat_failures[key] = self._repeat_failures.get(key, 0) + 1
         self._repeat_errors[key] = str(result.error or "")[:200]
 
+    # ------------------------------------------------------------------
+    # LLM 输出不可解析时的重试（R-40）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_correction(exc: LLMOutputError) -> str:
+        """回灌给模型的纠正提示：说清"你上一条输出无法解析"与正确形态。
+
+        特意点名 XML/工具调用标签：真机上的那次不可解析输出正是
+        `<｜｜DSML｜｜ invoke name="http_raw">` 这种形态，而 prompt 里从未允许过它。
+        """
+        raw = (exc.raw or "").strip()[:500]
+        return (f"你上一条输出无法解析为 JSON（{exc}）。"
+                "请严格只输出**一个 JSON 对象**：不要 markdown 代码块，"
+                "不要 XML 或工具调用标签（如 <invoke>/<tool_call>），"
+                "不要前后说明文字。两种格式二选一：\n"
+                '{"thought": "推理", "tool": "工具名", "args": {...}}\n'
+                '{"thought": "总结", "done": true, "summary": "结论", '
+                '"evidence_refs": [证据seq]}\n'
+                f"你上次的输出片段：{raw or '（空）'}")
+
+    def _decide(self, messages: list[dict], mission_id: str, step: int,
+                model: Optional[str] = None) -> dict:
+        """调 LLM 取一步决策；输出不可解析时回灌纠正提示并重试（R-40）。
+
+        重试**不消耗步数预算**：解析失败没有产生任何决策或工具调用，按步数
+        记账等于替一次格式失误扣掉一步真实预算。每次失败都留一条证据
+        （`phase=llm_parse_retry`，含原始输出片段），便于事后判断是模型形态
+        失误还是端点问题；连续 `LLM_PARSE_RETRY_LIMIT` 次不可解析才抛出。
+
+        调用失败（网络/HTTP/超时）不在此重试：那是 `LLMError` 而不是
+        `LLMOutputError`，重试同一请求没有意义，直接向上抛给调用方收口。
+        """
+        for attempt in range(1, LLM_PARSE_RETRY_LIMIT + 2):
+            try:
+                return chat_json(self.llm, messages, model=model)
+            except LLMOutputError as exc:
+                self._append_evidence("decision", mission_id, step, {
+                    "phase": "llm_parse_retry", "attempt": attempt,
+                    "error": str(exc)[:300],
+                    "raw": (exc.raw or "")[:800]})
+                if attempt > LLM_PARSE_RETRY_LIMIT:
+                    raise LLMError(
+                        f"输出连续 {attempt} 次不可解析，放弃本次任务；"
+                        f"最后一次: {str(exc).splitlines()[0]}") from exc
+                messages.append({"role": "user",
+                                 "content": self._parse_correction(exc)})
+        raise LLMError("输出不可解析且重试逻辑异常终止")   # pragma: no cover
+
     def _mission_context(self, since_seq: int) -> str:
         """本任务期间观察到的工具输出原文（供按任务输出判定的判定器使用）。
 
@@ -508,8 +567,8 @@ class PenAgent:
                     "thought": "时长预算耗尽，切换收口策略"})
                 break
             try:
-                decision = chat_json(self.llm, messages,
-                                     model=self._tier_model("recon"))
+                decision = self._decide(messages, mission_id, step,
+                                        self._tier_model("recon"))
             except LLMError as exc:
                 mission.outcome = "failed"
                 mission.summary = f"LLM 调用失败: {exc}"
@@ -616,8 +675,8 @@ class PenAgent:
             "不要再调用任何工具，基于已获得的证据直接给出最终结论；"
             "若没有有效证据，如实说明任务未完成。")})
         try:
-            decision = chat_json(self.llm, messages,
-                                 model=self._tier_model("reason"))
+            decision = self._decide(messages, mission_id, self.max_steps,
+                                    self._tier_model("reason"))
         except LLMError as exc:
             mission.outcome = "failed"
             mission.summary = f"步数预算耗尽且收口调用失败: {exc}"

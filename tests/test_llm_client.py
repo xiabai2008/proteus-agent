@@ -144,3 +144,27 @@ def test_chat_retries_on_read_timeout_then_raises_llm_error():
                  max_tokens=8, retries=1)
         # 读超时不再直接冒泡：重试了一次才放弃
         assert stub.requests == 2
+
+
+# ----------------------------------------------------------------------
+# 四、输出不可解析独立成 LLMOutputError（R-40：可重试，与调用失败区分）
+# ----------------------------------------------------------------------
+def test_chat_json_raises_output_error_for_unparsable_text(monkeypatch):
+    from penagent.llm import LLMOutputError, chat_json
+
+    monkeypatch.setattr("penagent.llm.chat",
+                        lambda *a, **kw: '<invoke name="http_raw">')
+    with pytest.raises(LLMOutputError) as excinfo:
+        chat_json(None, [])
+    # 仍是 LLMError 子类：既有 except LLMError 消费方行为不变
+    assert isinstance(excinfo.value, LLMError)
+    # 原始输出片段留在异常上，供回灌提示与证据留痕
+    assert 'invoke name="http_raw"' in excinfo.value.raw
+
+
+def test_chat_json_rejects_non_object_json(monkeypatch):
+    from penagent.llm import LLMOutputError, chat_json
+
+    monkeypatch.setattr("penagent.llm.chat", lambda *a, **kw: '[1, 2, 3]')
+    with pytest.raises(LLMOutputError, match="不是 JSON 对象"):
+        chat_json(None, [])

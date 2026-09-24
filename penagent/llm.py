@@ -95,6 +95,23 @@ class LLMError(Exception):
     pass
 
 
+class LLMOutputError(LLMError):
+    """LLM 返回了不可解析的输出（非 JSON / 非对象）——**与调用失败不同**。
+
+    调用失败（网络、HTTP 码、超时）重试同一请求没有意义；而"输出不是合法
+    JSON"是模型的输出形态失误，回灌一条纠正提示通常就能救回来（实测：真机
+    渗透任务第 13 步收到 `<｜｜DSML｜｜ invoke name="http_raw">` 形态的 XML
+    工具调用）。故独立成类，让内核能对前者 fail-fast、对后者重试（R-40）。
+
+    `raw` 保留原始输出片段，供回灌提示与证据留痕；它是 LLMError 的子类，
+    既有 `except LLMError` 消费方（如 `reflect.py`）行为不变。
+    """
+
+    def __init__(self, message: str, raw: str = "") -> None:
+        super().__init__(message)
+        self.raw = raw
+
+
 def chat(config: LLMConfig, messages: list[dict],
          temperature: Optional[float] = None,
          max_tokens: int = 4096,
@@ -205,13 +222,18 @@ def chat_json(config: LLMConfig, messages: list[dict],
               temperature: Optional[float] = None,
               max_tokens: int = 4096,
               model: Optional[str] = None) -> dict:
-    """要求模型输出 JSON 并解析（容忍包裹/前后说明/嵌套）。"""
+    """要求模型输出 JSON 并解析（容忍包裹/前后说明/嵌套）。
+
+    解析不出来抛 `LLMOutputError`（带原始输出片段）——调用方可以据此重试，
+    而不是把整轮任务的成果一笔勾销（R-40）。
+    """
     raw = chat(config, messages, temperature, max_tokens, model=model)
     text = _extract_json_block(raw.strip())
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise LLMError(f"LLM 输出不是合法 JSON: {exc}\n---\n{raw[:800]}") from exc
+        raise LLMOutputError(f"LLM 输出不是合法 JSON: {exc}\n---\n{raw[:800]}",
+                             raw=raw) from exc
     if not isinstance(data, dict):
-        raise LLMError("LLM 输出不是 JSON 对象")
+        raise LLMOutputError(f"LLM 输出不是 JSON 对象: {raw[:200]}", raw=raw)
     return data

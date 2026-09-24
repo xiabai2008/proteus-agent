@@ -285,3 +285,128 @@ def test_fingerprint_is_key_order_independent(tmp_path):
     b = PenAgent._fingerprint("flaky", {"mode": "1", "path": "/x"})
     assert a == b
     assert a != PenAgent._fingerprint("flaky", {"path": "/x"})
+
+
+# ----------------------------------------------------------------------
+# R-40：LLM 输出不可解析 -> 回灌纠正提示重试（不吃步数），连续失败才收口
+# ----------------------------------------------------------------------
+def _mock_llm_script(monkeypatch, script, seen):
+    """桩 LLM：按 script 依次出决策；元素是异常实例时抛出该异常。"""
+    def fake_chat_json(config, messages, **kw):
+        seen.append(messages[-1]["content"])
+        item = script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr("penagent.agent.chat_json", fake_chat_json)
+
+
+def test_llm_parse_failure_is_retried_instead_of_failing(monkeypatch,
+                                                         tmp_path):
+    """一次不可解析输出不再废掉整轮：回灌纠正提示后继续。"""
+    from penagent.llm import LLMOutputError
+
+    agent, calls = _loop_agent(tmp_path, plan=[True], max_steps=3)
+    seen = []
+    _mock_llm_script(monkeypatch, [
+        LLMOutputError("LLM 输出不是合法 JSON: Expecting value: line 1 col 1",
+                       raw='<｜｜DSML｜｜ invoke name="flaky">'),
+        {"thought": "重来", "tool": "flaky", "args": {"path": "/tmp/x"}},
+        {"thought": "收口", "done": True, "summary": "ok", "evidence_refs": []},
+    ], seen)
+    result = agent.run("http://127.0.0.1", "解析失败")
+
+    assert result.outcome == "success"
+    assert len(calls) == 1
+    # 纠正提示回灌到了下一次请求（点名禁 XML 标签 + 带上次输出片段）
+    assert "只输出**一个 JSON 对象**" in seen[1]
+    assert "<invoke>" in seen[1]
+    assert 'invoke name="flaky"' in seen[1]
+    # 每次失败都留证，含原始输出片段（事后能诊断是形态失误还是端点问题）
+    retries = [r for r in agent.evidence.load()
+               if r.content.get("phase") == "llm_parse_retry"]
+    assert len(retries) == 1
+    assert retries[0].content["attempt"] == 1
+    assert 'invoke name="flaky"' in retries[0].content["raw"]
+    assert agent.evidence.verify()["ok"]
+
+
+def test_llm_parse_failure_gives_up_after_limit(monkeypatch, tmp_path):
+    """连续不可解析到上限才收口，且收口理由写清是解析问题。"""
+    from penagent.agent import LLM_PARSE_RETRY_LIMIT
+    from penagent.llm import LLMOutputError
+
+    agent, calls = _loop_agent(tmp_path, plan=[True], max_steps=3)
+    tries = []
+
+    def fake_chat_json(config, messages, **kw):
+        tries.append(1)
+        raise LLMOutputError("LLM 输出不是合法 JSON: Expecting value",
+                             raw="彻底不是 JSON")
+
+    monkeypatch.setattr("penagent.agent.chat_json", fake_chat_json)
+    result = agent.run("http://127.0.0.1", "一直不合法")
+
+    assert result.outcome == "failed"
+    assert len(tries) == LLM_PARSE_RETRY_LIMIT + 1      # 重试 3 次后放弃
+    assert f"输出连续 {LLM_PARSE_RETRY_LIMIT + 1} 次不可解析" in result.summary
+    assert len(calls) == 0                              # 从未执行工具
+    retries = [r for r in agent.evidence.load()
+               if r.content.get("phase") == "llm_parse_retry"]
+    assert len(retries) == LLM_PARSE_RETRY_LIMIT + 1
+    assert agent.evidence.verify()["ok"]
+
+
+def test_llm_transport_error_still_fails_fast(monkeypatch, tmp_path):
+    """调用失败（网络/HTTP/超时）不重试：重试同一请求没有意义。"""
+    from penagent.llm import LLMError
+
+    agent, calls = _loop_agent(tmp_path, plan=[True], max_steps=3)
+    tries = []
+
+    def fake_chat_json(config, messages, **kw):
+        tries.append(1)
+        raise LLMError("LLM API 不可达: Connection refused")
+
+    monkeypatch.setattr("penagent.agent.chat_json", fake_chat_json)
+    result = agent.run("http://127.0.0.1", "端点挂了")
+
+    assert result.outcome == "failed"
+    assert len(tries) == 1                              # 一次即收口
+    assert "LLM 调用失败" in result.summary
+    assert len(calls) == 0
+
+
+def test_llm_parse_retry_does_not_consume_step_budget(monkeypatch, tmp_path):
+    """解析失败不记步数：max_steps=1 时唯一那一步仍能真正执行工具。"""
+    from penagent.llm import LLMOutputError
+
+    agent, calls = _loop_agent(tmp_path, plan=[True], max_steps=1)
+    _mock_llm_script(monkeypatch, [
+        LLMOutputError("LLM 输出不是合法 JSON", raw="乱码"),
+        {"thought": "用掉唯一一步", "tool": "flaky",
+         "args": {"path": "/tmp/x"}},
+        {"thought": "收口", "done": True, "summary": "ok", "evidence_refs": []},
+    ], [])
+    result = agent.run("http://127.0.0.1", "步数预算")
+
+    assert len(calls) == 1                  # 未被重试吞掉
+    assert result.outcome == "success"
+
+
+def test_llm_parse_retry_covers_forced_conclusion(monkeypatch, tmp_path):
+    """预算耗尽后的强制收口同样可重试：最后一次决策的形态失误不废整轮。"""
+    from penagent.llm import LLMOutputError
+
+    agent, calls = _loop_agent(tmp_path, plan=[True], max_steps=1)
+    _mock_llm_script(monkeypatch, [
+        {"thought": "先用一步", "tool": "flaky", "args": {"path": "/tmp/x"}},
+        LLMOutputError("LLM 输出不是合法 JSON",
+                       raw='<invoke name="flaky">'),
+        {"thought": "收口", "done": True, "summary": "ok", "evidence_refs": []},
+    ], [])
+    result = agent.run("http://127.0.0.1", "收口重试")
+
+    assert len(calls) == 1
+    assert result.outcome == "success"
