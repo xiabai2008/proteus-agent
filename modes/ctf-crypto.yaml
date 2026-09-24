@@ -7,8 +7,10 @@ capability:
   # 只写真名或前缀通配（2026-09-24 P0-2 统一口径，见 ctf-web.yaml 注释）
   allow: [rsactf_attack, python_solve, codec_decode, codec_chain, file_type,
           http_raw, dns_lookup,
+          pentest_set_mode, pentest_evidence, pentest_missions, pentest_skills,
           binwalk_*, capa_*, yara_*, seckb_*]
-  deny: [nuclei, fscan, sqlmap]
+  deny: [nuclei_scan, fscan_scan, sqlmap_auto, ffuf_fuzz, gobuster_dir,
+         dalfox_xss, naabu_scan, pocsuite_poc]
 permission:
   default: ask
   auto_approve: [codec_decode, codec_chain, file_type, seckb_*]

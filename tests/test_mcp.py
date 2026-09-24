@@ -63,6 +63,85 @@ def test_tool_call_unknown_tool(server):
     assert "未知工具" in payload["error"]
 
 
+# ----------------------------------------------------------------------
+# 工具面按模式裁剪（P0-3，2026-09-24）
+#
+# 此前 `tools/list` 用的是启动时的全量注册表（不带模式）：
+# ① CTF 工具因 `entry.modes` 在 mode_id=None 下不可用而**从不出现**；
+# ② 模式裁决对底层工具调用**没有生效**。
+# ----------------------------------------------------------------------
+def _tools(server) -> dict:
+    r = _call(server, "tools/list")
+    return {t["name"]: t for t in r["result"]["tools"]}
+
+
+def test_tools_list_includes_ctf_tools_in_ctf_mode(tmp_path):
+    """ctf-web 会话必须看得见 CTF 工具——此前它们根本不在列表里。"""
+    server = PentestMCPServer(data_dir=str(tmp_path / "d"),
+                              default_mode="ctf-web")
+    names = set(_tools(server))
+    assert {"codec_decode", "codec_chain", "file_type", "python_solve",
+            "rsactf_attack", "http_raw"} <= names
+    assert "nuclei_scan" not in names          # 被 capability 拦下，不进列表
+    # 元能力必须常驻：否则 CTF 会话连"切模式"都做不到
+    assert {"pentest_set_mode", "pentest_evidence", "pentest_missions",
+            "pentest_skills"} <= names
+
+
+def test_tools_list_is_filtered_by_mode(tmp_path):
+    """pentest-standard 会话看不到 CTF 工具（工具面随模式切换）。"""
+    server = PentestMCPServer(data_dir=str(tmp_path / "d"),
+                              default_mode="pentest-standard")
+    names = set(_tools(server))
+    assert "codec_decode" not in names and "rsactf_attack" not in names
+    assert {"http_raw", "nuclei_scan", "pentest_run"} <= names
+
+
+def test_initialize_declares_tools_list_changed(tmp_path):
+    """客户端要据此知道"模式切换会改工具面"。"""
+    server = PentestMCPServer(data_dir=str(tmp_path / "d"))
+    r = _call(server, "initialize")
+    assert r["result"]["capabilities"]["tools"]["listChanged"] is True
+
+
+def test_bottom_level_call_respects_mode_capability(tmp_path):
+    """被当前模式禁用的底层工具，调也调不到（与可见性同一判据）。"""
+    server = PentestMCPServer(data_dir=str(tmp_path / "d"),
+                              default_mode="ctf-web")
+    r = _call(server, "tools/call",
+              {"name": "nuclei_scan",
+               "arguments": {"target": "http://127.0.0.1/"}}, msg_id=5)
+    assert r["result"]["isError"] is True
+    # 已被模式裁掉：连"禁用"都到不了，直接是未知工具（更硬的不可达）
+    assert "未知工具" in _payload(r)["error"]
+
+
+def test_mode_change_emits_tools_list_changed(tmp_path, capsys):
+    """模式变了要发通知，客户端才知道重取工具面。
+
+    两条触发路径都要覆盖：① `pentest_set_mode` 工具；② `/proteus-mode`
+    命令直接写会话文件（内核看不见那一刻，靠下次请求前比对补发）。
+    """
+    server = PentestMCPServer(data_dir=str(tmp_path / "d"),
+                              default_mode="pentest-standard")
+    _call(server, "tools/list")                       # 首次：只记不发
+    assert "tools/list_changed" not in capsys.readouterr().out
+
+    _call(server, "tools/call", {"name": "pentest_set_mode",
+                                 "arguments": {"mode": "ctf-crypto"}}, msg_id=6)
+    capsys.readouterr()
+    _call(server, "tools/list", msg_id=7)
+    assert "notifications/tools/list_changed" in capsys.readouterr().out
+
+    # 命令路径：绕过内核直接写会话文件，下次请求前也应补发
+    (tmp_path / "d" / "session-mode.json").write_text(
+        json.dumps({"mode": "ctf-web"}), encoding="utf-8")
+    capsys.readouterr()
+    _call(server, "tools/list", msg_id=8)
+    assert "notifications/tools/list_changed" in capsys.readouterr().out
+    assert "codec_decode" in set(_tools(server))
+
+
 def test_pentest_skills_empty(server):
     r = _call(server, "tools/call",
               {"name": "pentest_skills", "arguments": {}}, msg_id=4)

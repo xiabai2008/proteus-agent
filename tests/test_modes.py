@@ -89,7 +89,10 @@ def test_inherits_deep_merge():
     # 覆盖：列表整体替换（不拼接），标量覆盖
     assert ctf.budget.max_steps == 60                     # base 40 -> 60
     assert ctf.scope.network_egress is True               # base False -> True
-    assert set(ctf.capability.deny) == {"nuclei", "fscan", "sqlmap"}
+    assert set(ctf.capability.deny) == {"nuclei_scan", "fscan_scan",
+                                        "sqlmap_auto", "ffuf_fuzz",
+                                        "gobuster_dir", "dalfox_xss",
+                                        "naabu_scan", "pocsuite_poc"}
     assert ctf.skills == ("ctf-web",)
     assert ctf.inherits == "base"
 

@@ -114,6 +114,10 @@ class PentestMCPServer:
 
             self._default_profile = load_mode(default_mode)
             self.default_mode = default_mode
+        # 上次通知过客户端的模式（P0-3）：None = 还没记过（首次不通知）
+        self._last_mode_notified: Optional[str] = None
+        # 按模式缓存的"可执行工具面"（模式不可变，可安全复用）
+        self._mode_registries: dict[str, object] = {}
 
     # ------------------------------------------------------------------
     def _session_mode_path(self) -> Path:
@@ -180,8 +184,53 @@ class PentestMCPServer:
                         self.llm, policy, max_steps=None, mode=mode,
                         on_event=on_event)
 
+    def _mode_registry(self, mode):
+        """按模式构建"可执行工具面"：entry.modes + capability 两层过滤 + 闸门。
+
+        P0-3（2026-09-24）新增。此前底层工具分支用的是**启动时的全量注册表**
+        （`build_registry()` 不带模式），后果有两条：
+
+        1. **CTF 工具根本不在面里**——`entry.modes` 声明为 ctf-* 的工具在
+           `mode_id=None` 下 `available_in()` 为假，于是 MCP 的 `tools/list`
+           从来不吐 `codec_*` / `rsactf_attack`（CTF preset 会缺掉核心工具）；
+        2. 模式裁决（capability.allow/deny）对底层工具调用**没有生效**——
+           注册表没按模式裁剪，闸门的 Policy 也没带 mode。
+
+        现在列表与执行共用这一个判据：`tools/list` 与 `tools/call` 都走它，
+        不会出现"列表里没有却能调用"或反过来的裂缝。结果按模式缓存（模式
+        不可变），避免每次调用重建注册表。
+        """
+        if mode is None:
+            return self.registry
+        cached = self._mode_registries.get(mode.id)
+        if cached is not None:
+            return cached
+        registry = self.center.build_registry(mode, kernel_only=False)
+        policy = Policy(allowed_targets=self.allowed_targets or None,
+                        authorize=self.authorize, mode=mode)
+        registry.gate = PolicyGate(policy)
+        registry = mode.filtered_registry(registry)
+        self._mode_registries[mode.id] = registry
+        return registry
+
     # ------------------------------------------------------------------
     # MCP tools 定义
+    def _current_mode(self):
+        """当前生效的模式档案（会话文件 → 服务端默认），无则 None。
+
+        与 `_agent()` 的回落链同源（P0-3，2026-09-24）：工具面与执行裁决必须
+        看**同一个**模式，否则会出现"列表里没有、却能调用"或反过来的裂缝。
+        """
+        mode_id = self._read_session_mode() or self.default_mode
+        if not mode_id:
+            return None
+        from penagent.modes import load_mode
+
+        try:
+            return load_mode(mode_id)
+        except Exception:  # noqa: BLE001 —— 文件被外部写坏：回落无模式，不阻塞
+            return self._default_profile
+
     def _tools_schema(self) -> list[dict]:
         """按 MCP 规范导出工具清单：name / description / inputSchema。
 
@@ -189,9 +238,18 @@ class PentestMCPServer:
         结果是一个工具都注册不上（DSH 的 mcp-client 即如此）。所以这里只吐
         规范字段：内核侧的 dangerous 标记映射到 annotations.destructiveHint，
         非规范的 parameters 不再外泄。
+
+        **按当前模式裁剪**（P0-3）：被模式禁用的工具不出现在列表里，与执行期
+        裁决（capability.allow/deny）同一判据——模型看不到就不会误用，也省
+        上下文。此前只有执行期拦截，CTF 会话里照样列着 nuclei/sqlmap。
         """
+        mode = self._current_mode()
+        if mode is not None:
+            schemas = self._mode_registry(mode).schemas()
+        else:
+            schemas = self.center.schemas()
         tools = []
-        for schema in self.center.schemas():
+        for schema in schemas:
             tool = {
                 "name": schema["name"],
                 "description": schema.get("description", ""),
@@ -202,6 +260,23 @@ class PentestMCPServer:
                 tool["annotations"] = {"destructiveHint": True}
             tools.append(tool)
         return tools
+
+    def _maybe_notify_tools_changed(self) -> None:
+        """模式变了就告诉客户端重取工具面（MCP `tools/list_changed`）。
+
+        DSH 的 mcp-client 注册了 `listChanged.tools.onChanged → refreshTools()`
+        （源码见 `@deepseek-ai/dsh-mcp-client/lib/index.js`），收到即重拉。
+        两个触发点：① `pentest_set_mode` 工具；② `/proteus-mode` 命令直接写
+        会话文件（内核看不见那一刻）——所以每次请求前比对一次，变了就补发。
+        首次记录不通知（避免刚连上就抖一下）。
+        """
+        current = self._read_session_mode() or self.default_mode
+        if self._last_mode_notified is None:
+            self._last_mode_notified = current
+            return
+        if current != self._last_mode_notified:
+            self._last_mode_notified = current
+            self._notify("notifications/tools/list_changed", {})
 
     # ------------------------------------------------------------------
     def handle_line(self, line: str) -> Optional[str]:
@@ -218,15 +293,18 @@ class PentestMCPServer:
         if method == "initialize":
             return json.dumps({"jsonrpc": "2.0", "id": msg_id, "result": {
                 "protocolVersion": MCP_VERSION,
-                "capabilities": {"tools": {}},
+                # listChanged=true：模式切换会改变工具面，客户端应重取
+                "capabilities": {"tools": {"listChanged": True}},
                 "serverInfo": {"name": "xpentest",
                                "version": "0.1.0"}}})
         if method in ("notifications/initialized", "notifications/cancelled"):
             return None
         if method == "tools/list":
+            self._maybe_notify_tools_changed()
             return json.dumps({"jsonrpc": "2.0", "id": msg_id,
                                "result": {"tools": self._tools_schema()}})
         if method == "tools/call":
+            self._maybe_notify_tools_changed()
             return json.dumps(self._handle_call(msg_id,
                                                 msg.get("params") or {}))
         return json.dumps({"jsonrpc": "2.0", "id": msg_id,
@@ -317,8 +395,10 @@ class PentestMCPServer:
                 return self._result(msg_id, {
                     "analysis": analysis,
                     "skill": skill.to_dict() if skill else None})
-            # 底层工具
-            tool_result = self.registry.execute(name, args)
+            # 底层工具：按当前模式裁剪后的注册表执行（P0-3）——被模式禁用的
+            # 工具在这里也调不到，与 tools/list 的可见性同一判据
+            tool_result = self._mode_registry(self._current_mode()).execute(
+                name, args)
             # 底层工具失败（含被闸门/沙箱拒绝）一律 isError=true
             return self._result(msg_id, tool_result.to_dict(),
                                 is_error=not tool_result.ok)
