@@ -200,6 +200,74 @@ roster 校验 / `--check` 全部按列表循环；`dsh/start-proteus.cmd` 的同
 
 ---
 
+## 七、真机冒烟记录（2026-09-24 晚）
+
+**起法**：`dsh\start-proteus.cmd`（web profile + host 补丁），DSH 起来了并打印
+token URL；`dsh_install --check` 在启动前已全绿。**UI 侧未能完成点击级验证**
+（原因见 7.2），改用**已安装 preset 的真实配置**做会话级验证——三者判定层相同。
+
+### 7.1 三个检查点（原始输出摘录）
+
+**① 工具面（按已装 preset 的 `mcp-proteus` 行 args 挂载内核）**
+
+```
+proteus-pentest     52 工具 | CTF 件 无 | nuclei=有 | 外部家族 ['chameleon','rayscan','seckb']
+proteus-ctf-web     34 工具 | CTF 件 ['checksec_bin','codec_chain','codec_decode',
+                                     'file_type','python_solve','rsactf_attack']
+                                | nuclei=无 | 外部家族 ['chameleon','seckb']
+proteus-ctf-crypto  19 工具 | CTF 件（同上 6 件）| nuclei=无 | 外部家族 ['seckb']
+```
+
+`ctf-web` 全清单（34）：chameleon 12 + seckb 4 + CTF 六件套 + 侦察/HTTP 八件
+（`http_raw`/`http_probe`/`dns_lookup`/`robots_fetch`/`port_scan`/`session_http`/
+`replay_request`/`report_gen`）+ 元能力 4（`pentest_set_mode` 等）——**无 nuclei/sqlmap**。
+计数自洽：18 + 12 + 4 = 34；`ctf-crypto` 15 + 4 = 19；渗透 33 + 16 + 3(rayscan) = 52。
+**RayScan 这次在跑**，所以渗透面多了它的 3 个工具；CTF 面不含 `rayscan_*`（未列入 allow）。
+
+**② 会话授权（内核先拒 → 真实命令插件授权 → 同一连接随即放行）**
+
+```
+授权前  http_raw http://127.0.0.2/ → isError=True
+        "目标 'http://127.0.0.2/' 不在授权范围 ['127.0.0.1','localhost']。
+         若确需访问，由人在会话里执行 /proteus-scope add http://127.0.0.2/（或 CLI…）"
+命令    before: 会话授权目标: (空——只有 --targets 基线)
+        add   : 会话授权已更新: 127.0.0.2
+授权后  同一连接再调 → isError=False（连接被拒是靶机没开，不是策略拒绝）
+```
+
+**③ 监督层（按真实 preset 行的阈值 5）**
+
+```
+连调 6 次同参数 → ['next','next','next','next','deny','ask']
+留痕: kind=supervisor decision=deny repeats=5 session=smoke
+```
+
+**顺带验证了 P0-6 的会话键隔离**：`data/session-mode.json` 里留着
+`pentest-standard`（历史残留），而三个 preset 各自回落到自己的
+`--default-mode`——CTF 面没有被那条残留文件带偏（读的是
+`session-mode-<key>.json`）。
+
+### 7.2 UI 侧未完成的原因（环境问题，非 preset 问题）
+
+| 观察 | 证据 |
+|---|---|
+| DSH 服务端正常 | `python`（identity/gzip、chunked）与 PowerShell 都完整取到文档：**200 / 39893 字节**，四种 `Accept-Encoding` 全通过 |
+| 桌面浏览器加载文档失败 | `browser.tabs.open`/`navigate` → `ERR_INCOMPLETE_CHUNKED_ENCODING (-355)`；控制台同错，且**插件包 URL**（`/plugins/??…client.js`）同样 -355 |
+| 小响应可以 | `/favicon.ico` 正常加载；同一 tab 内 `fetch('/')` **偶发成功**（拿到完整 39893 字节）——典型的传输层不稳定 |
+
+结论：**Electron 浏览器 ↔ DSH 的本地 HTTP 传输对"大响应 + chunked+gzip"不稳**，
+与本仓库的 preset / 插件 / 内核无关（HTML 是静态壳，与加载了哪些行无关）。
+
+**绕过办法（给人用）**：启动器打印的 token URL 直接用**系统浏览器**（Edge/Chrome）
+打开即可——那是 DSH 原本的用法（启动器会尝试自动打开）。想在桌面浏览器里跑，
+需要先解决那条传输问题（重启桌面浏览器进程／换端口重试）。
+
+另注：启动日志有一条 **DSH 自身的**告警——
+`ui-settings-updates (@deepseek-ai/dsh-client-ui-settings-updates): failed to import`
+（客户端 UI 插件的服务端半体导入失败），与本仓库改动无关，但值得在 DSH 升级时一并复核。
+
+---
+
 ## 七、风险与开放问题
 
 1. **三 preset = 三个内核进程**（roster 在进程启动时挂载）：启动耗时与内存 ×3。P0-1 完成后每进程
