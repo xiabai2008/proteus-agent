@@ -803,6 +803,149 @@ def test_dsh_records_for_lab_filters_by_preset():
     assert dsh_records_for_lab(records, "") == []
 
 
+def test_dsh_records_for_lab_preset_family_wildcard():
+    """R-41 附带：preset 归属要按 fnmatch 家族通配匹配。
+
+    三个渲染出来的 preset 是 `proteus-pentest` / `proteus-ctf-web` /
+    `proteus-ctf-crypto`——写死 `proteus` 一条都对不上，真实会话会被整个丢掉。
+    """
+    from benchmark import _owner_attributed, _owner_retained
+
+    # 提取口径：家族通配命中 + 别人不算 + 归属未知仍保留（R-22）
+    assert _owner_retained("proteus-pentest", "proteus*")
+    assert not _owner_retained("liangshen", "proteus*")
+    assert _owner_retained("", "proteus*")
+
+    # 判分口径：归属未知不算（可能来自任何会话），空 pattern = 调用方要求不过滤
+    assert _owner_attributed("proteus-ctf-web", "proteus*")
+    assert not _owner_attributed("", "proteus*")
+    assert _owner_attributed("", "")
+
+
+def _dvwa():
+    from lab import get_lab
+
+    return get_lab("dvwa")
+
+
+def test_dsh_lab_verdict_skips_when_target_never_touched():
+    """没有该靶的会话记录 = 没有测量，记 skipped 而不是 FAIL（R-41）。"""
+    from benchmark import dsh_lab_verdict
+
+    lab = _dvwa()
+    hits = {f.name: False for f in lab.findings}
+    outcome, detail = dsh_lab_verdict(lab, [], hits, chain_ok=True)
+    assert outcome == "skipped"
+    assert "未打过" in detail
+
+
+def test_dsh_lab_verdict_skips_unattributed_records():
+    """R-41 核心：会话记录归属不明时不算分。
+
+    实测三例 FAIL 全是这种记录——开发会话读测试文件、跑冒烟探测都会在 spool 里
+    留下"碰过这个地址"的记录，拿它给 Proteus 打分就是污染通过率。
+    """
+    from benchmark import dsh_lab_verdict
+
+    lab = _dvwa()
+    hits = {f.name: False for f in lab.findings}
+    picked = [object()]                       # 有记录，但一条都不属于本 preset
+    outcome, detail = dsh_lab_verdict(lab, picked, hits, chain_ok=True,
+                                      attributed=0)
+    assert outcome == "skipped"
+    assert "未明确归属" in detail
+
+
+def test_dsh_lab_verdict_skips_entry_only_attempt():
+    """只触达首页属冒烟级——点一项（home）不足以认定做了该靶的侦察。"""
+    from benchmark import dsh_lab_verdict
+
+    lab = _dvwa()
+    hits = {f.name: False for f in lab.findings}
+    hits["home"] = True
+    outcome, detail = dsh_lab_verdict(lab, [object()], hits, chain_ok=True,
+                                      attributed=1)
+    assert outcome == "skipped"
+    assert "冒烟级" in detail
+
+
+def test_dsh_lab_verdict_scores_real_recon_attempt():
+    """真做过侦察就要判分：入口之外有推进 → 缺项记 FAIL，全中才是 success。"""
+    from benchmark import dsh_lab_verdict
+
+    lab = _dvwa()
+    hits = {f.name: False for f in lab.findings}
+    hits["home"] = True
+    hits["login-page"] = True
+    picked = [object(), object()]
+    outcome, detail = dsh_lab_verdict(lab, picked, hits, chain_ok=True,
+                                      attributed=2)
+    assert outcome == "failed"
+    assert "未探到" in detail and "robots" in detail
+
+    full = {f.name: True for f in lab.findings}
+    outcome, detail = dsh_lab_verdict(lab, picked, full, chain_ok=True,
+                                      attributed=2)
+    assert (outcome, detail) == ("success", "")
+
+    # 链不过 = 硬门槛（与 agent-lab 同口径），命中一概不作数
+    outcome, detail = dsh_lab_verdict(lab, picked, full, chain_ok=False,
+                                      attributed=2)
+    assert outcome == "failed"
+    assert "证据链" in detail
+
+
+def test_dsh_session_suite_skips_unattributed_and_scores_attributed(
+        tmp_path, monkeypatch):
+    """端到端：归属未知的靶记 skipped，明确归属的靶照常判分（R-41）。"""
+    import json
+
+    import benchmark
+
+    spool = tmp_path / "events.jsonl"
+    chain = tmp_path / "chain.jsonl"
+    state = tmp_path / "state.json"
+    lines = []
+
+    def _add(step, tool, url, output, preset=None):
+        call = {"ts": step, "session": "s1", "kind": "call", "turn": 1,
+                "step": step, "callId": f"c{step}", "tool": tool,
+                "args": json.dumps({"url": url})}
+        if preset is not None:
+            call["preset"] = preset
+        lines.append(call)
+        lines.append({"session": "s1", "kind": "result", "turn": 1,
+                      "step": step, "callId": f"c{step}", "isError": False,
+                      "output": output, "error": ""})
+
+    # dvwa：有记录但归属未知（老链 / 非 Proteus 会话）→ 不判分
+    _add(1, "http_probe", "http://127.0.0.1:8080/",
+         '{"url": "http://127.0.0.1:8080/", "status": 200, '
+         '"title": "Damn Vulnerable Web Application"}')
+    # juice-shop：明确归属 Proteus preset，且入口之外还探到一项 → 真判分
+    _add(2, "http_probe", "http://127.0.0.1:3000/",
+         '{"url": "http://127.0.0.1:3000/", "status": 200, '
+         '"title": "OWASP Juice Shop"}', preset="proteus-pentest")
+    _add(3, "http_probe", "http://127.0.0.1:3000/api/Products",
+         '{"url": "http://127.0.0.1:3000/api/Products", "status": 200}',
+         preset="proteus-pentest")
+    spool.write_text("\n".join(json.dumps(ln) for ln in lines) + "\n",
+                     encoding="utf-8")
+
+    monkeypatch.setattr(benchmark, "_dsh_paths",
+                        lambda: (spool, chain, state))
+    cases = benchmark.run_dsh_session_suite(benchmark.ROOT)
+    by_id = {c.case_id: c for c in cases}
+
+    assert by_id["chain-integrity"].outcome == "success"
+    assert by_id["dvwa"].outcome == "skipped"
+    assert "未明确归属" in by_id["dvwa"].detail
+    assert by_id["juice-shop"].outcome == "failed"      # 2/13：真判分，不是污染
+    assert "未探到" in by_id["juice-shop"].detail
+    assert by_id["sw-secure-lab"].outcome == "skipped"
+    assert "未打过" in by_id["sw-secure-lab"].detail
+
+
 def test_agent_lab_registered_and_excluded_from_all():
     """套件已注册；`--suite all` 不含它（真 LLM 有花费，需显式点名）。"""
     from benchmark import ALL_SUITES_EXCLUDE, SUITES

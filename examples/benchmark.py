@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import sys
 import time
@@ -577,12 +578,44 @@ def _dsh_paths() -> tuple[Path, Path, Path]:
             data_dir / "dsh-spool.state.json")
 
 
+def _record_preset(rec) -> str:
+    """证据记录声明的 preset 归属（缺字段 / 为空 = 未知，见 R-22）。"""
+    content = getattr(rec, "content", None) or {}
+    return str(content.get("preset") or "")
+
+
+def _owner_retained(owner: str, preset: str) -> bool:
+    """**提取**口径：这条会话记录算不算数。
+
+    空 `preset` = 不过滤（全留）；归属未知也留——R-22 的取舍：丢数据是静默的，
+    多留是可查的（老链上没有 `preset` 字段）。
+    """
+    return not preset or not owner or fnmatch.fnmatchcase(owner, preset)
+
+
+def _owner_attributed(owner: str, preset: str) -> bool:
+    """**判分**口径：这条记录能不能证明"本 preset 的会话打过这个靶"。
+
+    与 `_owner_retained` 的分工是刻意的：提取可以宽容（不静默丢数据），判分必须
+    严格——归属未知的记录可能来自任何会话（实测：开发会话里读测试文件、跑冒烟
+    探测都会留下这种记录），拿它给 Proteus 打分就是 R-41 说的"污染通过率"。
+    空 `preset` = 调用方显式要求不过滤，此时一律算归属（`--preset=` 的旧口径）。
+    """
+    if not preset:
+        return True
+    return bool(owner) and fnmatch.fnmatchcase(owner, preset)
+
+
 def dsh_records_for_lab(records, base_url: str, preset: str = "") -> list:
     """挑出"打过某个靶"的证据记录：args 里出现该靶 base URL 的 tool_call。
 
     `preset` 非空时按 preset 归属过滤（R-22）：`session/event` 是**全局**事件，
     同一个 DSH 进程里所有会话的调用都会进 spool——不过滤的话"这个靶拿了多少分"
     算的是整个进程的动作合集，不是这次 Proteus 任务的。
+
+    `preset` 支持 `modes.py` 同款 fnmatch 家族通配（三个渲染出来的 preset 是
+    `proteus-pentest` / `proteus-ctf-web` / `proteus-ctf-crypto`，写 `proteus`
+    一条都对不上，要写 `proteus*`）；**是否算归属**由 `_owner_attributed` 判。
 
     **归属未知（''）不过滤**：字段是 2026-09-22 才加的，老链上没有它；按未知
     保留比按未知丢弃安全（丢数据是静默的，多留是可查的）。
@@ -596,18 +629,79 @@ def dsh_records_for_lab(records, base_url: str, preset: str = "") -> list:
     for rec in records:
         if getattr(rec, "kind", "") != "tool_call":
             continue
-        content = getattr(rec, "content", None) or {}
-        owner = str(content.get("preset") or "")
-        if preset and owner and owner != preset:
+        owner = _record_preset(rec)
+        if not _owner_retained(owner, preset):
             continue
-        blob = json.dumps(content.get("args", ""), ensure_ascii=False)
+        blob = json.dumps((getattr(rec, "content", None) or {}).get("args", ""),
+                          ensure_ascii=False)
         if base in blob:
             picked.append(rec)
     return picked
 
 
+def dsh_lab_verdict(lab, picked: list, hits: dict, chain_ok: bool,
+                    attributed: Optional[int] = None,
+                    preset: str = "proteus*") -> tuple[str, str]:
+    """判定一个靶在宿主会话里的评测口径：返回 `(outcome, detail)`。
+
+    为什么不能一律 FAIL：`dsh-session` 是**回放**套件——它自己不发起任何调用，
+    只在历史会话记录里判分，于是旧口径下"会话根本没做过这个靶"与"做了但全失败"
+    是同一个 FAIL。前者不是能力不足，而是**没有测量**（同 `pentest` / `lab`
+    套件"靶不可达"的 skip 语义），记 FAIL 会拿无关会话污染总通过率与退出码
+    （见 `docs/修复待办清单.md` R-41，实测三例：两个靶一项都没命中、一个只被
+    冒烟式碰过两下）。
+
+    判分要求两条同时成立（对应台账里的"无匹配会话"与"证据不足"两半）：
+
+    1. **有匹配会话**：该靶至少有一条记录**明确归属该 preset**。归属未知的记录
+       （老链没有 `preset` 字段 / 会话本来就没跑 Proteus preset）仍被提取出来计数
+       （R-22：不静默丢数据），但它证明不了"这次 Proteus 任务打过这个靶"——
+       传空的 `--preset`（显式要求不过滤）时才按全集判分；
+    2. **证据充分**：命中**入口（`home`）之外**至少一项预期发现——说明这次会话确实
+       在推进该靶的侦察面；只触达首页属冒烟级，与"没做过"无法区分。
+
+    外加链校验通过（硬门槛，与 `agent-lab` 同口径）。
+
+    `attributed`：picked 里明确归属该 preset 的记录数（缺省 None = 与 picked 等长，
+    即调用方已自行保证归属）。返回 `skipped` 时 detail 写明是哪一种"没测量"
+    （无归属记录 / 无侦察证据 / 仅触达入口），事后能把"没人打这个靶"与
+    "打了没得分"分开。
+
+    纯函数（不碰文件、不碰网络），判定口径能被单测钉住。
+    """
+    from lab import identity_finding
+
+    entry = identity_finding(lab)
+    entry_name = entry.name if entry is not None else ""
+    owned = len(picked) if attributed is None else attributed
+    matched = sum(1 for v in hits.values() if v)
+    total = len(hits)
+    beyond_entry = matched - (1 if entry_name and hits.get(entry_name) else 0)
+    scope = ("preset=" + preset) if preset else "全部 preset"
+
+    if not picked:
+        return "skipped", (f"无可归属该靶的会话记录（{scope} 的会话累计未打过 "
+                           f"{lab.id}）")
+    if not owned:
+        return "skipped", (f"会话记录均未明确归属 {scope}（老链没有归属字段，或那次"
+                           f"会话本来就没跑 Proteus preset）——不作能力判分；"
+                           f"要看不过滤口径请传空的 --preset")
+    if not chain_ok:
+        return "failed", "证据链校验未通过（命中一概不作数）"
+    if matched == 0:
+        return "skipped", (f"会话记录未命中该靶任何预期发现（调用 {len(picked)} 次）"
+                           f"——无侦察证据，可能是别的任务顺带碰过该地址")
+    if beyond_entry <= 0:
+        return "skipped", (f"仅触达入口（{entry_name or 'home'}）共 {matched}/{total} 项，"
+                           f"属冒烟级调用，不构成该靶的侦察评测")
+    if matched < total:
+        missed = ', '.join(k for k, v in hits.items() if not v)
+        return "failed", f"未探到: {missed}"
+    return "success", ""
+
+
 def run_dsh_session_suite(root: Path, driver: str = "scripted",
-                          preset: str = "proteus") -> list[CaseResult]:
+                          preset: str = "proteus*") -> list[CaseResult]:
     """DSH 宿主会话套件：读宿主桥证据链，按靶场清单判定（不需要 LLM、靶场可离线）。
 
     与 `agent-lab` 的分工：那个跑内核自己的 ReAct 循环；这个判定的是**宿主会话**
@@ -617,8 +711,13 @@ def run_dsh_session_suite(root: Path, driver: str = "scripted",
 
     链校验是硬门槛：链不过，命中一概不作数（与 agent-lab 同口径）。
 
+    **逐靶用例是"有则判分、无则跳过"**：历史会话没做过某个靶、或该靶的记录都
+    不属于本 preset（老链无归属字段 / 会话没跑 Proteus preset）时记 `skipped`
+    而不是 FAIL（判据见 `dsh_lab_verdict`）——回放套件量不到的东西不算能力不足。
+
     `preset`：只算属于该 preset 的会话记录（缺省 `proteus`；传空串 = 不过滤，
-    兼容 2026-09-22 之前没有归属字段的老链）。
+    兼容 2026-09-22 之前没有归属字段的老链）。注意"提取"与"判分"是两层门槛：
+    归属未知的记录仍被提取计数（R-22：不静默丢数据），但要判分得先有明确归属。
     """
     examples = str(ROOT / "examples")
     if examples not in sys.path:
@@ -660,23 +759,25 @@ def run_dsh_session_suite(root: Path, driver: str = "scripted",
     for lab in LABS:
         base = DEFAULT_URLS.get(lab.id, "")
         picked = dsh_records_for_lab(records, base, preset=preset)
-        if not picked:
-            continue
         hits = score_from_evidence(lab.findings, picked)
         matched = sum(1 for v in hits.values() if v)
         total = len(hits)
-        missed = [k for k, v in hits.items() if not v]
-        passed = total > 0 and matched == total and chain_ok
+        # 明确归属该 preset 的记录数（preset="" 即调用方要求不过滤，视作全归属）
+        attributed = sum(1 for r in picked
+                         if _owner_attributed(_record_preset(r), preset))
+        outcome, detail = dsh_lab_verdict(lab, picked, hits, chain_ok,
+                                          attributed=attributed, preset=preset)
+        owner_note = (f"，其中明确归属 {preset} 的 {attributed} 次"
+                      if preset and attributed != len(picked) else "")
         results.append(CaseResult(
             suite="dsh-session", case_id=lab.id, category="recon-dsh",
-            outcome="success" if passed else "failed", passed=passed,
-            steps=len(picked),
+            outcome=outcome, passed=outcome == "success",
+            steps=attributed,
             expected=f"{total} 项预期发现（宿主会话内真实调用）",
             got=f"{matched}/{total} 命中 · 调用 {len(picked)} 次"
-                f"（{('preset=' + preset) if preset else '全部 preset'} 的会话累计）",
-            detail="" if passed else
-                   (f"未探到: {', '.join(missed)}" if missed
-                    else "证据链校验未通过")))
+                f"（{('preset=' + preset) if preset else '全部 preset'} 的会话累计"
+                f"{owner_note}）",
+            detail=detail))
     return results
 
 
@@ -707,7 +808,7 @@ def run(suites: list[str], driver: str = "scripted",
         agent_reset: bool = False,
         agent_repeat: int = 1,
         agent_raw_tag: str = "",
-        dsh_preset: str = "proteus") -> Scorecard:
+        dsh_preset: str = "proteus*") -> Scorecard:
     """跑指定套件，汇总为一张评分卡。
 
     渗透套件的靶地址可传（`--target` / `--port`），否则本机 8080 被别的服务
@@ -786,9 +887,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="agent-lab 跑前清空该靶的评测沙箱记忆"
                              "（只动 data/benchmark/agent-lab/<靶>/mem，"
                              "不碰生产记忆库）；测对照组时需要")
-    parser.add_argument("--preset", default="proteus",
-                        help="dsh-session 套件只算该 preset 的会话记录"
-                             "（默认 proteus；空串 = 不过滤，兼容老链）")
+    parser.add_argument("--preset", default="proteus*",
+                        help="dsh-session 套件只算该 preset 的会话记录，支持 "
+                             "fnmatch 家族通配（默认 proteus* = 三个 Proteus "
+                             "preset；空串 = 不过滤，兼容老链）")
     parser.add_argument("--repeat", type=int, default=1,
                         help="agent-lab 每靶重复轮数（温度 0.3 下用来看稳定性；"
                              "每轮一条用例，case_id 带 #序号）")

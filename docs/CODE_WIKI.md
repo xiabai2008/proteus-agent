@@ -776,6 +776,8 @@ python examples/benchmark.py --suite lab              # 真实靶场基线（DVW
 python examples/benchmark.py --suite agent-lab        # agent 自主侦察真实靶场（真 LLM，分钟级，须显式点名）
 python examples/benchmark.py --suite g07              # 07 靶场仿真（需 warfare）
 python examples/benchmark.py --suite dsh-session      # 判定 DSH 宿主会话（离线）
+python examples/benchmark.py --suite dsh-session --preset 'proteus-ctf-*'   # 只判某个 preset 家族的会话
+python examples/benchmark.py --suite dsh-session --preset=                  # 不过滤（兼容无归属字段的老链）
 python examples/benchmark.py --compare data/benchmark/baseline.json
 ```
 
@@ -862,7 +864,7 @@ CI（`.github/workflows/ci.yml`）在 pytest 之后跑 `python examples/benchmar
 | [test_llm_client.py](../tests/test_llm_client.py) | 会话头、端点协议白名单、读超时重试（全部打桩本地 HTTP） |
 | [test_mission_tree.py](../tests/test_mission_tree.py) | Task→Action→Artifact 层级视图与两条兜底边界 |
 | [test_web_console.py](../tests/test_web_console.py) | 控制台：模式/关键词、任务下发与步骤流、证据链视图 |
-| [test_benchmark.py](../tests/test_benchmark.py) | 评分卡聚合、序列化往返、`--compare` 方向、skipped 语义 |
+| [test_benchmark.py](../tests/test_benchmark.py) | 评分卡聚合、序列化往返、`--compare` 方向、skipped 语义、`dsh-session` 的 preset 归属与判分门槛（R-41） |
 | [test_dsh_bridge.py](../tests/test_dsh_bridge.py) | DSH spool → 证据链（配对 / 不重复入链 / 形状一致） |
 | [test_dsh_install.py](../tests/test_dsh_install.py) | 同步器每条校验可独立触发（防 preset 静默消失、副本过期） |
 | [test_proteus_commands.py](../tests/test_proteus_commands.py) | `proteus-commands.mjs` 六个命令的端到端 handler |
@@ -884,10 +886,12 @@ CI（`.github/workflows/ci.yml`）在 pytest 之后跑 `python examples/benchmar
 | `g07` | 07 靶场仿真（`warfare`） | `PENTEST_G07_ROOT` | 秒级 |
 | `dsh-session` | 判定 DSH 宿主会话（读宿主桥证据链） | 离线 + spool | 秒级 |
 
-- 结果模型：`CaseResult`（[L53](../examples/benchmark.py#L53)）+ `Scorecard`（[L53](../examples/benchmark.py#L53) 起），含通过率、平均步数、耗时、分类统计与序列化；`Scorecard.compare(baseline)` 逐例给出 `fixed` / `regressed`（**新增用例不计回归**）。
-- `SUITES` 注册表（[L681](../examples/benchmark.py#L681)）与 `run(...)` 编排（[L698](../examples/benchmark.py#L698)）。
-- 退出码：有失败用例即非零（[L827](../examples/benchmark.py#L827)）。
+- 结果模型：`CaseResult`（[L55](../examples/benchmark.py#L55)）+ `Scorecard`（[L82](../examples/benchmark.py#L82) 起），含通过率、平均步数、耗时、分类统计与序列化；`Scorecard.compare(baseline)` 逐例给出 `fixed` / `regressed`（**新增用例不计回归**）。
+- `SUITES` 注册表（[L784](../examples/benchmark.py#L784)）与 `run(...)` 编排（[L801](../examples/benchmark.py#L801)）。
+- 退出码：有失败用例即非零（[L931](../examples/benchmark.py#L931)）。
 - 主要参数：`--suite / --driver / --out / --compare / --target / --port / --max-steps / --labs / --seed-skills / --reset-memory / --preset / --repeat`。
+- `dsh-session` 的 preset 归属（R-41）：`_record_preset`（[L581](../examples/benchmark.py#L581)）取记录声明的 preset；`_owner_retained`（[L587](../examples/benchmark.py#L587)）是**提取**口径（归属未知仍留，不静默丢数据）、`_owner_attributed`（[L596](../examples/benchmark.py#L596)）是**判分**口径（必须明确归属本 preset）；`dsh_lab_verdict`（[L642](../examples/benchmark.py#L642)）把"无该靶会话 / 归属未知 / 未命中任何预期发现 / 仅触达入口"一律判 `skipped`，只有**真侦察未探全**才 `failed`。
+- `--preset` 支持 `fnmatch` **家族通配**，缺省 `proteus*`（= 三个 Proteus preset）；传空串 `--preset=` 表示不过滤（兼容无归属字段的老链）。
 
 ### 12.3 其它评测脚本
 

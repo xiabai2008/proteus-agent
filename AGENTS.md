@@ -60,9 +60,9 @@
   环境：pytest 解释器 `<PY312>\python.exe` 上装的是 `torch 2.8.0+cpu`；torch 保持**可选依赖**定位不变（硬规则 5，不进 `requirements.txt` 安装列表），屏蔽 torch 时 RL 链路用例按环境跳过，其余全量必须通过。
   数据：`eval_evolution.py` 决策步数 6.0 → 3.0（下降 50%，与内核 README 声称一致）；`eval_closed_loop.py` 四层叠加为基线 4.28 → Q 学习 2.60（-39%）→ PPO 2.50（-42%），三次重跑逐位一致。
 - 外部依赖 **07 靶场**：两个评测脚本需要 `warfare` 仿真包，位于 `<WS>\网安项目开发规划\07-agent-war-range`（注意**不在** `<WS>\07-agent-war-range`）。`conftest.py` 按 `PENTEST_G07_ROOT` → 相邻布局 → 本机绝对路径的顺序解析并注入 `PYTHONPATH`（供测试用 subprocess 拉起的评测脚本继承）；直接跑脚本时须自行设 `PYTHONPATH`，否则报 `ModuleNotFoundError: No module named 'warfare'`。
-- 测试基线（2026-09-24 实测）：**Docker 在线 = 558 passed / 0 failed / 1 skipped**；
+- 测试基线（2026-09-25 实测）：**Docker 在线 = 564 passed / 0 failed / 1 skipped**；
   **Docker 暂停 = 522 passed / 0 failed / 16 skipped**（31 个测试文件；两条口径只差容器类用例；
-  该口径为此前实测值——之后新增的 3 条 R-42、7 条 R-39 与 7 条 R-40 用例均与容器无关，
+  该口径为此前实测值——之后新增的 3 条 R-42、7 条 R-39、7 条 R-40 与 6 条 R-41 用例均与容器无关，
   暂停口径未重测）。
   那 1 条 skipped 不是代码问题：等 DVWA 的 CSRF token（`tests/test_builtin_schemes.py`）——见
   `docs/修复待办清单.md` R-42。曾经唯一的那条 failed 是 lab 标记用例撞上工作机 8080 被别的服务
@@ -71,7 +71,7 @@
   skip 面（16 条）**不等于通过**：Docker 一上线就抓出 3 条从未执行过的死缺陷（R-44）。
   `pytest.ini` 已钉收集边界（`testpaths = tests` + `norecursedirs` 排除 `data`）：`data/` 下会落
   克隆的第三方仓库（自带 tests/），裸 `pytest` 递归进去会直接收集中断——故 `pytest` /
-  `pytest tests` / `pytest .` 三种写法都可跑（均收集 559 条、零错误）。CI 覆盖
+  `pytest tests` / `pytest .` 三种写法都可跑（均收集 565 条、零错误）。CI 覆盖
   Windows py3.12/3.13（必过）+ Linux（实验性），并在 pytest 之后跑
   `python examples/benchmark.py --suite ctf` 作为**能力闸门**（33 题纯离线，约 5 秒；有失败即非零退出）。
 - DSH 阶段 0+1 已交付（2026-09-24）：启动健壮性（外部 MCP 发现 23 分钟 → 6.7s）·
