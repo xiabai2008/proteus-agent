@@ -342,8 +342,9 @@ def report_gen(mission_id: str = "", format: str = "markdown",
       穿越）；不传则只返回文本，由调用方决定落哪。
     """
     from penagent.report import evidence_report, sarif_report
+    from penagent.http_session import DATA_DIR as _DEFAULT_DATA_DIR
 
-    data = data_dir or DATA_DIR
+    data = data_dir or _DEFAULT_DATA_DIR
     fmt = (format or "markdown").strip().lower()
     if fmt not in ("markdown", "sarif"):
         return {"ok": False, "error": f"不支持的 format: {format}"
