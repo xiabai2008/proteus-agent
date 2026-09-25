@@ -15,7 +15,7 @@
 // (defaults: target=http://127.0.0.1:8090, preset=proteus-ctf-web, task=embedded cmdi task)
 
 import { spawn } from 'node:child_process'
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 
@@ -59,6 +59,13 @@ const DEFAULT_TASK = `你正在 Proteus 的 CTF-Web 模式（preset=${PRESET}）
 const TASK = ARGS.task && existsSync(ARGS.task) ? readFileSync(ARGS.task, 'utf8').trim() : DEFAULT_TASK
 
 const log = (s) => { const line = `[${new Date().toISOString()}] ${s}`; console.log(line); appendFileSync(LOG, line + '\n') }
+
+// 上一次驱动被 taskkill /F 强杀后，DSH 的 credentials 写锁可能残留，导致
+// 下一次启动 "atomic-write: timed out waiting for the writer lock" 而失败。
+// 本驱动独占 DSH 实例，spawn 前清掉陈旧锁（真实运行中的锁由持有进程重建）。
+for (const lf of [DSH_HOME + '/.credentials.yaml.lock']) {
+  try { unlinkSync(lf); log('removed stale lock: ' + lf) } catch { /* 不存在即目标状态 */ }
+}
 
 // Build env overlay from the repo .env (PENTEST_* and PENTEST_LLM_*).
 const overlay = {}
