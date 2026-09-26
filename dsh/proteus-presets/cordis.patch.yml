@@ -199,8 +199,12 @@
               # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
               # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
               sameToolLimit: 5
-              totalLimit: 30
-              escalate: ask
+              totalLimit: 60
+              # escalate=deny（2026-09-26 §8.7-4 实测）：ask 在无头驱动会话里
+              # 无人应答即永久挂起（8099 盲打 480s 超时复盘：total=32 触发
+              # ask → turn 停摆）。deny 带换思路提示直接回给 agent，turn 继续；
+              # 交互会话里 agent 也会把卡点如实转述给人，不丢"人看一眼"。
+              escalate: deny
               spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
           - id: proteus-commands
             name: 'dsh-proteus-presets/commands'
@@ -406,8 +410,12 @@
               # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
               # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
               sameToolLimit: 5
-              totalLimit: 30
-              escalate: ask
+              totalLimit: 60
+              # escalate=deny（2026-09-26 §8.7-4 实测）：ask 在无头驱动会话里
+              # 无人应答即永久挂起（8099 盲打 480s 超时复盘：total=32 触发
+              # ask → turn 停摆）。deny 带换思路提示直接回给 agent，turn 继续；
+              # 交互会话里 agent 也会把卡点如实转述给人，不丢"人看一眼"。
+              escalate: deny
               spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
           - id: proteus-commands
             name: 'dsh-proteus-presets/commands'
@@ -613,8 +621,12 @@
               # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
               # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
               sameToolLimit: 5
-              totalLimit: 30
-              escalate: ask
+              totalLimit: 60
+              # escalate=deny（2026-09-26 §8.7-4 实测）：ask 在无头驱动会话里
+              # 无人应答即永久挂起（8099 盲打 480s 超时复盘：total=32 触发
+              # ask → turn 停摆）。deny 带换思路提示直接回给 agent，turn 继续；
+              # 交互会话里 agent 也会把卡点如实转述给人，不丢"人看一眼"。
+              escalate: deny
               spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
           - id: proteus-commands
             name: 'dsh-proteus-presets/commands'
