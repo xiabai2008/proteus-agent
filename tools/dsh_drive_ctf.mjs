@@ -39,12 +39,12 @@ const BIN_JS = DSH_DIR + '/apps/cli/lib/bin.js'
 const PATCH = REPO + '/dsh/proteus.cordis.patch.yml'
 const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const NODE_BIN = process.execPath
-const SPOOL = REPO + '/data/dsh-events.jsonl'
-const LOG = REPO + '/data/dsh-drive.log'
+const SPOOL = join(REPO, 'data', 'dsh-events.jsonl')
+const LOG = join(REPO, 'data', 'dsh-drive.log')
 
 // ---- arg parsing ----
 function parseArgs(argv) {
-  const out = { target: 'http://127.0.0.1:8090', preset: 'proteus-ctf-web', task: null, attach: null }
+  const out = { target: 'http://127.0.0.1:8090', preset: 'proteus-ctf-web', task: null, attach: null, timeout: 540 }
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--attach') {
@@ -55,9 +55,11 @@ function parseArgs(argv) {
     else if (a === '--target') out.target = argv[++i]
     else if (a === '--preset') out.preset = argv[++i]
     else if (a === '--task') out.task = argv[++i]
+    else if (a === '--timeout') out.timeout = Number(argv[++i]) || 540
     else if (a.startsWith('--target=')) out.target = a.slice('--target='.length)
     else if (a.startsWith('--preset=')) out.preset = a.slice('--preset='.length)
     else if (a.startsWith('--task=')) out.task = a.slice('--task='.length)
+    else if (a.startsWith('--timeout=')) out.timeout = Number(a.slice('--timeout='.length)) || 540
   }
   return out
 }
@@ -132,7 +134,7 @@ async function rpc(origin, cookie, endpoint, args) {
   return b.result.value
 }
 
-function follow(origin, cookie, sessionId) {
+function follow(origin, cookie, sessionId, timeoutSec = 540) {
   return new Promise((resolve, reject) => {
     const url = origin.replace(/^http/u, 'ws') + '/api/remote.mux'
     const ws = new WS(url, { headers: { cookie } })
@@ -141,8 +143,8 @@ function follow(origin, cookie, sessionId) {
     let cursor = -1
     let done = false
     const timer = setTimeout(() => {
-      if (!done) { done = true; ws.close(); reject(new Error('follow timeout (540s)')) }
-    }, 540000)
+      if (!done) { done = true; ws.close(); reject(new Error(`follow timeout (${String(timeoutSec)}s)`)) }
+    }, timeoutSec * 1000)
     ws.addEventListener('open', () => {
       ws.send(JSON.stringify({
         type: 'open', streamId,
@@ -254,7 +256,7 @@ async function main() {
   })
   log('prompt sent; streaming session/follow...')
 
-  const { events, cursor } = await follow(origin, cookie, sessionId)
+  const { events, cursor } = await follow(origin, cookie, sessionId, ARGS.timeout)
   log('turn ended via follow. followEvents=' + events.length + ' cursor=' + cursor)
 
   let transcript = events
