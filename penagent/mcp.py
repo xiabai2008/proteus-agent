@@ -111,6 +111,11 @@ class PentestMCPServer:
         self.registry.gate = PolicyGate(self.policy)
         self.memory = Memory(data_dir)
         self.evidence = EvidenceChain(Path(data_dir) / "chain.jsonl")
+        # 会话绑定的作战任务（§8.7-2，2026-09-26）：DSH 会话大多绕过
+        # pentest_run 直接调底层工具，作战记录全程 0 条、report_gen 产出
+        # 薄报告。本会话首个底层调用自动建任务，后续调用挂到它上面。
+        # None = 还没绑定；{"id": 任务号, "ns": 分区} = 已绑定。
+        self._bound_mission: Optional[dict] = None
         # 会话态 HTTP（session_http/replay_request）的 jar 目录（P1-1）
         from penagent.http_session import configure as configure_http
 
@@ -458,8 +463,15 @@ class PentestMCPServer:
                     "skill": skill.to_dict() if skill else None})
             # 底层工具：按当前模式裁剪后的注册表执行（P0-3）——被模式禁用的
             # 工具在这里也调不到，与 tools/list 的可见性同一判据
-            tool_result = self._mode_registry(self._current_mode()).execute(
-                name, args)
+            mode = self._current_mode()
+            # report_gen 不传 mission_id 时自动带上会话绑定任务（§8.7-2）：
+            # 直调会话产出薄报告的另一半根因——报告聚合需要任务上下文
+            if (name == "report_gen" and self._bound_mission is not None
+                    and not str(args.get("mission_id") or "")):
+                args = {**args, "mission_id": self._bound_mission["id"]}
+            tool_result = self._mode_registry(mode).execute(name, args)
+            # 任务自动绑定 + 留证：只追加记录，绝不改工具结果语义
+            self._trace_direct_call(name, args, tool_result, mode)
             # 底层工具失败（含被闸门/沙箱拒绝）一律 isError=true
             return self._result(msg_id, tool_result.to_dict(),
                                 is_error=not tool_result.ok)
@@ -481,6 +493,83 @@ class PentestMCPServer:
         return {"jsonrpc": "2.0", "id": msg_id,
                 "result": {"content": [{"type": "text", "text": text}],
                            "isError": is_error}}
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_target(args: dict) -> str:
+        """从底层工具参数里提取目标（建任务用）：按命中优先级取第一个。
+
+        url 类参数取 host（任务记录要的是目标不是完整路径）；取不到返回
+        空串——任务照建，target 记为空比丢调用好（宁可多留）。
+        """
+        from urllib.parse import urlparse
+
+        for key in ("target", "url", "base_url", "host", "domain"):
+            val = args.get(key)
+            if not (isinstance(val, str) and val.strip()):
+                continue
+            val = val.strip()
+            if "://" in val:
+                try:
+                    host = urlparse(val).netloc
+                except ValueError:
+                    host = ""
+                if host:
+                    return host
+            return val
+        return ""
+
+    def _trace_direct_call(self, name: str, args: dict, result, mode) -> None:
+        """底层工具直调的任务自动绑定与留证（§8.7-2，2026-09-26）。
+
+        为什么（实测导出）：DSH 会话里 agent 几乎不走 pentest_run，直接
+        `mcp__proteus__http_raw` 连招打靶——`pentest_missions` 全程 0 条，
+        证据链无任务归属，`report_gen` 只能产出薄报告（agent 自评
+        "report is thin (no mission bound)"）。这里在 MCP 入口补上归属：
+
+        - 本会话首个底层调用自动建任务（target 从参数提取，分区跟随当前
+          模式的 memory_namespace——与 pentest_run 的落盘口径一致）；
+        - 之后每次调用：链上追加 tool_call（direct 标记）、作战记录
+          add_step——mission_tree / report_gen / pentest_reflect 从此有
+          完整上下文；
+        - 模式切换（分区变化）时重绑：不同模式的任务不该混在一条记录里。
+
+        **fail-open**：留证任何一步失败都只吞掉，绝不影响工具结果——
+        与审计桥同一哲学（观测通道坏了不改任务语义）。
+        """
+        try:
+            ns = mode.memory_namespace if mode is not None else "default"
+            bound = self._bound_mission
+            if bound is None or bound["ns"] != ns:
+                mem = Memory(self.data_dir, namespace=ns)
+                target = self._extract_target(args)
+                mid = mem.new_mission(
+                    target,
+                    f"DSH 底层工具直调自动绑定"
+                    f"（首工具 {name}，模式 {getattr(mode, 'id', 'default')}）")
+                bound = {"id": mid, "ns": ns, "target": target}
+                self._bound_mission = bound
+            else:
+                mem = Memory(self.data_dir, namespace=bound["ns"])
+                # 首调可能不带目标信息（如 replay_request 只有 request_id）：
+                # 后续调用提取到 target 时回填（宁晚不缺）
+                if not bound["target"]:
+                    target = self._extract_target(args)
+                    if target:
+                        mem.set_target(bound["id"], target)
+                        bound["target"] = target
+            mem = Memory(self.data_dir, namespace=bound["ns"])
+            rec = self.evidence.append("tool_call", {
+                "mission": bound["id"], "tool": name, "direct": True,
+                "ok": bool(result.ok),
+                **({} if result.ok else {"error": (result.error or "")[:300]})})
+            steps = mem.get_mission(bound["id"]).get("steps", [])
+            mem.add_step(bound["id"], {
+                "step": len(steps) + 1, "tool": name, "ok": bool(result.ok),
+                "direct": True, "duration_ms": result.duration_ms,
+                "evidence_seq": rec.seq})
+        except Exception:  # noqa: BLE001 —— 故意 fail-open
+            pass
 
     # ------------------------------------------------------------------
     def serve_stdio(self) -> None:

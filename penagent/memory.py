@@ -152,6 +152,15 @@ class Memory:
     def get_mission(self, mission_id: str) -> dict:
         return self._load_mission(mission_id)
 
+    def set_target(self, mission_id: str, target: str) -> None:
+        """补任务目标（仅当为空时写）：自动绑定任务的 target 取自首个
+        底层调用的参数，而首调可能是 `replay_request` 这类不带目标信息的
+        工具——后续调用提取到目标时回填，宁晚不缺。"""
+        rec = self._load_mission(mission_id)
+        if target and not rec.get("target"):
+            rec["target"] = target
+            self._save_mission(rec)
+
     def list_missions(self) -> list[dict]:
         missions = []
         for p in sorted(self.missions_dir.glob("*.json")):
