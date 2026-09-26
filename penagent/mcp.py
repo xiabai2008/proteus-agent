@@ -540,24 +540,38 @@ class PentestMCPServer:
         try:
             ns = mode.memory_namespace if mode is not None else "default"
             bound = self._bound_mission
+            target = self._extract_target(args)
             if bound is None or bound["ns"] != ns:
                 mem = Memory(self.data_dir, namespace=ns)
-                target = self._extract_target(args)
                 mid = mem.new_mission(
                     target,
                     f"DSH 底层工具直调自动绑定"
                     f"（首工具 {name}，模式 {getattr(mode, 'id', 'default')}）")
                 bound = {"id": mid, "ns": ns, "target": target}
                 self._bound_mission = bound
+            elif target and bound["target"] and target != bound["target"]:
+                # 目标切换：收口旧任务、起新任务。内核进程按 session-key 跨
+                # DSH 会话复用（§8.5），绑定是进程级的——不重绑的话，下一个
+                # 靶的全部调用都会记到上一个靶头上（2026-09-26 矩阵实测：
+                # 十个会话挤进一条 126 步任务）。
+                mem = Memory(self.data_dir, namespace=bound["ns"])
+                try:
+                    mem.finish(bound["id"], "completed",
+                               "目标切换，自动绑定收口")
+                except Exception:  # noqa: BLE001 —— 收口失败不挡新任务
+                    pass
+                mid = mem.new_mission(
+                    target, f"DSH 底层工具直调自动绑定"
+                            f"（目标切换，首工具 {name}）")
+                bound = {"id": mid, "ns": ns, "target": target}
+                self._bound_mission = bound
             else:
                 mem = Memory(self.data_dir, namespace=bound["ns"])
                 # 首调可能不带目标信息（如 replay_request 只有 request_id）：
                 # 后续调用提取到 target 时回填（宁晚不缺）
-                if not bound["target"]:
-                    target = self._extract_target(args)
-                    if target:
-                        mem.set_target(bound["id"], target)
-                        bound["target"] = target
+                if not bound["target"] and target:
+                    mem.set_target(bound["id"], target)
+                    bound["target"] = target
             mem = Memory(self.data_dir, namespace=bound["ns"])
             rec = self.evidence.append("tool_call", {
                 "mission": bound["id"], "tool": name, "direct": True,

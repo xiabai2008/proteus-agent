@@ -284,8 +284,14 @@ async function main() {
   log(`spool rows=${mine.length} presetMatches=${presetOk} kernelToolCalls=${kernel.length}`)
   if (kernel.length) log('kernel tools seen: ' + [...new Set(kernel.map((r) => r.tool))].join(', '))
 
-  const spoolFlags = extractFlag(mine.map((r) => (r.output ?? '')).join('\n'))
-  if (spoolFlags) { flag = spoolFlags; log('flag from spool: ' + spoolFlags) }
+  // flag 只认**内核结果**（kind=result 且 mcp__proteus__* 的 output）：
+  // spool 同时记录宿主工具调用（read/glob 等），agent 读历史 writeup 会把
+  // 其它靶的 flag 带进来——2026-09-26 矩阵实测 8099 被最长匹配抽成 8094 的
+  // flag。内核回传（/note 外带、/flag.txt 读取）才是本题的判定依据。
+  const kernelOut = kernel.filter((r) => r.kind === 'result')
+    .map((r) => (r.output ?? '')).join('\n')
+  const spoolFlags = extractFlag(kernelOut)
+  if (spoolFlags) { flag = spoolFlags; log('flag from spool (kernel results only): ' + spoolFlags) }
 
   console.log('\n===== RESULT =====')
   console.log('target    : ' + WEB_TARGET)

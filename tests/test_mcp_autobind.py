@@ -49,7 +49,11 @@ def test_direct_call_creates_bound_mission(server):
 
 
 def test_direct_calls_append_steps(server):
-    """后续每次直调都挂到绑定任务上：步数累计、链上有 direct 记录。"""
+    """后续每次直调都挂到绑定任务上：步数累计、链上有 direct 记录。
+
+    目标端点不同（localhost 无端口 vs localhost:1）视为目标切换——
+    端点身份含端口（8090 与 8099 是不同的靶，不能混进一条任务）。
+    """
     _call(server, "tools/call",
           {"name": "dns_lookup", "arguments": {"domain": "localhost"}},
           msg_id=2)
@@ -57,16 +61,17 @@ def test_direct_calls_append_steps(server):
           {"name": "dns_lookup", "arguments": {"domain": "localhost"}},
           msg_id=3)
     _call(server, "tools/call",
-          {"name": "http_probe", "arguments": {"url": "http://127.0.0.1:1"}},
+          {"name": "http_probe", "arguments": {"url": "http://localhost:1"}},
           msg_id=4)
     missions = _payload(_call(server, "tools/call",
                               {"name": "pentest_missions"}, msg_id=5))
-    assert len(missions) == 1                    # 不重复建任务
-    assert [s["tool"] for s in missions[0]["steps"]] == [
-        "dns_lookup", "dns_lookup", "http_probe"]
-    assert all(s["direct"] for s in missions[0]["steps"])
+    by_target = {m["target"]: m for m in missions}
+    assert set(by_target) == {"localhost", "localhost:1"}
+    first = by_target["localhost"]
+    assert [s["tool"] for s in first["steps"]] == ["dns_lookup", "dns_lookup"]
+    assert first["outcome"] == "completed"       # 目标切换时旧任务收口
     # 链上留证：每步有 evidence_seq 且能对上
-    seqs = [s["evidence_seq"] for s in missions[0]["steps"]]
+    seqs = [s["evidence_seq"] for s in first["steps"]]
     assert all(isinstance(x, int) and x > 0 for x in seqs)
 
 
@@ -121,6 +126,31 @@ def test_target_backfilled_when_first_call_has_none(server):
     missions = _payload(_call(server, "tools/call",
                               {"name": "pentest_missions"}, msg_id=4))
     assert missions[0]["target"] == "127.0.0.1:8090"
+
+
+def test_target_switch_creates_new_mission(server):
+    """内核进程跨会话复用：目标变了要收口旧任务、起新任务（2026-09-26
+    矩阵实测：十个会话挤进一条 126 步任务——绑定是进程级的）。"""
+    _call(server, "tools/call",
+          {"name": "http_probe",
+           "arguments": {"url": "http://127.0.0.1:8090/"}}, msg_id=2)
+    first = server._bound_mission["id"]
+    _call(server, "tools/call",
+          {"name": "http_probe",
+           "arguments": {"url": "http://127.0.0.1:8099/pickle"}}, msg_id=3)
+    second = server._bound_mission["id"]
+    assert second != first
+    missions = _payload(_call(server, "tools/call",
+                              {"name": "pentest_missions"}, msg_id=4))
+    by_id = {m["id"]: m for m in missions}
+    assert by_id[first]["outcome"] == "completed"      # 旧任务收口
+    assert by_id[second]["target"] == "127.0.0.1:8099"
+    assert by_id[first]["target"] == "127.0.0.1:8090"
+    # 同目标重复调用不重绑
+    _call(server, "tools/call",
+          {"name": "http_probe",
+           "arguments": {"url": "http://127.0.0.1:8099/note"}}, msg_id=5)
+    assert server._bound_mission["id"] == second
 
 
 def test_trace_fail_open_never_breaks_tool(server, monkeypatch):
