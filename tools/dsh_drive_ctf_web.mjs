@@ -17,19 +17,26 @@ import { spawn } from 'node:child_process'
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // Node's global WebSocket (undici) ignores custom headers, so the auth cookie
 // cannot be set on the session/follow upgrade. Use the `ws` package instead
-// (exact e2e path), loaded via createRequire with an absolute path.
+// (exact e2e path), loaded via createRequire.
+//
+// 路径全部运行时推导（硬规则 7：入库文件不得含本机路径）。
 const require = createRequire(import.meta.url)
-const WS = require('C:/Users/HZR/.workbuddy/binaries/node/workspace/node_modules/ws')
-
-const REPO = 'D:/HZR_PROJECTS/proteus-agent'
-const DSH_DIR = 'D:/HZR_PROJECTS/deepseek-harness'
+const REPO = process.env.PENTEST_REPO
+  ?? dirname(dirname(fileURLToPath(import.meta.url)))
+const WS = require(process.env.PROTEUS_WS_MODULE
+  ?? join(homedir(), '.workbuddy/binaries/node/workspace/node_modules/ws'))
+const WS_ROOT = process.env.PENTEST_WS ?? dirname(REPO)
+const DSH_DIR = process.env.PENTEST_DSH_REPO ?? join(WS_ROOT, 'deepseek-harness')
 const BIN_JS = DSH_DIR + '/apps/cli/lib/bin.js'
 const PATCH = REPO + '/dsh/proteus.cordis.patch.yml'
-const DSH_HOME = 'C:/Users/HZR/.dsh'
-const NODE_BIN = 'C:/Users/HZR/.workbuddy/binaries/node/versions/22.22.2-3/node.exe'
+const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+const NODE_BIN = process.execPath
 const PRESET = 'proteus-ctf-web'
 const WEB_TARGET = 'http://127.0.0.1:8090'
 const SPOOL = REPO + '/data/dsh-events.jsonl'
@@ -50,7 +57,7 @@ for (const raw of readFileSync(REPO + '/.env', 'utf8').split('\n')) {
   const m = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/)
   if (m) overlay[m[1]] = m[2].trim()
 }
-const childEnv = { ...process.env, ...overlay, DSH_HOME, PENTEST_WS: 'D:/HZR_PROJECTS' }
+const childEnv = { ...process.env, ...overlay, DSH_HOME, PENTEST_WS: WS_ROOT }
 
 let child
 function cleanup() {

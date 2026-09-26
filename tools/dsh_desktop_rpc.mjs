@@ -5,9 +5,12 @@
 // cookie 铸法见 dsh_drive_ctf.mjs 的 forgeSessionCookie（同一实现）。
 import { readFileSync } from 'node:fs'
 import { createHash, createHmac } from 'node:crypto'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
-const DSH_HOME = 'C:/Users/HZR/.dsh'
-const ORIGIN = 'http://127.0.0.1:19387'
+// 路径运行时推导（硬规则 7：入库文件不得含本机路径）
+const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+const ORIGIN = process.env.DSH_ORIGIN ?? 'http://127.0.0.1:19387'
 
 function readSecret() {
   const text = readFileSync(DSH_HOME + '/.credentials.yaml', 'utf8')

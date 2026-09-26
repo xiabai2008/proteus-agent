@@ -3,12 +3,16 @@
 import { readFileSync } from 'node:fs'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 const require = createRequire(import.meta.url)
-const WS = require('C:/Users/HZR/.workbuddy/binaries/node/workspace/node_modules/ws')
+// 路径运行时推导（硬规则 7）：ws 模块与 DSH home 都从环境/主目录算
+const WS = require(process.env.PROTEUS_WS_MODULE
+  ?? join(homedir(), '.workbuddy/binaries/node/workspace/node_modules/ws'))
 
-const DSH_HOME = 'C:/Users/HZR/.dsh'
-const ORIGIN = 'http://127.0.0.1:19387'
+const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+const ORIGIN = process.env.DSH_ORIGIN ?? 'http://127.0.0.1:19387'
 const sessionId = process.argv[2]
 if (!sessionId) { console.error('usage: node dsh_follow_dump.mjs <sessionId>'); process.exit(1) }
 

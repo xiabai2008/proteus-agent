@@ -1,13 +1,17 @@
-"""DSH 接入同步器测试：每一条校验都要能独立触发。
+"""DSH 接入工具测试：每一条校验都要能独立触发。
 
-为什么值得测：这几条挡的都是**静默失效**——preset 少一个文件就整份从选择器里
-消失、安装副本过期就"跑旧代码"而毫无提示（实测踩中过：当天下午写的守卫因为
-副本停在上午而根本没上线）、`!!js` 写错就求值成 `[object Object]`、审计桥是
-普通目录副本就说明它不是仓库当前代码。它们坏掉时不会有人报错。
+为什么值得测：这几条挡的都是**静默失效**——bundle 里声明行写错或插件行用了
+`./x.mjs`，preset 就进不了选择器（界面零提示）；bundle 没重渲染就"跑旧代码"；
+`!!js` 写错就求值成 `[object Object]`；profile 没登记 bundle 就整个不加载。
+它们坏掉时不会有人报错。
+
+2026-09-26 载体迁移后判据换了对象：不再查 `$DSH_HOME/.agent-presets/` 下的安装
+副本（新版 DSH 已不读那个目录），改为查 **bundle 产物 + profile 接线 + 运行中
+DSH 的 roster**——即消费方真正会读到的东西。
 """
 import importlib.util
+import io
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,15 +27,6 @@ dsh_install = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dsh_install)
 
 
-def _preset_dir(tmp_path: Path, body: str) -> Path:
-    """假的安装副本目录（目录名必须是已知 preset id，drift/verify 才认）。"""
-    dst = tmp_path / "proteus-pentest"
-    dst.mkdir(parents=True, exist_ok=True)
-    (dst / "agent.cordis.yml").write_text(body, encoding="utf-8")
-    (dst / "preset.yml").write_text("name: t\n", encoding="utf-8")
-    return dst
-
-
 def _junction(link: Path, target: Path) -> bool:
     """建 Windows junction（测试用；非 Windows 或无权限时返回 False）。"""
     if sys.platform != "win32":
@@ -41,54 +36,114 @@ def _junction(link: Path, target: Path) -> bool:
     return proc.returncode == 0 and link.exists()
 
 
-# ----------------------------------------------------------------------
-# 结构校验
-# ----------------------------------------------------------------------
-def test_verify_accepts_installed_package_rows(tmp_path):
-    """包名行（@deepseek-ai/…）不做本地存在性检查——那是 roster 的活。"""
-    dst = _preset_dir(tmp_path, "- id: a\n  name: '@deepseek-ai/dsh-persona'\n")
-    assert dsh_install.verify_preset(dst) == []
+def _fake_bundle(tmp_path: Path, patch_body: str,
+                 exports: dict | None = None) -> Path:
+    """造一个最小 bundle 目录（声明行 + package.json）。"""
+    dst = tmp_path / "bundle"
+    dst.mkdir(parents=True, exist_ok=True)
+    (dst / "cordis.patch.yml").write_text(patch_body, encoding="utf-8")
+    (dst / "package.json").write_text(json.dumps({
+        "name": dsh_install.bundle.BUNDLE_NAME,
+        "exports": exports if exports is not None else {
+            f"./{key}": f"./{name}"
+            for name, key in dsh_install.bundle.SHARED_FILES.items()},
+        "dsh": {"bundle": {"patch": "./cordis.patch.yml"}},
+    }, ensure_ascii=False), encoding="utf-8")
+    return dst
 
 
-def test_verify_flags_missing_relative_plugin(tmp_path):
-    """相对 specifier 解析不到 = 整份 preset broken（最贵的一种静默失效）。"""
-    dst = _preset_dir(
-        tmp_path,
-        "- id: policy\n  name: './proteus-tools-policy.mjs'\n  config:\n    role: policy\n")
-    problems = dsh_install.verify_preset(dst)
-    assert any("相对 specifier" in p and "proteus-tools-policy.mjs" in p
+def _decl_problems(problems: list[str]) -> list[str]:
+    """只保留**声明行写法**类问题（滤掉产物同步类：那是另一个用例的活）。
+
+    `_fake_bundle` 造的补丁必然与渲染结果不同，所以 `bundle_problems` 一定会报
+    "缺少/已过期"——本组用例只关心声明行能不能被读懂。
+    """
+    noise = ("缺少", "已过期", "漂移")
+    return [p for p in problems if not any(n in p for n in noise)]
+
+
+def _decl(preset_id: str, plugins: str = "") -> str:
+    return (f"    - id: preset-{preset_id}\n"
+            f"      name: '@deepseek-ai/dsh-agent-preset'\n"
+            f"      config:\n"
+            f"        id: {preset_id}\n"
+            f"        plugins:\n{plugins}")
+
+
+def _all_declarations(plugins: str = "          - id: persona\n"
+                                     "            name: "
+                                     "'@deepseek-ai/dsh-persona'\n") -> str:
+    return ("- insert:\n"
+            + "".join(_decl(pid, plugins) for pid in dsh_install.PRESET_IDS))
+
+
+# ----------------------------------------------------------------------
+# 结构校验：bundle 自身
+# ----------------------------------------------------------------------
+def test_repo_bundle_passes_verification():
+    """仓库当前状态必须过检（回归锁）：三个声明 + 无相对行 + exports 齐全。"""
+    assert dsh_install.verify_bundle() == []
+
+
+def test_verify_accepts_bare_package_rows(tmp_path):
+    """裸包名行不做本地存在性检查——那是运行中 roster 的活。"""
+    dst = _fake_bundle(tmp_path, _all_declarations())
+    assert _decl_problems(dsh_install.verify_bundle(dst)) == []
+
+
+def test_verify_flags_relative_plugin_row(tmp_path):
+    """`./x.mjs` = 必然 broken（实测：相对基准是 profile 目录，不是 bundle 目录）。"""
+    plugins = ("          - id: persona\n"
+               "            name: './proteus-persona.mjs'\n")
+    dst = _fake_bundle(tmp_path, _all_declarations(plugins))
+    problems = dsh_install.verify_bundle(dst)
+    assert any("相对 specifier" in p and "proteus-persona.mjs" in p
                for p in problems), problems
-
-    (dst / "proteus-tools-policy.mjs").write_text("export function apply() {}\n",
-                                                  encoding="utf-8")
-    assert dsh_install.verify_preset(dst) == []
-
-
-def test_verify_flags_missing_required_file(tmp_path):
-    dst = _preset_dir(tmp_path, "- id: a\n  name: '@deepseek-ai/dsh-persona'\n")
-    (dst / "preset.yml").unlink()
-    assert any("preset.yml" in p for p in dsh_install.verify_preset(dst))
+    assert any("包自引用" in p for p in problems), problems
 
 
 def test_verify_flags_js_expression_with_colon(tmp_path):
     """`!!js` 尾部出现 ': ' 会被 YAML 拆成映射键（指南实测的坑）。"""
-    dst = _preset_dir(
-        tmp_path,
-        "- id: mcp\n  name: '@deepseek-ai/dsh-mcp-client'\n"
-        "  config:\n"
-        "    command: !!js (process.env.A || 'python') + '/python.exe'\n"
-        "    bad: !!js (process.env.A ? '/x' : '/y')\n")
-    problems = dsh_install.verify_preset(dst)
+    plugins = ("          - id: mcp\n"
+               "            name: '@deepseek-ai/dsh-mcp-client'\n"
+               "            config:\n"
+               "              command: !!js (process.env.A || 'python') + '/x'\n"
+               "              bad: !!js (process.env.A ? '/x' : '/y')\n")
+    dst = _fake_bundle(tmp_path, _all_declarations(plugins))
+    problems = dsh_install.verify_bundle(dst)
     assert any("!!js" in p and "': '" in p for p in problems), problems
 
 
 def test_verify_does_not_flag_comment_mentioning_the_pitfall(tmp_path):
-    """注释里写这个坑（含 ': ' 字样）不能被误报——preset 里就有这样的注释。"""
-    dst = _preset_dir(
-        tmp_path,
-        "# 注意：!!js 整行禁止出现 \": \"（冒号+空格会被 YAML 拆成映射键）\n"
-        "- id: a\n  name: '@deepseek-ai/dsh-persona'\n")
-    assert dsh_install.verify_preset(dst) == []
+    """注释里写这个坑（含 ': ' 字样）不能被误报——bundle 里就有这样的注释。"""
+    body = ("# 注意：!!js 整行禁止出现 \": \"（冒号+空格会被 YAML 拆成映射键）\n"
+            + _all_declarations())
+    dst = _fake_bundle(tmp_path, body)
+    assert _decl_problems(dsh_install.verify_bundle(dst)) == []
+
+
+def test_verify_flags_missing_declaration(tmp_path):
+    """少一个声明行 = 选择器里少一个入口，且没有任何提示。"""
+    only_two = "- insert:\n" + "".join(
+        _decl(pid, "          - id: p\n            name: '@x/y'\n")
+        for pid in dsh_install.PRESET_IDS[:2])
+    dst = _fake_bundle(tmp_path, only_two)
+    problems = dsh_install.verify_bundle(dst)
+    assert any(dsh_install.PRESET_IDS[2] in p and "缺声明行" in p
+               for p in problems), problems
+
+
+def test_verify_flags_missing_export(tmp_path):
+    """exports 缺一项 -> 包自引用解析不到 -> preset broken。"""
+    dst = _fake_bundle(tmp_path, _all_declarations(),
+                       exports={"./package.json": "./package.json"})
+    problems = dsh_install.verify_bundle(dst)
+    assert any("exports 缺" in p for p in problems), problems
+
+
+def test_bundle_problems_reports_missing_dir(tmp_path):
+    problems = dsh_install.bundle_problems(tmp_path / "nope")
+    assert problems and "不存在" in problems[0]
 
 
 def test_verify_patch_requires_all_three_tiers(tmp_path):
@@ -104,205 +159,112 @@ def test_verify_patch_requires_all_three_tiers(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# 漂移：跑旧代码的唯一可靠判据
+# profile 接线：bundle 是否被这个 profile 认领
 # ----------------------------------------------------------------------
-def test_drift_detects_stale_and_missing_files(tmp_path):
-    dst = tmp_path / "proteus-pentest"
-    dst.mkdir()
-    for name in ("agent.cordis.yml", "preset.yml"):
-        (dst / name).write_text("old\n", encoding="utf-8")
+def test_check_profile_wiring_reports_missing_profile(tmp_path):
+    problems = dsh_install.check_profile_wiring(tmp_path / "dsh", "desktop")
+    assert problems and "找不到 profile 清单" in problems[0]
 
-    problems = dsh_install.drift(dst)
+
+def test_check_profile_wiring_reports_missing_registration(tmp_path):
+    home = tmp_path / "dsh"
+    profile = home / "profiles" / "desktop"
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        json.dumps({"dependencies": {}, "dsh": {"profile": {"bundles": []}}}),
+        encoding="utf-8")
+
+    problems = dsh_install.check_profile_wiring(home, "desktop")
+    assert any("bundles 里没有" in p for p in problems), problems
+    assert any("dependencies 里没有" in p for p in problems), problems
+    assert any("install_bundle" in p for p in problems)      # 给出官方装法
+
+
+def test_check_profile_wiring_accepts_wired_profile(tmp_path):
+    home = tmp_path / "dsh"
+    profile = home / "profiles" / "desktop"
+    (profile / "node_modules").mkdir(parents=True)
+    (profile / "package.json").write_text(json.dumps({
+        "dependencies": {dsh_install.bundle.BUNDLE_NAME: "link:D:/ws/x"},
+        "dsh": {"profile": {"bundles": [dsh_install.bundle.BUNDLE_NAME]}},
+    }), encoding="utf-8")
+    (profile / "node_modules" / dsh_install.bundle.BUNDLE_NAME).mkdir()
+    assert dsh_install.check_profile_wiring(home, "desktop") == []
+
+
+def test_check_profile_wiring_flags_missing_module_link(tmp_path):
+    home = tmp_path / "dsh"
+    profile = home / "profiles" / "desktop"
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(json.dumps({
+        "dependencies": {dsh_install.bundle.BUNDLE_NAME: "link:D:/ws/x"},
+        "dsh": {"profile": {"bundles": [dsh_install.bundle.BUNDLE_NAME]}},
+    }), encoding="utf-8")
+    problems = dsh_install.check_profile_wiring(home, "desktop")
+    assert any("模块链接不存在" in p for p in problems), problems
+
+
+# ----------------------------------------------------------------------
+# 运行态 roster：判据落在**运行中的 DSH**（消费方视角）
+# ----------------------------------------------------------------------
+def test_roster_live_skips_without_credentials(tmp_path):
+    problems, note = dsh_install.roster_live(tmp_path, (1,))
+    assert problems == [] and "跳过" in note
+
+
+def test_roster_live_flags_missing_and_broken(tmp_path, monkeypatch):
+    def _fake_rpc(home, port, method, args=None):
+        return {"result": {"value": {"presets": [
+            {"id": "standard", "isDefault": True},
+            {"id": "proteus-pentest", "broken": "persona (./x.mjs): never started"},
+        ]}}}, ""
+
+    monkeypatch.setattr(dsh_install, "rpc_call", _fake_rpc)
+    problems, _ = dsh_install.roster_live(tmp_path, (1234,))
     joined = "\n".join(problems)
-    # 按内容断言而非硬数：清单随 preset 演进（新增 mjs 时不该挂）
-    assert "agent.cordis.yml 已过期" in joined
-    assert "preset.yml 已过期" in joined
-    assert "缺少 proteus-persona.mjs" in joined
-    assert "缺少 proteus-tools-policy.mjs" in joined
-    assert "缺少 proteus-commands.mjs" in joined
+    assert "proteus-ctf-web" in joined and "roster 里没有" in joined
+    assert "broken" in joined and "proteus-pentest" in joined
 
 
-def test_drift_flags_extra_file(tmp_path):
-    """多余文件（旧版本残留）也要报——三个 preset 并存时最容易留这种尾巴。"""
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
-    dst = home / ".agent-presets" / "proteus-pentest"
-    (dst / "proteus-legacy.mjs").write_text("// stale\n", encoding="utf-8")
-
-    joined = "\n".join(dsh_install.drift(dst))
-    assert "多余文件" in joined and "proteus-legacy.mjs" in joined
+def test_roster_live_ok_when_all_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(dsh_install, "rpc_call", lambda *a, **k: ({
+        "result": {"value": {"presets": [
+            {"id": pid, "isDefault": False} for pid in dsh_install.PRESET_IDS
+        ]}}}, ""))
+    problems, note = dsh_install.roster_live(tmp_path, (1234,))
+    assert problems == [] and "roster OK" in note
 
 
-def test_drift_reports_missing_directory(tmp_path):
-    assert "不存在" in dsh_install.drift(
-        tmp_path / "proteus-pentest")[0]
+def test_rpc_cookie_needs_browser_session_secret(tmp_path):
+    assert dsh_install._rpc_cookie(tmp_path, "http://127.0.0.1:1") is None
+    (tmp_path / ".credentials.yaml").write_text("other: x\n", encoding="utf-8")
+    assert dsh_install._rpc_cookie(tmp_path, "http://127.0.0.1:1") is None
 
-
-def test_install_syncs_and_is_idempotent(tmp_path):
-    home = tmp_path / "dsh"
-    notes = dsh_install.install(home)
-    assert any("已同步" in n for n in notes), notes
-    for preset_id in dsh_install.PRESETS:
-        dst = home / ".agent-presets" / preset_id
-        assert dsh_install.drift(dst) == [], preset_id
-        assert dsh_install.verify_preset(dst) == [], preset_id
-
-    again = dsh_install.install(home)
-    assert sum("已是最新" in n for n in again) == len(dsh_install.PRESETS), again
-
-
-def test_three_presets_differ_only_in_the_expected_places():
-    """P0-6：三个 preset 来自同一份模板——差异必须**只有**默认模式/人格/键。
-
-    这条挡的是"改了一个 preset 忘了另两个"：模板渲染保证这一点，用例只留一道
-    保险（直接对渲染产物做断言）。
-    """
-    rendered = {pid: dsh_install.render_composition(pid)
-                for pid in dsh_install.PRESETS}
-    our_tokens = ("{{PRESET_ID}}", "{{PRESET_LABEL}}", "{{DEFAULT_MODE}}",
-                  "{{PERSONA_PROMPT}}", "{{SESSION_KEY}}")
-    for pid, text in rendered.items():
-        cfg = dsh_install.PRESETS[pid]
-        for token in our_tokens:
-            assert token not in text, f"{pid} 渲染后仍有未替换占位符 {token}"
-        assert f"'{cfg['mode']}'" in text          # --default-mode 是本 preset 的
-        assert cfg["persona"] in text
-        assert cfg["session_key"] in text
-        assert "proteus-commands.mjs" in text      # 共享实现仍在行里
-
-    # 差异只在占位符位置：抹掉取值后三份应当逐字相同
-    def _blank(text: str) -> str:
-        for cfg in dsh_install.PRESETS.values():
-            for value in (cfg["mode"], cfg["persona"], cfg["session_key"],
-                          cfg["label"]):
-                text = text.replace(value, "@V@")
-        return text
-
-    blanks = {_blank(t) for t in rendered.values()}
-    assert len(blanks) == 1
-
-
-def test_shared_implementation_has_a_single_source():
-    """共享实现只允许在 `_shared/` 有一份——三份拷贝必然漂移。"""
-    shared = ROOT / "dsh" / ".agent-presets" / "_shared"
-    for name in dsh_install.SHARED_FILES:
-        assert (shared / name).is_file(), name
-    for pid in dsh_install.PRESETS:
-        preset_dir = ROOT / "dsh" / ".agent-presets" / pid
-        copies = [p.name for p in preset_dir.iterdir() if p.suffix == ".mjs"]
-        assert copies == [], f"{pid} 不应自带 .mjs 拷贝：{copies}"
-
-
-def test_migration_removes_legacy_single_preset(tmp_path):
-    """旧的单 preset 目录必须迁走：留着会出现"选了它却跑旧配置"的静默错配。"""
-    home = tmp_path / "dsh"
-    legacy = home / ".agent-presets" / "proteus"
-    legacy.mkdir(parents=True)
-    (legacy / "agent.cordis.yml").write_text(
-        "- id: persona\n  name: './proteus-persona.mjs'\n", encoding="utf-8")
-    (legacy / "proteus-persona.mjs").write_text("// old\n", encoding="utf-8")
-
-    notes = dsh_install.install(home)
-    assert any("迁移" in n for n in notes), notes
-    assert not legacy.exists()
-    assert list((home / "backups").glob("preset-proteus-*")), "迁移前应留备份"
-    # 别人的 preset（不含我们的标记）绝不动
-    other = home / ".agent-presets" / "liangshen"
-    other.mkdir()
-    (other / "agent.cordis.yml").write_text("- id: x\n", encoding="utf-8")
-    dsh_install.install(home)
-    assert other.is_dir()
-
-
-def test_install_replaces_a_link_with_a_real_directory(tmp_path):
-    """链接必须被摘掉：DSH 的发现机制不跟随 reparse point（实测 COUNT 2→1）。
-
-    摘链接用 `cmd rmdir`——PowerShell / Path.unlink 对 junction 有递归删目标的风险，
-    所以这条同时断言**目标文件还在**。
-    """
-    home = tmp_path / "dsh"
-    dst = home / ".agent-presets" / "proteus-pentest"
-    dst.parent.mkdir(parents=True)
-    src = tmp_path / "real"
-    src.mkdir()
-    (src / "keep.txt").write_text("target must survive\n", encoding="utf-8")
-    if not _junction(dst, src):
-        pytest.skip("本机建不了 junction，跳过链接替换用例")
-
-    notes = dsh_install.install(home)
-    assert any("移除原有链接" in n for n in notes), notes
-    assert not dsh_install._is_reparse_point(dst)
-    assert (src / "keep.txt").is_file(), "摘链接时把目标内容删了"
-    assert dsh_install.drift(dst) == []
-
-
-def test_backup_lives_outside_the_preset_root(tmp_path):
-    """备份不能放在 preset 根目录里——那会被发现机制当成一个 preset。"""
-    home = tmp_path / "dsh"
-    dst = home / ".agent-presets" / "proteus-pentest"
-    dst.mkdir(parents=True)
-    (dst / "agent.cordis.yml").write_text("stale\n", encoding="utf-8")
-    (dst / "preset.yml").write_text("stale\n", encoding="utf-8")
-
-    dsh_install.install(home)
-    backups = list((home / "backups").glob("preset-proteus-pentest-*"))
-    assert len(backups) == 1
-    assert (backups[0] / "agent.cordis.yml").read_text(encoding="utf-8") == "stale\n"
-    # preset 根里只应有三个预设目录
-    assert sorted(p.name for p in (home / ".agent-presets").iterdir()) == \
-        sorted(dsh_install.PRESETS)
-
-
-def test_backup_keeps_only_the_newest_three(tmp_path):
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
-    dst = home / ".agent-presets" / "proteus-pentest"
-    for i in range(5):
-        (dst / "preset.yml").write_text(f"v{i}\n", encoding="utf-8")
-        dsh_install.install(home)
-    assert len(list((home / "backups").glob("preset-proteus-pentest-*"))) <= 3
-
-
-def test_check_fails_on_drift(tmp_path, capsys):
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
-    dst = home / ".agent-presets" / "proteus-pentest"
-    (dst / "proteus-tools-policy.mjs").write_text("// stale\n", encoding="utf-8")
-
-    rc = dsh_install.main(["--home", str(home), "--check", "--no-roster",
-                           "--no-bundle-check"])
-    out = capsys.readouterr().out
-    assert rc == 1
-    assert "与仓库不同步" in out and "已过期" in out
-    assert "[proteus-pentest]" in out                # 指出是哪个 preset
-    assert "python tools/dsh_install.py" in out      # 给出修复命令
+    (tmp_path / ".credentials.yaml").write_text(
+        "client-connection/browser-session:\n  secret: abc-_def\n",
+        encoding="utf-8")
+    cookie = dsh_install._rpc_cookie(tmp_path, "http://127.0.0.1:1")
+    assert cookie and cookie.startswith("dsh-auth-") and cookie.count(".") == 2
 
 
 # ----------------------------------------------------------------------
 # 运行态：改了的代码在**正在跑的进程**里生效了吗（Node 的 ESM 缓存不重启不更新）
 # ----------------------------------------------------------------------
-def test_live_check_flags_process_older_than_installed_files(tmp_path, monkeypatch):
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
-    dirs = dsh_install.installed_dirs(home)
+def test_live_check_flags_process_older_than_bundle_files(monkeypatch):
     monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: [
         {"pid": 25904, "start": "2020-01-01T00:00:00", "cmd": "x"}])
-
-    problems = dsh_install.live_check("web", dirs)
+    problems = dsh_install.live_check("web", dsh_install.runtime_dirs())
     assert len(problems) == 1
     assert "pid=25904" in problems[0] and "ESM 缓存" in problems[0]
 
 
-def test_live_check_passes_when_process_started_after_files(tmp_path, monkeypatch):
+def test_live_check_passes_when_process_started_after_files(monkeypatch):
     import datetime
 
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
-    dirs = dsh_install.installed_dirs(home)
     future = (datetime.datetime.now() + datetime.timedelta(minutes=1)).isoformat()
     monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: [
         {"pid": 1, "start": future, "cmd": "x"}])
-    assert dsh_install.live_check("web", dirs) == []
+    assert dsh_install.live_check("web", dsh_install.runtime_dirs()) == []
 
 
 def test_live_check_skips_without_running_process(tmp_path, monkeypatch):
@@ -327,8 +289,8 @@ def test_verify_launcher_flags_lf_only_cmd(tmp_path):
 
 
 def test_repo_launcher_is_crlf():
-    """仓库里那份必须过检——否则用户双击就是"没反应"。"""
-    assert dsh_install.verify_launcher() == []
+    """仓库里**所有** .cmd 启动器都必须过检——否则用户双击就是"没反应"。"""
+    assert dsh_install.verify_launchers() == []
 
 
 def test_env_file_value_and_workspace_root(tmp_path, monkeypatch):
@@ -457,26 +419,67 @@ def test_parse_start_handles_net_and_garbage():
 
 
 # ----------------------------------------------------------------------
+# main：出问题要非零退出，并给出**可执行**的修复指引
+# ----------------------------------------------------------------------
+def test_check_fails_when_bundle_out_of_sync(monkeypatch, capsys):
+    monkeypatch.setattr(dsh_install, "verify_bundle",
+                        lambda *a, **k: ["cordis.patch.yml 已过期（来源改了但没重渲染）"])
+    monkeypatch.setattr(dsh_install, "verify_launcher", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "verify_patch", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "verify_gate_consistency", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "check_profile_wiring", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "roster_live",
+                        lambda *a, **k: ([], "跳过 roster 检查"))
+
+    rc = dsh_install.main(["--check", "--no-live", "--no-bundle-check",
+                           "--home", str(ROOT)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "已过期" in out
+    assert "render_preset_bundle.py" in out          # 给出修复命令
+
+
+def test_check_reports_roster_note(monkeypatch, capsys):
+    monkeypatch.setattr(dsh_install, "verify_bundle", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "verify_launcher", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "verify_patch", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "verify_gate_consistency", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "check_profile_wiring", lambda *a, **k: [])
+    monkeypatch.setattr(dsh_install, "roster_live",
+                        lambda *a, **k: ([], "roster OK（7 个 preset）"))
+
+    rc = dsh_install.main(["--check", "--no-live", "--no-bundle-check",
+                           "--home", str(ROOT)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "roster OK" in out and "接入健康" in out
+
+
+# ----------------------------------------------------------------------
 # --restart：已有实例在跑时，双击启动器必须真的重启（而不是起一个注定失败的第二实例）
 # ----------------------------------------------------------------------
 def _stub_running(monkeypatch, procs):
     monkeypatch.setattr(dsh_install, "running_dsh", lambda profile: procs)
 
 
+def _stub_checks(monkeypatch):
+    """把与 --restart 无关的检查全部置空（跑的是重启流程，不是体检）。"""
+    for name in ("verify_bundle", "verify_patch", "verify_gate_consistency",
+                 "verify_launcher", "check_profile_wiring"):
+        monkeypatch.setattr(dsh_install, name, lambda *a, **k: [])
+
+
 def test_restart_aborts_when_ask_declined(tmp_path, monkeypatch, capsys):
     """`--ask` 且拿不到确认时不能关进程；但必须明说"什么都没做"。"""
-    import io
-
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
     _stub_running(monkeypatch, [{"pid": 25904, "start": "", "cmd": ""}])
+    _stub_checks(monkeypatch)
     killed: list = []
     monkeypatch.setattr(dsh_install, "terminate_dsh",
                         lambda procs: killed.append(procs) or [])
     monkeypatch.setattr(dsh_install.sys, "stdin", io.StringIO(""))  # isatty() = False
 
-    rc = dsh_install.main(["--home", str(home), "--restart", "--ask",
-                           "--no-roster", "--no-bundle-check", "--no-live"])
+    rc = dsh_install.main(["--home", str(tmp_path), "--restart", "--ask",
+                           "--check", "--no-roster", "--no-live",
+                           "--no-bundle-check"])
     out = capsys.readouterr().out
     assert rc == 1 and killed == []
     assert "EADDRINUSE" in out and "已取消" in out
@@ -488,8 +491,6 @@ def test_confirm_never_raises_on_broken_stdin(monkeypatch):
     实测教训：双击启动器那次就是 `input()` 抛 EOFError、整个流程崩栈——
     重启没发生，人还以为发生了。
     """
-    import io
-
     monkeypatch.setattr(dsh_install.sys, "stdin", io.StringIO(""))
     assert dsh_install._confirm() is False
 
@@ -507,9 +508,8 @@ def test_confirm_never_raises_on_broken_stdin(monkeypatch):
 
 
 def test_restart_kills_then_continues(tmp_path, monkeypatch, capsys):
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
     _stub_running(monkeypatch, [{"pid": 1, "start": "", "cmd": ""}])
+    _stub_checks(monkeypatch)
     killed: list = []
     monkeypatch.setattr(dsh_install, "terminate_dsh",
                         lambda procs: killed.append(procs) or ["已结束 DSH 进程 pid=1"])
@@ -517,51 +517,46 @@ def test_restart_kills_then_continues(tmp_path, monkeypatch, capsys):
                         lambda procs, profile="web", timeout=15.0: True)
 
     # 默认**不问**：双击启动器就是"启动"的明确意图，问一句只会多一个失败点
-    rc = dsh_install.main(["--home", str(home), "--restart",
-                           "--no-roster", "--no-bundle-check", "--no-live"])
+    rc = dsh_install.main(["--home", str(tmp_path), "--restart", "--check",
+                           "--no-roster", "--no-live", "--no-bundle-check"])
     out = capsys.readouterr().out
     assert rc == 0 and len(killed) == 1
     assert "端口已释放" in out
 
 
 def test_restart_is_noop_without_running_instance(tmp_path, monkeypatch):
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
     _stub_running(monkeypatch, [])
+    _stub_checks(monkeypatch)
     killed: list = []
     monkeypatch.setattr(dsh_install, "terminate_dsh",
                         lambda procs: killed.append(procs) or [])
 
-    rc = dsh_install.main(["--home", str(home), "--restart", "--no-roster",
-                           "--no-bundle-check", "--no-live"])
+    rc = dsh_install.main(["--home", str(tmp_path), "--restart", "--check",
+                           "--no-roster", "--no-live", "--no-bundle-check"])
     assert rc == 0 and killed == []
 
 
 def test_restart_stops_if_process_survives(tmp_path, monkeypatch, capsys):
     """杀了但没退出：必须停住报错，绝不能接着起第二个实例（又会撞端口）。"""
-    home = tmp_path / "dsh"
-    dsh_install.install(home)
     _stub_running(monkeypatch, [{"pid": 1, "start": "", "cmd": ""}])
+    _stub_checks(monkeypatch)
     monkeypatch.setattr(dsh_install, "terminate_dsh", lambda procs: ["killed"])
     monkeypatch.setattr(dsh_install, "wait_gone",
                         lambda procs, profile="web", timeout=15.0: False)
 
-    rc = dsh_install.main(["--home", str(home), "--restart",
-                           "--no-roster", "--no-bundle-check", "--no-live"])
+    rc = dsh_install.main(["--home", str(tmp_path), "--restart", "--check",
+                           "--no-roster", "--no-live", "--no-bundle-check"])
     out = capsys.readouterr().out
     assert rc == 1 and "未在 15 秒内退出" in out
 
 
-# ----------------------------------------------------------------------
-# 审计桥接线
-# ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 # R-13：内层 ask 档被抬起时，外层必须还有"会问人"的档位
 # ----------------------------------------------------------------------
 def _preset_with_args(tmp_path, args: list[str]) -> Path:
     p = tmp_path / "agent.cordis.yml"
     p.write_text("- id: mcp-proteus\n  name: '@deepseek-ai/dsh-mcp-client'\n"
-                 f"  config:\n    args: {args}\n".replace("'", "'"),
+                 f"  config:\n    args: {args}\n",
                  encoding="utf-8")
     return p
 
@@ -597,10 +592,40 @@ def test_gate_consistency_ignores_preset_without_authorize(tmp_path):
 
 
 def test_repo_gate_consistency_holds():
-    """仓库当前状态必须过检（回归锁）：preset 带 --authorize，补丁里三档含 ask。"""
+    """仓库当前状态必须过检（回归锁）：bundle 里带 --authorize，补丁里三档含 ask。
+
+    这条同时钉住"bundle 补丁的嵌套结构也读得到 args"——声明行在 `insert` 之下、
+    MCP 行又在 `config.plugins` 之下，平铺读顶层行会漏掉它（那样这条检查会永远
+    "通过"，等于没有）。
+    """
     assert dsh_install.verify_gate_consistency() == []
 
 
+def test_gate_consistency_reads_nested_bundle_rows(tmp_path):
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "cordis.patch.yml").write_text(
+        "- insert:\n"
+        "    - id: preset-x\n"
+        "      name: '@deepseek-ai/dsh-agent-preset'\n"
+        "      config:\n"
+        "        id: x\n"
+        "        plugins:\n"
+        "          - id: mcp-proteus\n"
+        "            name: '@deepseek-ai/dsh-mcp-client'\n"
+        "            config:\n"
+        "              args: ['-m', 'penagent', '--authorize']\n",
+        encoding="utf-8")
+    patch = tmp_path / "patch.yml"
+    patch.write_text("proteus-ctf:\n  approval: never\n", encoding="utf-8")
+    problems = dsh_install.verify_gate_consistency(
+        bundle_dir / "cordis.patch.yml", patch)
+    assert len(problems) == 1 and "approval: ask" in problems[0]
+
+
+# ----------------------------------------------------------------------
+# 审计桥接线（web profile 的独立 bundle）
+# ----------------------------------------------------------------------
 def test_check_bundle_reports_missing_wiring(tmp_path):
     home = tmp_path / "dsh"
     web = home / "profiles" / "web"
@@ -646,3 +671,18 @@ def test_check_bridge_entry_accepts_link(tmp_path):
 def test_check_bridge_entry_reports_missing(tmp_path):
     problems = dsh_install.check_bridge_entry(tmp_path / "dsh", "web")
     assert any("不存在" in p for p in problems)
+
+
+def test_shared_implementation_has_a_single_source():
+    """共享实现只允许在 `_shared/` 有一份——拷贝必然漂移。
+
+    bundle 里的四份是**逐字节副本**（Node 的 exports 不允许指向包外），
+    由 test_preset_bundle.py 钉住不漂移；模式目录本身不得自带 .mjs。
+    """
+    shared = ROOT / "dsh" / ".agent-presets" / "_shared"
+    for name in dsh_install.SHARED_FILES:
+        assert (shared / name).is_file(), name
+    for preset_id in dsh_install.PRESETS:
+        preset_dir = ROOT / "dsh" / ".agent-presets" / preset_id
+        copies = [p.name for p in preset_dir.iterdir() if p.suffix == ".mjs"]
+        assert copies == [], f"{preset_id} 不应自带 .mjs 拷贝：{copies}"

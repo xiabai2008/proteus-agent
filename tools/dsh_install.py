@@ -1,62 +1,84 @@
-"""把 Proteus 的 DSH 宿主接入同步到本机，并做机制性校验。
+"""把 Proteus 的 agent preset 渲染成 bundle，并按**消费方视角**校验接入。
 
-**为什么是"复制 + 同步"而不是链接**（2026-09-22 真机实测，推翻了本工具的第一版设计）：
-DSH 的 preset 发现机制**不跟随 reparse point**。把
-`$DSH_HOME/.agent-presets/proteus` 建成 junction 之后，`discoverPresets` 的返回
-从 2 个 preset 变成 1 个——proteus 直接**从选择器里消失**（无任何提示）。所以
-preset 目录必须是**真实目录**，靠"每次启动前同步 + 漂移校验"保证它等于仓库。
+**2026-09-26 载体迁移（本文件第二版）**：安装版 DSH 0.1.7-rc.2 起，
+`$DSH_HOME/.agent-presets/<id>/` 目录发现机制已被移除——安装版随附文档原文：
+*"Before declaration rows, a user preset was a directory … Nothing reads that
+directory any more."* preset 改为 `@deepseek-ai/dsh-agent-preset` 声明行，
+由 **bundle 补丁**承载，用 `plugin_manager` `install_bundle` 装进 profile。
 
-（bundle 层不受此限：它由 Node 的模块解析从 `node_modules` 加载，所以官方
-`link:` 依赖 + junction 是正确形态——见 `check_bridge_entry`。）
+三条**真机实测**出来的解析规则（探针对照，2026-09-26；详见
+docs/DSH主体化交付说明.md「桌面端 preset 载体」一节）：
 
-本工具挡三类**静默失效**：
+1. bundle 补丁里插入声明行 → 生效；裸包名（`@deepseek-ai/dsh-*`）可解析；
+2. `./x.mjs` 相对行的解析基准是 **profile 目录**，不是 bundle 目录
+   （文件只在 bundle 里 → `broken: "never started"`；只在 profile 里 → 正常）；
+3. **包自引用子路径**（`<包名>/<exports 子路径>`）可解析 —— 本仓库采用这条，
+   四个共享插件因此留在 bundle 内，profile 目录不再需要副本。
 
-1. **跑旧代码**：安装副本落后于仓库时，会话照常起得来、行为却停在旧版。实测踩中过
-   ——09-22 上午装的副本让当天下午写的内核缺位守卫**根本没上线**。`--check` 比对
-   每个文件的哈希，过期即报。
-2. **漏拷一个文件 = preset 静默消失**：`dsh-agent-presets` 对 preset 行只解析
-   "本目录相对文件"或已装包；少一个 `.mjs` 就得到 `broken=…`，而 **broken 的
-   preset 不进选择器、界面零提示**。
-3. **roster 覆盖不到行 config**：它只看行的 `name`，不评估 `!!js`、不看
-   `command`/`cwd`。这里额外拦掉 `!!js` 行尾部出现 `": "`——会被 YAML 拆成
-   映射键、求值成 `[object Object]`。
+据此，本工具的职责收敛为两件事：
+
+* **渲染**：`tools/render_preset_bundle.py` 从 `dsh/.agent-presets/_shared/` 生成
+  `dsh/proteus-presets/`（三个声明 + 一条 host 平面审计行）；
+* **校验**：不再查"安装副本 vs 仓库"，而是查**消费方真会读到什么**——
+  bundle 与来源一致、声明行齐全且不含必然 broken 的写法、profile 清单已登记该
+  bundle、以及**运行中 DSH 的 roster** 里三个 preset 都在且没有 broken。
+
+安装本身由 DSH 自己完成（官方文档明确要求不要用 shell 复现那一步）：
+
+    plugin_manager → action: install_bundle → target: <仓库>/dsh/proteus-presets
 
 用法（仓库根执行）：
 
-    python tools/dsh_install.py             # 同步（幂等）+ 校验 + roster 健康检查
+    python tools/dsh_install.py             # 渲染 bundle + 校验（幂等）
     python tools/dsh_install.py --check     # 只检查，不改动；有问题即非零退出
-    python tools/dsh_install.py --profile web --no-bundle-check
+    python tools/dsh_install.py --profile desktop --roster-port 19387
 
-备份：同步前若有文件要改，先把改动前的副本存到
-`$DSH_HOME/backups/preset-proteus-<时间戳>/`（**不能放在 preset 根目录里**——那会
-被发现机制当成一个 preset）。只保留最近 3 份。
-
-退出码：0 = 健康；1 = 有未决问题；2 = 前提缺失（无 node / 无 profile）导致无法判定。
+退出码：0 = 健康；1 = 有未决问题。
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import hmac
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 REPO = Path(__file__).resolve().parent.parent
-SRC_ROOT = REPO / "dsh" / ".agent-presets"
-SHARED = SRC_ROOT / "_shared"
-TEMPLATE = SHARED / "agent.cordis.template.yml"
-SHARED_FILES = ("proteus-persona.mjs", "proteus-tools-policy.mjs",
-                "proteus-commands.mjs", "proteus-supervisor.mjs")
+BUNDLE_DIR = REPO / "dsh" / "proteus-presets"
 PATCH = REPO / "dsh" / "proteus.cordis.patch.yml"
 BRIDGE_NAME = "dsh-proteus-bridge"
 BRIDGE_SRC = REPO / "dsh" / "proteus-bridge"
-REQUIRED_FILES = ("preset.yml", "agent.cordis.yml")
 PROTECTED_TIERS = ("proteus-safe", "proteus-standard", "proteus-ctf")
-KEEP_BACKUPS = 3
+PRESET_IDS = ("proteus-pentest", "proteus-ctf-web", "proteus-ctf-crypto")
+
+
+def _load_renderer():
+    """按路径加载渲染器（同目录的兄弟模块，不依赖 sys.path 上有 tools/）。"""
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "render_preset_bundle.py"
+    spec = importlib.util.spec_from_file_location("render_preset_bundle", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)                 # type: ignore[union-attr]
+    return mod
+
+
+bundle = _load_renderer()
+# 模式取值以渲染器为唯一来源（此处只是别名——不再自己维护第二份 PRESETS）。
+# 键名保持 dict 形态：调用方按 `cfg["mode"]` 等取值。
+PRESETS: dict[str, dict[str, str]] = {cfg["id"]: cfg for cfg in bundle.PRESETS}
+SHARED_FILES: tuple[str, ...] = tuple(bundle.SHARED_FILES)
 
 # 三个 preset（P0-6，2026-09-24 拍板 D1/D2）：同一份模板 + 同一份共享实现，
 # 差异只有"默认模式 / 人格文件 / 会话状态键 / 显示名与排序"。
@@ -82,47 +104,28 @@ PRESETS: dict[str, dict[str, str]] = {
 }
 
 
-def render_composition(preset_id: str) -> str:
-    """渲染 preset 组合文件（模板 + 该 preset 的取值）。
+def bundle_problems(bundle_dir: Path = BUNDLE_DIR) -> list[str]:
+    """bundle 产物 vs `_shared/` 来源——判据同渲染器 `--check`（跑旧代码的防线）。
 
-    为什么用模板而不是三份拷贝（P0-6）：组合文件是官方 standard preset 的
-    fork（300+ 行），DSH 升级时要重新合成——三份拷贝就是三次合成、三处漂移。
-    差异只有四个占位符，渲染是纯字符串替换（`!!js` 行原样保留）。
+    渲染器是唯一来源：模板改了、插件改了而 bundle 没重渲染，这里就报出来。
+    四个共享插件按**字节**比对（它们是副本，编解码会改行尾）。
     """
-    cfg = PRESETS[preset_id]
-    text = TEMPLATE.read_text(encoding="utf-8")
-    for token, value in (
-        ("{{PRESET_ID}}", preset_id),
-        ("{{PRESET_LABEL}}", cfg["label"]),
-        ("{{DEFAULT_MODE}}", cfg["mode"]),
-        ("{{PERSONA_PROMPT}}", cfg["persona"]),
-        ("{{SESSION_KEY}}", cfg["session_key"]),
-    ):
-        text = text.replace(token, value)
-    return text
-
-
-def expected_files(preset_id: str) -> dict[str, str]:
-    """安装副本应有的全部文件内容（键 = 文件名）。
-
-    共享实现 `_shared/*.mjs` 按 preset 拷进去（DSH 只认"本目录相对文件"），
-    但**单一实现来源**在 `_shared/`——避免同一份代码三份拷贝各自漂移。
-    渲染后仍有未替换的占位符 = 模板写漏，直接报出来。
-    """
-    files = {name: (SHARED / name).read_text(encoding="utf-8")
-             for name in SHARED_FILES}
-    files["agent.cordis.yml"] = render_composition(preset_id)
-    files["preset.yml"] = (SRC_ROOT / preset_id / "preset.yml").read_text(
-        encoding="utf-8")
-    return files
-
-ROSTER_JS = """
-import { discoverPresets } from '@deepseek-ai/dsh-agent-presets'
-import { pathToFileURL } from 'node:url'
-const roots = [{ path: %s, trust: 'user' }]
-const found = await discoverPresets(roots, pathToFileURL(process.cwd() + '/x').href)
-for (const p of found) console.log(JSON.stringify({ id: p.id, broken: p.broken ?? null }))
-"""
+    problems: list[str] = []
+    if not bundle_dir.is_dir():
+        return [f"bundle 目录不存在：{bundle_dir}（跑：python tools/render_preset_bundle.py）"]
+    for name, want in bundle.expected_files().items():
+        target = bundle_dir / name
+        if not target.is_file():
+            problems.append(f"缺少 {name}（仓库里有）")
+        elif target.read_text(encoding="utf-8") != want:
+            problems.append(f"{name} 已过期（来源改了但没重渲染）")
+    for name in bundle.copy_files():
+        target = bundle_dir / name
+        if not target.is_file():
+            problems.append(f"缺少 {name}（仓库里有）")
+        elif target.read_bytes() != (Path(bundle.SHARED) / name).read_bytes():
+            problems.append(f"{name} 与 _shared/ 实现漂移")
+    return problems
 
 
 def dsh_home(override: str = "") -> Path:
@@ -150,31 +153,19 @@ def _is_reparse_point(path: Path) -> bool:
     return bool(attrs & reparse)
 
 
-def drift(dst: Path, preset_id: str = "") -> list[str]:
-    """安装副本 vs 仓库的逐文件差异——"跑旧代码"的唯一可靠判据。
+def _walk_dicts(node):
+    """递归遍历 YAML 结构里的所有 dict。
 
-    `preset_id` 为空时按 `dst.name` 推断（调用方通常只给目录）。
+    bundle 补丁把声明行嵌在 `insert` 之下、子插件又嵌在 `config.plugins` 之下，
+    所以逐层看顶层行是不够的（旧的 preset 组合文件才是平铺的）。
     """
-    preset_id = preset_id or dst.name
-    if preset_id not in PRESETS:
-        return [f"未知 preset：{preset_id}"]
-    problems: list[str] = []
-    if not dst.is_dir():
-        return [f"preset 目录不存在：{dst}"]
-    expected = expected_files(preset_id)
-    for name, text in expected.items():
-        target = dst / name
-        if not target.is_file():
-            problems.append(f"缺少 {name}（仓库里有）")
-        elif target.read_text(encoding="utf-8") != text:
-            problems.append(
-                f"{name} 已过期（安装 {target.stat().st_size} 字节 / "
-                f"仓库 {len(text.encode('utf-8'))} 字节）")
-    for stale in dst.iterdir():
-        if stale.is_file() and stale.name not in expected:
-            problems.append(f"{stale.name} 是多余文件（仓库里没有）——"
-                            f"旧版本残留？")
-    return problems
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk_dicts(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_dicts(item)
 
 
 def _yaml_rows(path: Path) -> list[dict]:
@@ -202,55 +193,70 @@ def _yaml_rows_text(text: str) -> list[dict]:
     return [row for row in (data or []) if isinstance(row, dict)]
 
 
-def verify_preset(dst: Path, preset_id: str = "") -> list[str]:
-    """校验装好的 preset 目录（经**目标路径**读，漏拷文件也抓得到）。"""
-    preset_id = preset_id or dst.name
-    problems: list[str] = []
-    if preset_id not in PRESETS:
-        return [f"未知 preset：{preset_id}"]
-    for name in REQUIRED_FILES:
-        if not (dst / name).is_file():
-            problems.append(
-                f"缺少必需文件 {name}（preset 会 broken，且在选择器里静默消失）")
-    # 模板渲染漏替换的占位符：会让行 config 变成字面量（静默失效）
-    rendered = dst / "agent.cordis.yml"
-    if rendered.is_file():
-        text = rendered.read_text(encoding="utf-8")
-        for token in ("{{PRESET_ID}}", "{{PRESET_LABEL}}", "{{DEFAULT_MODE}}",
-                      "{{PERSONA_PROMPT}}", "{{SESSION_KEY}}"):
-            if token in text:
-                problems.append(
-                    f"agent.cordis.yml 里还有未替换的占位符 {token}"
-                    f"（模板渲染漏了 token）")
-    cfg = dst / "agent.cordis.yml"
-    if not cfg.is_file():
-        return problems
+def verify_bundle(bundle_dir: Path = BUNDLE_DIR) -> list[str]:
+    """bundle 自身的可机检不变量（每条都对应一种"静默失效"）。
 
-    # 先扫原始行：`!!js` 里出现 ": " 时 **YAML 自己就解析不过**。若先解析，报出来的
-    # 是一句泛泛的 "mapping values are not allowed here"，真正的原因会被盖掉。
-    text = cfg.read_text(encoding="utf-8")
+    为什么判据落在这份文件上：`install_bundle` 装进去的就是它——声明行的写法
+    决定 preset 能不能进选择器，而**失败的 preset 只是不进列表、界面零提示**。
+    """
+    problems = bundle_problems(bundle_dir)
+    patch = bundle_dir / "cordis.patch.yml"
+    if not patch.is_file():
+        return problems
+    text = patch.read_text(encoding="utf-8")
+
+    # 1) 三个声明行齐全（少一个 = 选择器里少一个入口，且没有任何提示）
+    for preset_id in PRESET_IDS:
+        if f"    - id: preset-{preset_id}\n" not in text:
+            problems.append(f"bundle 里缺声明行 preset-{preset_id}"
+                            f"（该场景不会出现在选择器里）")
+
+    # 2) 渲染漏占位符 = 行 config 变字面量
+    for token in ("{{PRESET_ID}}", "{{PRESET_LABEL}}", "{{DEFAULT_MODE}}",
+                  "{{PERSONA_PROMPT}}", "{{SESSION_KEY}}"):
+        if token in text:
+            problems.append(f"bundle 补丁里还有未替换的占位符 {token}")
+
+    # 3) `!!js` 尾部出现 ": " 会被 YAML 拆成映射键（求值得到 [object Object]）。
+    #    先扫原始行：YAML 自己解析失败时报的是泛泛的
+    #    "mapping values are not allowed here"，真正的原因会被盖掉。
     for lineno, line in enumerate(text.splitlines(), 1):
         if line.lstrip().startswith("#") or "!!js" not in line:
             continue
         if ": " in line.split("!!js", 1)[1]:
             problems.append(
-                f"第 {lineno} 行的 !!js 表达式含 ': '（YAML 会拆成映射键，"
+                f"bundle 第 {lineno} 行的 !!js 表达式含 ': '（YAML 会拆成映射键，"
                 f"求值得到 [object Object]）：{line.strip()[:70]}")
 
     try:
-        rows = _yaml_rows(cfg)
+        rows = _yaml_rows(patch)
     except Exception as exc:                      # noqa: BLE001 - 解析失败本身要报
-        problems.append(f"agent.cordis.yml 解析失败：{exc}")
+        problems.append(f"bundle 补丁解析失败：{exc}")
         return problems
 
-    for row in rows:
+    # 4) 绝不允许 './x.mjs' 相对行：实测解析基准是 **profile 目录**，bundle 内的
+    #    相对行必然 broken（"never started"），且 broken 的 preset 不进选择器。
+    for row in _walk_dicts(rows):
         spec = row.get("name")
         if not isinstance(spec, str) or not spec.startswith(("./", "../")):
             continue
-        if not (dst / spec).resolve().exists():
-            problems.append(
-                f"行 {row.get('id')!r} 的相对 specifier 解析不到：{spec}"
-                f"（该行会让整个 preset broken）")
+        problems.append(
+            f"bundle 插件行 {row.get('id')!r} 用了相对 specifier {spec}"
+            f"——新机制下按 profile 目录解析，必然 broken；"
+            f"应改为包自引用子路径（{bundle.BUNDLE_NAME}/<key>）")
+
+    # 5) exports 必须覆盖四个插件（包自引用能解析的前提）
+    pkg = bundle_dir / "package.json"
+    if pkg.is_file():
+        try:
+            exports = json.loads(pkg.read_text(encoding="utf-8"))["exports"]
+        except Exception as exc:                  # noqa: BLE001
+            problems.append(f"package.json 读不出 exports：{exc}")
+        else:
+            for key in bundle.SHARED_FILES.values():
+                if f"./{key}" not in exports:
+                    problems.append(f"package.json 的 exports 缺 ./{key}"
+                                    f"（对应插件行解析不到，preset 会 broken）")
     return problems
 
 
@@ -281,9 +287,8 @@ def verify_gate_consistency(preset: Path | None = None,
     三档全 `never`（无人值守最宽姿态）会被直接报出来。
     """
     if preset is None:
-        # 三个 preset 的组合只差占位符，校验渲染后的第一份即可
-        return verify_gate_consistency_text(
-            render_composition(sorted(PRESETS)[0]), patch)
+        # 三个声明都在同一份 bundle 补丁里，读它即可（旧版是渲染后的组合文件）
+        preset = BUNDLE_DIR / "cordis.patch.yml"
     if not preset.is_file():
         return []
     return verify_gate_consistency_text(preset.read_text(encoding="utf-8"), patch)
@@ -300,8 +305,8 @@ def verify_gate_consistency_text(text: str,
         rows = _yaml_rows_text(text)
     except Exception:                             # noqa: BLE001 - 解析问题另有检查
         return []
-    for row in rows:
-        # 真实 preset 里 `args` 在行的 `config` 之下（不是行顶层）
+    for row in _walk_dicts(rows):
+        # `args` 在行的 `config` 之下（bundle 里还要再深两层：insert/config.plugins）
         block = row.get("config")
         args = block.get("args") if isinstance(block, dict) else None
         if isinstance(args, str):
@@ -359,48 +364,100 @@ def check_bridge_entry(home: Path, profile: str) -> list[str]:
             f"{BRIDGE_SRC}"]
 
 
-def roster_check(home: Path, preset_ids: tuple[str, ...] | None = None
-                 ) -> tuple[list[str], str]:
-    """用 DSH 自己的发现机制读一次 roster；返回 (问题, 说明)。
+def _rpc_cookie(home: Path, origin: str) -> str | None:
+    """铸一个 DSH web 会话 cookie（与 `tools/dsh_desktop_rpc.mjs` 同一套做法）。
 
-    `broken` 为空只说明"这份 preset 装得上"——它不评估 `!!js`、不看
-    `command`/`cwd`，所以与 `verify_preset` 不是替代关系。
+    为什么要走到这一步：preset 是否真的进了选择器，只有**运行中的 DSH**知道。
+    凭据取自 `$DSH_HOME/.credentials.yaml`，请求只发 127.0.0.1，不引入新依赖。
     """
-    want = preset_ids or tuple(PRESETS)
-    node = shutil.which("node")
-    if node is None:
-        return [], "跳过 roster 检查（本机无 node）"
-    cwd = home / "profiles"
-    if not (cwd / "node_modules" / "@deepseek-ai" / "dsh-agent-presets").exists():
-        return [], f"跳过 roster 检查（{cwd / 'node_modules'} 里没有 harness 包）"
-    script = ROSTER_JS % json.dumps(str(home / ".agent-presets"))
-    proc = subprocess.run([node, "--input-type=module", "-e", script], cwd=cwd,
-                          capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=120)
-    if proc.returncode != 0:
-        return [], (f"跳过 roster 检查（node 退出码 {proc.returncode}："
-                    f"{(proc.stderr or '').strip()[:120]}）")
-    rows = []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            rows.append(json.loads(line))
-    if not rows:
-        return ["roster 里一个 preset 都没有——发现根可能不对"], ""
-    problems: list[str] = []
-    for preset_id in want:
-        found = [r for r in rows if r.get("id") == preset_id]
-        if not found:
-            problems.append(
-                f"roster 里没有 {preset_id}（目录名/位置不对，或目录是链接——"
-                f"发现机制不跟随 reparse point，见模块头注释）")
+    creds = home / ".credentials.yaml"
+    try:
+        text = creds.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(
+        r"client-connection/browser-session:[\s\S]*?secret:\s*([A-Za-z0-9_-]+)",
+        text)
+    if match is None:
+        return None
+
+    def _b64url(raw: bytes) -> str:
+        return (base64.b64encode(raw).decode()
+                .replace("+", "-").replace("/", "_").rstrip("="))
+
+    encoded = match.group(1)
+    pad = "=" * ((4 - len(encoded) % 4) % 4)
+    secret = base64.b64decode(encoded.replace("-", "+").replace("_", "/") + pad)
+    authority = urlparse(origin).netloc
+    name = "dsh-auth-" + _b64url(hashlib.sha256(authority.encode()).digest())
+    issued = int(time.time() * 1000)
+    payload = json.dumps({"version": 1, "authority": authority, "issuedAt": issued,
+                          "expiresAt": issued + 86_400_000}, separators=(",", ":"))
+    body = _b64url(payload.encode())
+    sig = _b64url(hmac.new(secret, body.encode(), hashlib.sha256).digest())
+    return f"{name}=v1.{body}.{sig}"
+
+
+def rpc_call(home: Path, port: int, method: str,
+             args: dict | None = None) -> tuple[dict | None, str]:
+    """对运行中的 DSH 发一次只读 RPC；返回 (结果, 说明)。失败不抛。"""
+    origin = f"http://127.0.0.1:{port}"
+    cookie = _rpc_cookie(home, origin)
+    if cookie is None:
+        return None, f"跳过（{home / '.credentials.yaml'} 里没有 browser-session 凭据）"
+    body = json.dumps({"type": "client-request", "rpcId": "dsh-install-check",
+                       "method": method,
+                       "payload": {"args": args or {}}}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{origin}/api/{method}", data=body,
+        headers={"content-type": "application/json", "cookie": cookie})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read().decode("utf-8")), ""
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, f"跳过（{origin} 不可达：{exc}）"
+
+
+def roster_live(home: Path, ports: tuple[int, ...] = (),
+                preset_ids: tuple[str, ...] | None = None
+                ) -> tuple[list[str], str]:
+    """读**运行中 DSH** 的 roster；返回 (问题, 说明)。
+
+    为什么不再用 `discoverPresets`：那个 API 只存在于 0.1.6 时代的
+    `dsh-agent-presets` 包里，安装版 0.1.7-rc.2 的 app.asar 里**一次都不出现**
+    （字节级扫描 0 命中）。判据继续挂在它身上，就会在"桌面端一个 Proteus preset
+    都读不到"时报"接入健康"——2026-09-26 实测正是这么被骗过去的。
+    """
+    want = preset_ids or PRESET_IDS
+    tried: list[int] = []
+    for port in (ports or (19387, 4080)):
+        tried.append(port)
+        data, note = rpc_call(home, port, "agentPresets/list")
+        if data is None:
             continue
-        broken = found[0].get("broken")
-        if broken:
-            problems.append(f"{preset_id} 在 roster 里是 broken：{broken}")
-    if problems:
-        return problems, ""
-    return [], f"roster OK（{len(rows)} 个 preset，{'/'.join(want)} 均未 broken）"
+        presets = (((data.get("result") or {}).get("value") or {})
+                   .get("presets") or [])
+        if not presets:
+            return ["运行中的 DSH 返回了空 roster——RPC 形状变了？"], ""
+        problems: list[str] = []
+        have = {p.get("id") for p in presets if isinstance(p, dict)}
+        for preset_id in want:
+            if preset_id not in have:
+                problems.append(
+                    f"运行中的 DSH roster 里没有 {preset_id}"
+                    f"（bundle 没装上 / 声明行写错 / 激活失败——"
+                    f"三种都在界面上零提示）")
+                continue
+            broken = next((p.get("broken") for p in presets
+                           if isinstance(p, dict) and p.get("id") == preset_id), None)
+            if broken:
+                problems.append(f"{preset_id} 在 roster 里是 broken：{broken}"
+                                f"（该 preset 无法组成会话，且不进选择器）")
+        if problems:
+            return problems, ""
+        return [], (f"roster OK（{len(presets)} 个 preset，"
+                    f"{'/'.join(want)} 均在且未 broken；端口 {port}）")
+    return [], f"跳过 roster 检查（端口 {tried or [19387, 4080]} 均不可达）"
 
 
 # ----------------------------------------------------------------------
@@ -685,7 +742,7 @@ def workspace_root() -> Path:
 
 
 def verify_launcher(path: Path | None = None) -> list[str]:
-    """`start-proteus.cmd` 必须是 CRLF 行尾。
+    """启动 `.cmd` 必须是 CRLF 行尾。
 
     这条不是洁癖：**LF-only 的 .cmd 会被 cmd.exe 错误分行**——`rem` 后面的
     中文与下一行被拼成一条命令去执行，窗口一闪就退，用户看到的就是"点了没反应"
@@ -704,13 +761,26 @@ def verify_launcher(path: Path | None = None) -> list[str]:
     return []
 
 
-def launch(profile: str, dst: Path, port: int = DEFAULT_WEB_PORT) -> int:
-    """同步 + 关旧实例 + 启动 DSH（启动器调用的入口）。
+def verify_launchers() -> list[str]:
+    """仓库里**所有** `.cmd` 启动器都要过 CRLF 检查。
+
+    单独一个 `verify_launcher` 只管一个文件，新加启动器很容易漏——桌面端启动器
+    就是这么漏进仓库的（2026-09-26 由路径卫生用例顺带发现它还是 LF）。
+    """
+    problems: list[str] = []
+    for cmd in (REPO / "dsh" / "start-proteus.cmd",
+                REPO / "tools" / "launch_dsh_desktop.cmd"):
+        problems += verify_launcher(cmd)
+    return problems
+
+
+def launch(profile: str, home: Path, port: int = DEFAULT_WEB_PORT) -> int:
+    """渲染 bundle + 关旧实例 + 启动 DSH（启动器调用的入口）。
 
     逻辑放这里而不是 `.cmd` 里：cmd 的解析与引号是另一套语言，踩过一次就够
     （LF 行尾）；Python 这边可单测、能给清楚的错误、还能回落到 `.env`。
     """
-    for note in install(dst.parent.parent):
+    for note in install(home, profile):
         print(f"  - {note}")
 
     # 旧实例按**端口**关，不按进程枚举：双击场景下 PATH 可能残缺，枚举会静默返回
@@ -781,110 +851,59 @@ def bridge_live_check(spool: Path) -> tuple[list[str], str]:
 
 
 # ----------------------------------------------------------------------
-# 同步
+# 安装（渲染 + 接线检查；真正的 install_bundle 由 DSH 自己执行）
 # ----------------------------------------------------------------------
-def _remove_link(path: Path) -> None:
-    """摘掉链接而不碰目标。Windows 上必须用 `rmdir`：PowerShell/Path.unlink 对
-    junction 有递归删目标的风险。"""
-    if os.name == "nt":
-        subprocess.run(["cmd", "/c", "rmdir", str(path)], capture_output=True,
-                       text=True, check=False)
-    else:
-        path.unlink()
+def _profile_package(home: Path, profile: str) -> Path:
+    return home / "profiles" / profile / "package.json"
 
 
-def _backup_previous(home: Path, dst: Path, preset_id: str = "",
-                     keep: int = KEEP_BACKUPS) -> str:
-    """把改动前的副本存到 preset 根**之外**（放根里会被当成一个 preset）。"""
-    if not dst.is_dir():
-        return ""
-    import time
+def check_profile_wiring(home: Path, profile: str) -> list[str]:
+    """这个 profile 认领了 presets bundle 吗（bundles 列表 + link 依赖 + 链接）。
 
-    name = preset_id or dst.name
-    root = home / "backups"
-    target = root / f"preset-{name}-{time.strftime('%Y%m%d%H%M%S')}"
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-        for item in dst.iterdir():
-            if item.is_file():
-                shutil.copy2(item, target / item.name)
-    except OSError:
-        return ""
-    old = sorted(p for p in root.glob(f"preset-{name}-*") if p.is_dir())
-    for stale in old[:-keep]:
-        shutil.rmtree(stale, ignore_errors=True)
-    return str(target)
-
-
-def sync_preset(home: Path, preset_id: str) -> list[str]:
-    """把仓库里渲染后的 preset 同步到 `$DSH_HOME`（幂等）。"""
-    dst = home / ".agent-presets" / preset_id
-    notes: list[str] = []
-    if dst.exists() and _is_reparse_point(dst):
-        _remove_link(dst)
-        notes.append(f"[{preset_id}] 移除原有链接——DSH 的 preset 发现机制"
-                     f"**不跟随 reparse point**，链接会让 preset 从选择器里静默消失")
-    dst.mkdir(parents=True, exist_ok=True)
-
-    expected = expected_files(preset_id)
-    changed = []
-    for name, text in expected.items():
-        target = dst / name
-        if not target.is_file() or target.read_text(
-                encoding="utf-8") != text:
-            changed.append(name)
-    if not changed:
-        notes.append(f"[{preset_id}] 已是最新，无需同步")
-        return notes
-    backup = _backup_previous(home, dst, preset_id)
-    for name in changed:
-        (dst / name).write_text(expected[name], encoding="utf-8")
-    notes.append(f"[{preset_id}] 已同步 {len(changed)} 个文件："
-                 f"{', '.join(changed)}")
-    if backup:
-        notes.append(f"[{preset_id}] 改动前的副本：{backup}")
-    return notes
-
-
-def migrate_legacy(home: Path) -> list[str]:
-    """把旧的单 preset 目录 `proteus` 迁走（P0-6）。
-
-    旧目录由本安装器创建，现在被三个场景 preset 取代。**必须处理**：留着它，
-    选择器里会多出一个跑旧配置（单模式、共用 `session-mode.json`）的入口，
-    用户点进去看到的行为和预期不一致且没有任何提示——正是本项目一直在治的
-    那类静默失效。先备份（放到 preset 根之外），再移除。
+    判据就是 `install_bundle` 实际改的那两处（2026-09-26 实测：它写 profile 的
+    package.json，并建 `node_modules/<包名>` junction），所以检查与消费方一致。
     """
-    legacy = home / ".agent-presets" / "proteus"
-    if not legacy.is_dir() or legacy.name in PRESETS:
-        return []
-    cfg = legacy / "agent.cordis.yml"
-    if not cfg.is_file():
-        return []
+    pkg = _profile_package(home, profile)
+    if not pkg.is_file():
+        return [f"找不到 profile 清单：{pkg}（profile {profile!r} 尚未初始化？）"]
     try:
-        text = cfg.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    if "proteus-persona.mjs" not in text:
-        return []                       # 不是我们的目录，绝不动
-    backup = _backup_previous(home, legacy, "proteus")
-    if _is_reparse_point(legacy):
-        _remove_link(legacy)
-    else:
-        shutil.rmtree(legacy, ignore_errors=True)
-    note = "[迁移] 已移除旧单 preset 目录 proteus（由三个场景 preset 取代）"
-    return [f"{note}——备份：{backup}" if backup else note]
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"profile 清单解析失败：{exc}"]
+    problems: list[str] = []
+    bundles = ((data.get("dsh") or {}).get("profile") or {}).get("bundles") or []
+    if bundle.BUNDLE_NAME not in bundles:
+        problems.append(f"{profile} 的 dsh.profile.bundles 里没有 "
+                        f"{bundle.BUNDLE_NAME}——该 profile 不会加载它")
+    dep = str((data.get("dependencies") or {}).get(bundle.BUNDLE_NAME, ""))
+    entry = home / "profiles" / profile / "node_modules" / bundle.BUNDLE_NAME
+    if not dep:
+        problems.append(f"{profile} 的 dependencies 里没有 {bundle.BUNDLE_NAME}；"
+                        f"装法：plugin_manager → action: install_bundle → "
+                        f"target={BUNDLE_DIR}")
+    elif not entry.exists():
+        problems.append(f"依赖声明了但模块链接不存在：{entry}"
+                        f"（bundle 里的包自引用解析不到，preset 会 broken）")
+    return problems
 
 
-def install(home: Path) -> list[str]:
-    """同步三个 preset（幂等）。返回动作说明。"""
-    notes: list[str] = migrate_legacy(home)
-    for preset_id in PRESETS:
-        notes += sync_preset(home, preset_id)
+def runtime_dirs() -> list[Path]:
+    """运行态检查要盯的目录：bundle 一份（旧版是三个安装副本）。"""
+    return [BUNDLE_DIR]
+
+
+def install(home: Path | None = None, profile: str = "desktop") -> list[str]:
+    """渲染 bundle（幂等）+ 报告该 profile 的接线状态。
+
+    安装本身**交给 DSH**：安装版随附文档写明 `install_bundle` 自己跑包安装与
+    bundle 选择，并明确要求"不要用 shell 复现这些步骤"。
+    """
+    written = bundle.write_bundle()
+    notes = [f"bundle 已渲染（{len(written)} 个文件）：{BUNDLE_DIR}"]
+    notes.append(f"装法：plugin_manager → action: install_bundle → target: {BUNDLE_DIR}")
+    if home is not None:
+        notes += [f"[{profile}] {p}" for p in check_profile_wiring(home, profile)]
     return notes
-
-
-def installed_dirs(home: Path) -> list[Path]:
-    return [home / ".agent-presets" / pid for pid in PRESETS]
 
 
 # ----------------------------------------------------------------------
@@ -893,9 +912,13 @@ def main(argv: list[str] | None = None) -> int:
         prog="python tools/dsh_install.py",
         description="同步并校验 Proteus 的 DSH 宿主接入")
     ap.add_argument("--home", default="", help="DSH home（缺省 $DSH_HOME 或 ~/.dsh）")
-    ap.add_argument("--profile", default="web", help="profile 名（缺省 web）")
+    ap.add_argument("--profile", default="web", help="启动器/bridge 用的 profile 名（缺省 web）")
+    ap.add_argument("--presets-profile", default="desktop",
+                    help="装载 presets bundle 的 profile（缺省 desktop；官方桌面端）")
+    ap.add_argument("--roster-port", type=int, default=0,
+                    help="查运行态 roster 的端口（缺省 0 = 依次试 19387/4080）")
     ap.add_argument("--check", action="store_true",
-                    help="只检查，不改动（有漂移即非零退出）")
+                    help="只检查，不改动（bundle 与来源不一致即非零退出）")
     ap.add_argument("--no-roster", action="store_true", help="跳过 roster 健康检查")
     ap.add_argument("--spool", default="",
                     help="宿主桥 spool 路径（缺省 <仓库>/data/dsh-events.jsonl）")
@@ -925,15 +948,16 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     home = dsh_home(args.home)
-    dirs = installed_dirs(home)
     print(f"DSH home : {home}")
-    print(f"presets  : {', '.join(p.name for p in dirs)}")
+    print(f"bundle   : {BUNDLE_DIR}")
+    print(f"presets  : {', '.join(PRESET_IDS)}"
+          f"（装载 profile：{args.presets_profile}）")
 
     if args.launch:
-        return launch(args.profile, dirs[0], port=args.port)
+        return launch(args.profile, home, port=args.port)
 
     if not args.check:
-        for note in install(home):
+        for note in install(home, args.presets_profile):
             print(f"  - {note}")
 
     if args.restart:
@@ -956,19 +980,18 @@ def main(argv: list[str] | None = None) -> int:
             print("  - 端口已释放，可以启动新实例")
 
     problems: list[str] = []
-    for preset_id, dst in zip(PRESETS, dirs):
-        problems += [f"[{preset_id}] {p}" for p in verify_preset(dst, preset_id)]
-        problems += [f"[{preset_id}] 与仓库不同步：{d}"
-                     for d in drift(dst, preset_id)]
+    problems += verify_bundle()
+    problems += check_profile_wiring(home, args.presets_profile)
     problems += verify_patch()
-    problems += verify_gate_consistency(PRESETS and dirs[0] / "agent.cordis.yml")
-    problems += verify_launcher()
-    if not args.no_bundle_check:
+    problems += verify_gate_consistency()
+    problems += verify_launchers()
+    if not args.no_bundle_check and args.profile == "web":
+        # 独立的审计桥 bundle 只装在 web profile；桌面端由同一份 presets bundle 承载
         problems += check_bundle(home, args.profile)
         problems += check_bridge_entry(home, args.profile)
     notes: list[str] = []
     if not args.no_live:
-        problems += live_check(args.profile, dirs)
+        problems += live_check(args.profile, runtime_dirs())
         bridge_problems, bridge_live_note = bridge_live_check(
             Path(args.spool) if args.spool else REPO / "data" / "dsh-events.jsonl")
         problems += bridge_problems
@@ -976,7 +999,8 @@ def main(argv: list[str] | None = None) -> int:
             notes.append(bridge_live_note)
 
     if not args.no_roster:
-        roster_problems, roster_note = roster_check(home)
+        ports = (args.roster_port,) if args.roster_port else ()
+        roster_problems, roster_note = roster_live(home, ports)
         problems += roster_problems
         if roster_note:
             notes.append(roster_note)
@@ -987,10 +1011,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"发现 {len(problems)} 个问题：")
         for p in problems:
             print(f"  ✗ {p}")
-        if any("与仓库不同步" in p for p in problems):
-            print("  → 同步：python tools/dsh_install.py（不带 --check）")
+        if any("已过期" in p or "漂移" in p or "占位符" in p for p in problems):
+            print("  → 重渲染：python tools/render_preset_bundle.py")
+        if any("install_bundle" in p or "bundles 里没有" in p for p in problems):
+            print(f"  → 装载：plugin_manager → action: install_bundle → "
+                  f"target: {BUNDLE_DIR}")
         return 1
-    print("接入健康：三个 preset 与仓库同步、补丁完整、审计桥已接线且为链接")
+    print("接入健康：bundle 与 _shared/ 一致、三个声明齐全、"
+          f"{args.presets_profile} 已接线"
+          + ("、审计桥已接线且为链接" if args.profile == "web" else ""))
     return 0
 
 

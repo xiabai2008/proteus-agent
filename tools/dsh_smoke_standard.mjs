@@ -1,12 +1,19 @@
 // 桌面端 standard preset 冒烟测试：创建无 preset 会话、发一条消息、拉结果。
 import { readFileSync } from 'node:fs'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ORIGIN = 'http://127.0.0.1:19387'
+const ORIGIN = process.env.DSH_ORIGIN ?? 'http://127.0.0.1:19387'
+// 路径运行时推导（硬规则 7）：仓库 = 本文件所在 tools/ 的上级
+const REPO = process.env.PENTEST_REPO
+  ?? dirname(dirname(fileURLToPath(import.meta.url)))
+const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const b64url = (buf) => Buffer.from(buf).toString('base64')
   .replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')
 const authority = new URL(ORIGIN).host
-const text = readFileSync('C:/Users/HZR/.dsh/.credentials.yaml', 'utf8')
+const text = readFileSync(join(DSH_HOME, '.credentials.yaml'), 'utf8')
 const s = /client-connection\/browser-session:[\s\S]*?secret:\s*([A-Za-z0-9_-]+)/.exec(text)[1]
 const secret = Buffer.from(s.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - s.length % 4) % 4), 'base64')
 const name = 'dsh-auth-' + b64url(createHash('sha256').update(authority).digest())
@@ -24,7 +31,7 @@ const rpc = async (endpoint, args) => {
   return (await r.json()).result
 }
 
-const created = await rpc('session/create', { request: { cwd: 'D:/HZR_PROJECTS/proteus-agent' } })
+const created = await rpc('session/create', { request: { cwd: REPO } })
 if (!created.ok) { console.log('create fail', JSON.stringify(created).slice(0, 300)); process.exit(1) }
 const sid = created.value.id ?? created.value.sessionId
 console.log('standard session:', sid)

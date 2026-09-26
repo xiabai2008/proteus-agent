@@ -11,13 +11,23 @@
 - 内核 = XPentest（已存在，fork 进本仓库），ReAct 循环 + 证据链反幻觉 + 记忆与技能进化
 - 工具层 = MCP 统一注册（RayScan / Chameleon / seckb 已声明，`--discover-mcp` 显式连接；poxiao / ruoyi-scan / LogicHunt 待接）
 - 宿主层 = 双入口：自有 CLI/SDK（必须可独立运行）+ deepseek-harness agent-preset（可选）
-- 宿主层现状（2026-09-24，P0 地基完成）：DSH 侧 = **三个场景 preset**
-  `proteus-pentest` / `proteus-ctf-web` / `proteus-ctf-crypto`（同一模板渲染 + 共享实现单份
-  `dsh/.agent-presets/_shared/`，选择器里"选中即用"）+ host 平面 bundle `dsh/proteus-bridge`
-  （会话事件审计入链）；内核侧 = MCP server 实测暴露 33（渗透）/ 14（CTF Web）/ 11（CTF Crypto）个工具，
-  **工具面随模式动态裁剪**并发 `tools/list_changed`。同步与校验用 `python tools/dsh_install.py`
-  （**复制 + 启动前同步 + 漂移校验**——preset 目录不能用链接：DSH 发现机制不跟随 reparse point，
-  链接会让 preset 从选择器里静默消失；bundle 层反之必须用官方 `link:` 依赖）。
+- 宿主层现状（2026-09-26，**载具迁移**）：DSH 侧 = **三个场景 preset**
+  `proteus-pentest` / `proteus-ctf-web` / `proteus-ctf-crypto`，由仓库内 bundle
+  `dsh/proteus-presets/`（声明行 + 四个共享插件的逐字节副本，生成器
+  `tools/render_preset_bundle.py`，来源仍是 `dsh/.agent-presets/_shared/`）
+  承载，用 `plugin_manager` `install_bundle` 装进 profile（本机 = `desktop`）；
+  host 平面审计行 `proteus-bridge` 同 bundle。渲染 + 消费方视角校验用
+  `python tools/dsh_install.py`（查 bundle 与来源一致、profile 已登记、
+  **运行中 DSH 的 roster** 里三个 preset 均在且未 broken）。
+  内核侧 = MCP server 实测暴露 79（渗透）/ 55（CTF Web）/ 34（CTF Crypto）个工具（随
+  外部依赖变化），**工具面随模式动态裁剪**并发 `tools/list_changed`。
+  **新版 DSH 的三条实测规则（改 preset 前必读，2026-09-26 探针实测）**：
+  ① `$DSH_HOME/.agent-presets/` 目录发现已废弃（安装版原文 "Nothing reads that
+  directory any more"），preset 只能由 bundle 补丁里的声明行承载；
+  ② `./x.mjs` 相对行的解析基准是 **profile 目录**而非 bundle 目录，写在 bundle 里
+  必然 `broken: never started` 且界面零提示；
+  ③ 插件行走**包自引用子路径**（`dsh-proteus-presets/persona`）可解析——profile
+  目录不再需要放副本。
   会话内：`/proteus-mode`（切模式，宿主裁决与内核工具面同时变）、`/proteus-scope`
   （人工授权目标，模型不能自我授权）、`/proteus-evidence`、`/proteus-skills`、`/proteus-audit`。
 - **DSH 三层分工（实测结论，别凭直觉改）**：`tools/pre-execute` 与 `tools.restrict` 按**作用域**派发 → 裁决与工具面收敛必须写在 **preset 内**；`session/event` 是全局事件 → 审计留在 **host 平面 bundle**；工具能力本体留在 **MCP server**（与 DSH 版本解耦）。真机证据见 `docs/DSH插件化与内核旁路治理.md` 与接入指南第八节第 9 条。

@@ -1,0 +1,645 @@
+# dsh-proteus-presets —— Proteus 三个 agent preset 的声明行（自动生成）
+#
+# 生成器：tools/render_preset_bundle.py（**不要手改本文件**，改模板或脚本后重跑）。
+# 装载方式：plugin_manager -> action: install_bundle -> target 填本目录绝对路径。
+#
+# 为什么有本文件（2026-09-26 真机实测）：
+#   * 新版 DSH 已移除 `$DSH_HOME/.agent-presets/` 目录发现（安装版随附文档：
+#     "Nothing reads that directory any more"）；preset 只能由 bundle 补丁声明。
+#   * `./x.mjs` 相对行的解析基准是 profile 目录而非 bundle 目录（探针实测：
+#     文件只在 bundle 里 -> broken "never started"；只在 profile 目录里 -> OK）。
+#     所以插件行写**包自引用子路径**，四个共享插件留在本 bundle 内。
+#
+# 声明行字段：id(必填) / plugins(必填) / name / description / order（roster 排序）。
+# Loader 行 id 约定 `preset-<config.id>`。
+
+- insert:
+    - id: preset-proteus-pentest
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: proteus-pentest
+        name: Proteus 渗透
+        description: 授权范围内的渗透测试与侦察（Proteus 内核 + mcp__proteus__* 工具；证据链可机验）。仅用于授权范围内的受控安全实验。
+        order: 5
+        plugins:
+          - id: persona
+            name: 'dsh-proteus-presets/persona'
+            config:
+              promptPath: !!js (process.env.PENTEST_WS || '') + '/proteus-agent/prompts/dsh-persona.md'
+              suffix: >-
+                本会话 = 渗透场景，默认模式 pentest-standard（通过 mcp__proteus__* 工具驱动
+                Proteus 内核；模式由内核侧 ModeProfile 决定，工具白名单与权限档位随之生效）。
+                切换场景用 /proteus-mode；授权新目标用 /proteus-scope（只有人能执行）。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            config:
+              # F4 技能融合 + P1-5 双套：本 preset 只挂自己那份导出目录
+              # （data/dsh-skills/<会话键>），场景之间不互串。
+              # 产出方式：python -m penagent skills --export（或 /proteus-skills 命令）。
+              # !!js 表达式里禁止 ": "（YAML 会拆映射键）——三元冒号后不带空格是刻意的。
+              customSkillDirs: !!js process.env.PENTEST_WS ? [(process.env.PENTEST_WS + '/proteus-agent/data/dsh-skills/pentest')]:[]
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                        You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+                        Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+                        The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+                        Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+                        Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+                        When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              # Fork omits model selection so provider/model stay equal to the parent and
+              # the inherited history remains eligible for KV Cache reuse. This preset
+              # keeps fork continuable; parent and child inherit the same messaging tool,
+              # while the parent id and return guidance follow the inherited history.
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              # Production dsh does not install these optional providers. Install the
+              # matching Bundle in this Profile and restart the Host, then copy this
+              # preset and remove `disabled` from the matching tool row. Host availability
+              # alone grants no tool.
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+              # Off by default with the base row it mirrors: the tool description
+              # restricts `ralph` to runs the human explicitly asked for, and completion
+              # is a worker self-report, not an independent evaluation. Preset files take
+              # no patches, so a session that wants it duplicates this preset under a new
+              # id and drops `disabled`; the shipped root shadows a copy that reuses this
+              # id.
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                disabled: true
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: true
+          - id: proteus-tools-policy
+            name: 'dsh-proteus-presets/tools-policy'
+            config:
+              role: policy
+              mode: ask
+              kernelGuard: deny
+              targets: ['127.0.0.1', 'localhost']
+              shellTools: ['pwsh', 'bash']
+              spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+              # P0-4：会话授权文件（人工命令 /proteus-scope 写）——与内核读同一份，
+              # 生效白名单 = 上面的基线 ∪ 这份清单。按 preset 分文件（pentest）：
+              # 授权是安全边界，"在一个 preset 里授权、另一个 preset 自动生效"是意外行为。
+              scopePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-scope-pentest.json'
+              # P0-5：会话模式文件（/proteus-mode 写、内核读的同一份）——模式同时驱动
+              # 宿主侧档位：ctf-* 放行范围内目标动作（CTF 环境即授权范围、工具密集），
+              # 其余沿用 mode（ask）；越界目标不受这张表影响，一律至少 ask
+              modePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-mode-pentest.json'
+          - id: proteus-supervisor
+            name: 'dsh-proteus-presets/supervisor'
+            config:
+              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
+              # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
+              sameToolLimit: 5
+              totalLimit: 30
+              escalate: ask
+              spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+          - id: proteus-commands
+            name: 'dsh-proteus-presets/commands'
+            config:
+              # 会话状态文件按 preset 分（P0-6）：三个 preset 共用 data/ 时不能互串
+              sessionKey: 'pentest'
+          - id: mcp-proteus
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: stdio
+              serverName: proteus
+              command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
+              args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'pentest-standard', '--session-key', 'pentest', '--discover-mcp']
+              cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
+              env:
+                PENTEST_LLM_BASE_URL: !!js process.env.PENTEST_LLM_BASE_URL ?? ''
+                PENTEST_LLM_API_KEY: !!js process.env.PENTEST_LLM_API_KEY ?? ''
+                PENTEST_LLM_MODEL: !!js process.env.PENTEST_LLM_MODEL ?? ''
+              toolCallTimeoutMs: 600000
+              failOnStartupError: false
+    - id: preset-proteus-ctf-web
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: proteus-ctf-web
+        name: Proteus CTF-Web
+        description: CTF Web 解题（codec 链 / HTTP 原始证据 / 容器化 RE 工具；flag 判定）。仅用于授权范围内的受控安全实验。
+        order: 6
+        plugins:
+          - id: persona
+            name: 'dsh-proteus-presets/persona'
+            config:
+              promptPath: !!js (process.env.PENTEST_WS || '') + '/proteus-agent/prompts/dsh-persona-ctf.md'
+              suffix: >-
+                本会话 = CTF Web 场景，默认模式 ctf-web（通过 mcp__proteus__* 工具驱动
+                Proteus 内核；模式由内核侧 ModeProfile 决定，工具白名单与权限档位随之生效）。
+                切换场景用 /proteus-mode；授权新目标用 /proteus-scope（只有人能执行）。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            config:
+              # F4 技能融合 + P1-5 双套：本 preset 只挂自己那份导出目录
+              # （data/dsh-skills/<会话键>），场景之间不互串。
+              # 产出方式：python -m penagent skills --export（或 /proteus-skills 命令）。
+              # !!js 表达式里禁止 ": "（YAML 会拆映射键）——三元冒号后不带空格是刻意的。
+              customSkillDirs: !!js process.env.PENTEST_WS ? [(process.env.PENTEST_WS + '/proteus-agent/data/dsh-skills/ctf-web')]:[]
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                        You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+                        Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+                        The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+                        Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+                        Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+                        When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              # Fork omits model selection so provider/model stay equal to the parent and
+              # the inherited history remains eligible for KV Cache reuse. This preset
+              # keeps fork continuable; parent and child inherit the same messaging tool,
+              # while the parent id and return guidance follow the inherited history.
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              # Production dsh does not install these optional providers. Install the
+              # matching Bundle in this Profile and restart the Host, then copy this
+              # preset and remove `disabled` from the matching tool row. Host availability
+              # alone grants no tool.
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+              # Off by default with the base row it mirrors: the tool description
+              # restricts `ralph` to runs the human explicitly asked for, and completion
+              # is a worker self-report, not an independent evaluation. Preset files take
+              # no patches, so a session that wants it duplicates this preset under a new
+              # id and drops `disabled`; the shipped root shadows a copy that reuses this
+              # id.
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                disabled: true
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: true
+          - id: proteus-tools-policy
+            name: 'dsh-proteus-presets/tools-policy'
+            config:
+              role: policy
+              mode: ask
+              kernelGuard: deny
+              targets: ['127.0.0.1', 'localhost']
+              shellTools: ['pwsh', 'bash']
+              spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+              # P0-4：会话授权文件（人工命令 /proteus-scope 写）——与内核读同一份，
+              # 生效白名单 = 上面的基线 ∪ 这份清单。按 preset 分文件（ctf-web）：
+              # 授权是安全边界，"在一个 preset 里授权、另一个 preset 自动生效"是意外行为。
+              scopePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-scope-ctf-web.json'
+              # P0-5：会话模式文件（/proteus-mode 写、内核读的同一份）——模式同时驱动
+              # 宿主侧档位：ctf-* 放行范围内目标动作（CTF 环境即授权范围、工具密集），
+              # 其余沿用 mode（ask）；越界目标不受这张表影响，一律至少 ask
+              modePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-mode-ctf-web.json'
+          - id: proteus-supervisor
+            name: 'dsh-proteus-presets/supervisor'
+            config:
+              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
+              # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
+              sameToolLimit: 5
+              totalLimit: 30
+              escalate: ask
+              spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+          - id: proteus-commands
+            name: 'dsh-proteus-presets/commands'
+            config:
+              # 会话状态文件按 preset 分（P0-6）：三个 preset 共用 data/ 时不能互串
+              sessionKey: 'ctf-web'
+          - id: mcp-proteus
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: stdio
+              serverName: proteus
+              command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
+              args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'ctf-web', '--session-key', 'ctf-web', '--discover-mcp']
+              cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
+              env:
+                PENTEST_LLM_BASE_URL: !!js process.env.PENTEST_LLM_BASE_URL ?? ''
+                PENTEST_LLM_API_KEY: !!js process.env.PENTEST_LLM_API_KEY ?? ''
+                PENTEST_LLM_MODEL: !!js process.env.PENTEST_LLM_MODEL ?? ''
+              toolCallTimeoutMs: 600000
+              failOnStartupError: false
+    - id: preset-proteus-ctf-crypto
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: proteus-ctf-crypto
+        name: Proteus CTF-Crypto
+        description: CTF Crypto/Misc/RE 解题（RsaCtfTool / 一次性脚本 / 文件分析；flag 判定）。仅用于授权范围内的受控安全实验。
+        order: 7
+        plugins:
+          - id: persona
+            name: 'dsh-proteus-presets/persona'
+            config:
+              promptPath: !!js (process.env.PENTEST_WS || '') + '/proteus-agent/prompts/dsh-persona-ctf.md'
+              suffix: >-
+                本会话 = CTF Crypto 场景，默认模式 ctf-crypto（通过 mcp__proteus__* 工具驱动
+                Proteus 内核；模式由内核侧 ModeProfile 决定，工具白名单与权限档位随之生效）。
+                切换场景用 /proteus-mode；授权新目标用 /proteus-scope（只有人能执行）。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            config:
+              # F4 技能融合 + P1-5 双套：本 preset 只挂自己那份导出目录
+              # （data/dsh-skills/<会话键>），场景之间不互串。
+              # 产出方式：python -m penagent skills --export（或 /proteus-skills 命令）。
+              # !!js 表达式里禁止 ": "（YAML 会拆映射键）——三元冒号后不带空格是刻意的。
+              customSkillDirs: !!js process.env.PENTEST_WS ? [(process.env.PENTEST_WS + '/proteus-agent/data/dsh-skills/ctf-crypto')]:[]
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                        You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+                        Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+                        The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+                        Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+                        Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+                        When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              # Fork omits model selection so provider/model stay equal to the parent and
+              # the inherited history remains eligible for KV Cache reuse. This preset
+              # keeps fork continuable; parent and child inherit the same messaging tool,
+              # while the parent id and return guidance follow the inherited history.
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              # Production dsh does not install these optional providers. Install the
+              # matching Bundle in this Profile and restart the Host, then copy this
+              # preset and remove `disabled` from the matching tool row. Host availability
+              # alone grants no tool.
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+              # Off by default with the base row it mirrors: the tool description
+              # restricts `ralph` to runs the human explicitly asked for, and completion
+              # is a worker self-report, not an independent evaluation. Preset files take
+              # no patches, so a session that wants it duplicates this preset under a new
+              # id and drops `disabled`; the shipped root shadows a copy that reuses this
+              # id.
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                disabled: true
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: true
+          - id: proteus-tools-policy
+            name: 'dsh-proteus-presets/tools-policy'
+            config:
+              role: policy
+              mode: ask
+              kernelGuard: deny
+              targets: ['127.0.0.1', 'localhost']
+              shellTools: ['pwsh', 'bash']
+              spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+              # P0-4：会话授权文件（人工命令 /proteus-scope 写）——与内核读同一份，
+              # 生效白名单 = 上面的基线 ∪ 这份清单。按 preset 分文件（ctf-crypto）：
+              # 授权是安全边界，"在一个 preset 里授权、另一个 preset 自动生效"是意外行为。
+              scopePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-scope-ctf-crypto.json'
+              # P0-5：会话模式文件（/proteus-mode 写、内核读的同一份）——模式同时驱动
+              # 宿主侧档位：ctf-* 放行范围内目标动作（CTF 环境即授权范围、工具密集），
+              # 其余沿用 mode（ask）；越界目标不受这张表影响，一律至少 ask
+              modePath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/session-mode-ctf-crypto.json'
+          - id: proteus-supervisor
+            name: 'dsh-proteus-presets/supervisor'
+            config:
+              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
+              # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
+              sameToolLimit: 5
+              totalLimit: 30
+              escalate: ask
+              spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+          - id: proteus-commands
+            name: 'dsh-proteus-presets/commands'
+            config:
+              # 会话状态文件按 preset 分（P0-6）：三个 preset 共用 data/ 时不能互串
+              sessionKey: 'ctf-crypto'
+          - id: mcp-proteus
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: stdio
+              serverName: proteus
+              command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
+              args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'ctf-crypto', '--session-key', 'ctf-crypto', '--discover-mcp']
+              cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
+              env:
+                PENTEST_LLM_BASE_URL: !!js process.env.PENTEST_LLM_BASE_URL ?? ''
+                PENTEST_LLM_API_KEY: !!js process.env.PENTEST_LLM_API_KEY ?? ''
+                PENTEST_LLM_MODEL: !!js process.env.PENTEST_LLM_MODEL ?? ''
+              toolCallTimeoutMs: 600000
+              failOnStartupError: false
+    # ── host 平面审计行（与上面三个 preset 同 bundle，role 分工见插件文件头）──
+    # session/event 是全局事件，host 平面可见；裁决行必须在 preset 作用域内，
+    # 故同一份实现在两个挂载点按 role 分工（audit / policy）。
+    - id: proteus-bridge
+      name: 'dsh-proteus-presets/tools-policy'
+      config:
+        spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
+        role: audit

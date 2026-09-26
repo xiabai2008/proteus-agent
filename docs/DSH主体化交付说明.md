@@ -91,7 +91,7 @@
 ## 四、怎么验证（三分钟自检）
 
 ```bash
-# ① 本侧一致性：三个 preset 与仓库同步 / 补丁 / 审计桥 / roster
+# ① 本侧一致性：bundle 与 _shared/ 一致 / profile 已接线 / 补丁 / 审计桥 / 运行中 roster
 python tools/dsh_install.py --check
 
 # ② 对侧兼容性：DSH 里我们依赖的包与接口还在不在
@@ -117,17 +117,23 @@ python examples/benchmark.py --suite ctf
 
 ## 五、维护须知（**改之前必读**）
 
-### 5.1 改 preset 的正确姿势
+### 5.1 改 preset 的正确姿势（**2026-09-26 载具迁移后**）
+
+preset 由仓库内 bundle `dsh/proteus-presets/` 承载，安装走 DSH 自己的工具。
 
 - **改模板**：`dsh/.agent-presets/_shared/agent.cordis.template.yml`
-  —— 不要直接改 `$DSH_HOME` 下的副本（下次启动就被覆盖）。
-- **改共享插件**：`_shared/*.mjs`（唯一实现来源；**禁止**在三个 preset 目录里
-  各放一份）。
-- 改完跑 `python tools/dsh_install.py`（渲染+同步），再跑 `--check`。
-- **preset 目录不能用链接**：DSH 发现机制不跟随 reparse point，链接会让
-  preset 从选择器里**静默消失**（无任何提示）。
+- **改共享插件**：`dsh/.agent-presets/_shared/*.mjs`（唯一实现来源；**禁止**在
+  preset 目录或 profile 目录里各放一份）。
+- 改完**重渲染**：`python tools/render_preset_bundle.py`（把四个共享插件逐字节
+  复制进 bundle、渲染声明行），再跑 `python tools/dsh_install.py --check`。
+- **安装/更新**：`plugin_manager` → `action: install_bundle` → `target` 填
+  `dsh/proteus-presets/` 的绝对路径。官方文档明确要求**不要用 shell 复现**
+  包安装与 bundle 选择；profile patch 是热加载的（实测：改完选择器立刻生效）。
+- **三条实测规则**见第九节——`./x.mjs` 相对行、目录发现废弃都属"写进去却不生效"
+  那一类，改之前先读。
 - 三个 preset 的差异**只允许**四类：默认模式 / 人格文件 / 会话键 / 显示名与排序。
-  `test_three_presets_differ_only_in_the_expected_places` 钉住这一点。
+  `tests/test_preset_bundle.py` 与 `test_shared_implementation_has_a_single_source`
+  钉住这一点。
 
 ### 5.2 DSH 升级流程（顺序不能反）
 
@@ -211,6 +217,7 @@ python tools/dsh_compat_check.py         # 2) 升级后：FAIL 的每一项就�
 | 80b39fa | R-39 内核侧补重复失败检测：同工具 + 同参数连续失败到阈值即拦并回灌纠正指令 |
 | 0c601b6 | R-40 LLM 输出不可解析不再废掉整轮：分出 `LLMOutputError`，回灌纠正提示重试 3 次且不记步数 |
 | daebb06 | R-41 `dsh-session` 回放判分加门槛：无匹配会话 / 证据不足记 `skipped` 而非 `failed`，`--preset` 支持 fnmatch 家族通配（待修清零） |
+| `8636da6` | 载具迁移：preset 改由仓库内 bundle `dsh/proteus-presets/` 承载（桌面端 0.1.7 已移除目录发现），三条解析规则实测；`dsh_install.py` 改为渲染 + 读运行态 roster；7 个脚本去掉本机路径 |
 
 **测试基线**：450 → **564 passed / 0 failed / 1 skipped**（每个提交都带回归用例；那 1 条
 skip 是等 DVWA 的 CSRF token，lab 标记用例的端口误判已由 R-42 的 `identifies()`
@@ -238,3 +245,73 @@ R-41（`dsh-session` 无匹配会话/证据不足记 FAIL → 提取宽 / 判分
 | 开源对标（PentAGI / Strix / Cybench / CAI） | `docs/DSH主体化改造方案.md` 第三节 |
 | 能力评测怎么跑、分数怎么读 | `docs/评测骨架.md` |
 | 内核自身的说明 | `docs/XPentest内核README.md` |
+
+---
+
+## 九、桌面端 preset 载体迁移（2026-09-26，真机实测）
+
+### 9.1 起因：旧载具被上游删掉了
+
+官方桌面端 **0.1.7-rc.2**（nightly，profile = `desktop`）起，安装版随附文档
+（app.asar 内 "Editing Cordis compositions"）原文：
+
+> Agent presets are ordinary `@deepseek-ai/dsh-agent-preset` declarations carried
+> by bundle patches. **Nothing edits a declaration in place**: a preset is created
+> or changed by installing a bundle whose patch declares or overrides it.
+> … Before declaration rows, a user preset was a directory
+> `$DSH_HOME/.agent-presets/<id>/` … **Nothing reads that directory any more.**
+
+字节级核对（`app.asar` 原始扫描）：`discoverPresets` **0 命中**、
+`includeUserRoot` **0 命中**、`$DSH_HOME/.agent-presets` 只剩那句迁移说明。
+也就是说仓库原先的"复制到 `~/.dsh/.agent-presets/` + 启动前同步 + 漂移校验"
+在桌面端**已经无效**，而当时的 `tools/dsh_install.py --check` 仍报"接入健康"
+（它走的是 `~/.dsh/profiles/node_modules` 里 0.1.6-alpha.2 的旧 API）——
+**校验器与消费方脱节**，真机选择器里只剩一个手写迁移过去的 `proteus-ctf-web`。
+
+### 9.2 三条实测规则（探针对照实验，**改 preset 前必读**）
+
+装了三个一次性探针 bundle（装完即卸），六个对照 preset：
+
+| 插件行写法 | 结果 |
+|---|---|
+| `@deepseek-ai/dsh-persona`（裸包名） | 可解析 |
+| `./probe-persona.mjs`（文件**只在 bundle 里**） | **broken：`never started`** |
+| `./profile-only-probe.mjs`（文件**只在 profile 目录**） | 可解析 |
+| `@local/dsh-proteus-probe2/persona`（包自引用子路径） | **可解析** |
+
+结论：
+
+1. bundle 补丁里插入声明行 → 生效；裸包名可解析；
+2. **`./x.mjs` 相对行的解析基准是 profile 目录，不是 bundle 目录**——写在
+   bundle 里必然 broken（`broken` 的 preset **不进选择器、界面零提示**）；
+3. **包自引用子路径**可解析 → 插件本体留在 bundle 内，profile 目录不需要副本；
+4. 失败的 preset 会在 roster 上留 `broken: "<行id> (<name>): never started"`，
+   这是唯一的可见信号——所以校验必须读**运行中 DSH 的 roster**。
+
+### 9.3 现在的形态
+
+```
+dsh/proteus-presets/                 # 新载具（仓库内、可 review、可回滚）
+  package.json                       # dsh.bundle.patch + exports（四个插件子路径）
+  cordis.patch.yml                   # 三个声明行 preset-proteus-{pentest,ctf-web,ctf-crypto}
+                                     #   + host 平面审计行 proteus-bridge（role: audit）
+  proteus-{persona,tools-policy,supervisor,commands}.mjs   # _shared/ 的逐字节副本
+```
+
+- 生成器：`tools/render_preset_bundle.py`（幂等，`--check` 只校验）；
+- 安装：`plugin_manager` → `install_bundle` → `target` = 该目录绝对路径
+  （本机装在 `desktop` profile：profile 的 `package.json` 记 `link:` 依赖 +
+  `dsh.profile.bundles` 列表，并建 `node_modules/<包名>` junction）；
+- 校验：`python tools/dsh_install.py --check` —— 查 bundle 与来源一致、
+  声明行齐全、无 `./` 相对行、profile 已登记、**运行中 DSH roster** 三个都在且
+  未 broken（`--roster-port`，缺省依次试 19387/4080；不可达时跳过并注明）；
+- 迁移时清掉的东西：profile patch 里三段重复的手写声明 + 审计行（974 → 216 行）、
+  profile 目录里 4 份 `.mjs` 副本、`~/.dsh/.agent-presets/proteus-*` 三个旧目录
+  （已移到 `$DSH_HOME/backups/proteus-legacy-preset-dirs-20260926/`）；
+  `tools/migrate_preset_to_declaration.py` 已删除（迁移完成后留着只会在 profile
+  patch 里重新注入一份手写声明）。
+
+> 新增一个**场景入口**的代价：`modes/<id>.yaml` + 渲染器 `PRESETS` 加一项 +
+> `dsh/.agent-presets/<id>/preset.yml`（显示名/描述/排序）+ 重渲染 + `install_bundle`
+> 一次。内核侧只想换作战场景时**不必**新增入口——用 `/proteus-mode` 切换即可
+> （项目反目标：度量未建立前不加新模式，见 `docs/能力加强路线.md`）。
