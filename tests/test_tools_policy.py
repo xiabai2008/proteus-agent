@@ -255,9 +255,27 @@ def test_ctf_mode_allows_in_scope_target_actions(ws):
     assert allowed and "ctf-web" in allowed[0]["reason"]
 
 
-def test_ctf_mode_does_not_allow_out_of_scope(ws):
-    """放行表不覆盖越界：CTF 模式下白名单外目标仍然要审批。"""
+def test_ctf_mode_allows_out_of_scope_too(ws):
+    """CTF 模式：越界目标也按模式档位走（不再单独抬 ask）——2026-09-27 拍板。
+
+    内核侧同一模式已声明 `scope.unrestricted`（靶由平台给定，逐题授权是纯摩擦），
+    宿主侧再弹一次"请授权"就是双重摩擦。判据：CTF 模式下越界 → `next`（放行），
+    但**仍然留痕**（审计要能回答"放过了什么"）。
+    """
     r = _run(ws, MODE_RUNNER, mode="ctf-web")
+    assert r["outScope"]["kind"] == "next"
+
+    records = [json.loads(line) for line in
+               (ws / "data" / "dsh-events.jsonl").read_text(
+                   encoding="utf-8").strip().splitlines()]
+    allowed = [x for x in records if x.get("decision") == "allow"]
+    assert allowed and "/proteus-scope" not in allowed[0].get("reason", "")
+
+
+def test_pentest_mode_keeps_out_of_scope_ask(ws):
+    """渗透系不受该放行影响：越界目标仍然至少 ask（旧口径原样保留）。"""
+    r = _run(ws, MODE_RUNNER, mode="pentest-standard")
+    assert r["inScope"]["kind"] == "ask"
     assert r["outScope"]["kind"] == "ask"
     assert "/proteus-scope" in r["outScope"]["reason"]
 

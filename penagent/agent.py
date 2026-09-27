@@ -103,6 +103,11 @@ class Policy:
         #: 读取），攻击面工具永远只看 allowed_targets。见 scope.is_read_only_call。
         self.reference_targets = [str(t).strip() for t in
                                   (reference_targets or []) if str(t).strip()]
+        #: 模式声明"不受目标白名单限制"（scope.unrestricted，CTF 三个模式）：
+        #: 跳过目标授权校验——CTF 的靶由平台给定，逐题授权是纯摩擦（2026-09-27
+        #: 用户拍板）。**只关这一道**：能力名单、档位、沙箱、证据链照旧。
+        self._targets_unrestricted = bool(
+            mode is not None and getattr(mode.scope, "unrestricted", False))
 
     @staticmethod
     def normalize_targets(value) -> list[str]:
@@ -196,8 +201,9 @@ class Policy:
         # 高危动作
         if getattr(spec, "dangerous", False) and not self.authorize:
             return False, (f"高危工具 {tool} 未授权（--authorize 才可执行）")
-        # 授权目标校验
-        for key in ("host", "url", "domain", "target", "base_url"):
+        # 授权目标校验（模式声明不受限时整段跳过，见 _targets_unrestricted）
+        for key in (() if self._targets_unrestricted else
+                    ("host", "url", "domain", "target", "base_url")):
             value = args.get(key)
             if not value:
                 continue

@@ -36,7 +36,7 @@ _PERSONA_KEYS = {"system_prompt", "output_format"}
 _CAPABILITY_KEYS = {"allow", "deny", "constraints"}
 _PERMISSION_KEYS = {"default", "auto_approve", "require_confirm", "hard_deny"}
 _BUDGET_KEYS = {"max_steps", "max_minutes", "max_cost_usd", "model_tier"}
-_SCOPE_KEYS = {"target_allowlist", "network_egress"}
+_SCOPE_KEYS = {"target_allowlist", "network_egress", "unrestricted"}
 _VERIFIER_KEYS = {"type", "pattern", "auto_retry", "require_poc"}
 
 
@@ -226,14 +226,23 @@ class Scope:
     """目标范围与出网开关。
 
     target_allowlist 为空元组 = 声明为 "required"（必须运行期显式授权）。
+
+    `unrestricted`（2026-09-27 用户拍板）：本模式**不做目标授权校验**——
+    CTF 比赛的靶由平台给定，逐题 `/proteus-scope add` 是纯摩擦。它是**模式文件
+    里的显式声明**（人写、可审、可一键改回），不是模型的自我授权；置 true 后
+    其余闸门一个不动：capability 白名单/黑名单、permission 档位、沙箱档位、
+    证据链、注入护栏、宿主侧目标动作裁决全部照旧。代价要如实说：**目标闸门
+    同时也是注入护栏的最后一道**——题目内容里的注入若把工具引向别的 host，
+    这条不再拦。故默认只给 ctf-* 三个模式开，pentest 系保持 required。
     """
 
     target_allowlist: tuple[str, ...] = ()
     network_egress: bool = False
+    unrestricted: bool = False
 
     @property
     def requires_explicit_allowlist(self) -> bool:
-        return not self.target_allowlist
+        return not self.target_allowlist and not self.unrestricted
 
 
 @dataclass(frozen=True)
@@ -411,6 +420,8 @@ def _build(data: dict, source: Path) -> ModeProfile:
         target_allowlist=allowlist,
         network_egress=_as_bool(scope_raw.get("network_egress", False),
                                 f"{where}: scope.network_egress"),
+        unrestricted=_as_bool(scope_raw.get("unrestricted", False),
+                              f"{where}: scope.unrestricted"),
     )
 
     verifier_raw = _section(data, "verifier", _VERIFIER_KEYS, where)

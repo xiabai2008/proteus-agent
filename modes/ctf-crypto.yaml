@@ -25,7 +25,15 @@ permission:
 # 反解判定器）在 60 步内做不完——黄鹤杯「云栈密令」那次会话 83 步仍未收敛
 # （R-45）。预算是天花板不是目标，抬高只影响"允许跑多久"，不影响判定口径。
 budget: {max_steps: 120, max_minutes: 60, max_cost_usd: 1.0}
-scope: {network_egress: true}
+scope:
+  network_egress: true
+  # 目标闸门开关（2026-09-27 用户拍板）：CTF 比赛的靶由平台给定，逐题
+  # `/proteus-scope add` 是纯摩擦——本模式声明"不做目标授权校验"。
+  # 它只关**目标白名单**这一道；能力名单、permission 档位、沙箱档位、证据链、
+  # 注入护栏、宿主侧目标动作裁决全都照旧。代价如实记在这里：目标闸门也是
+  # 注入护栏的最后一道，题目内容若诱导把工具引向别的 host，这条不再拦。
+  # 要收回：把 unrestricted 改回 false（或删掉这一行）。
+  unrestricted: true
 # 关于"公开参考资料站"（2026-09-27 订正）：此前这里写过
 # target_allowlist: [xz.aliyun.com, ...]，**已撤销**——该字段语义是
 # "只可收紧"（与运行期显式授权取交集，见 penagent/agent.py 的

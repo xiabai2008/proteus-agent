@@ -25,7 +25,15 @@ permission:
 # max_cost_usd 为预留字段（当前不生效），详见 modes/base.yaml 的注释
 # 与另两个 CTF 模式同口径（R-45 实测：真机反解类题目 60 步做不完）。
 budget: {max_steps: 120, max_minutes: 60, max_cost_usd: 1.0}
-scope: {network_egress: true}
+scope:
+  network_egress: true
+  # 目标闸门开关（2026-09-27 用户拍板）：CTF 比赛的靶由平台给定，逐题
+  # `/proteus-scope add` 是纯摩擦——本模式声明"不做目标授权校验"。
+  # 它只关**目标白名单**这一道；能力名单、permission 档位、沙箱档位、证据链、
+  # 注入护栏、宿主侧目标动作裁决全都照旧。代价如实记在这里：目标闸门也是
+  # 注入护栏的最后一道，题目内容若诱导把工具引向别的 host，这条不再拦。
+  # 要收回：把 unrestricted 改回 false（或删掉这一行）。
+  unrestricted: true
 # 公开资料（WP/知识库）走只读参考站名单：/proteus-scope add-ref <host>
 # （只对读取类工具生效）。模式里刻意**不写** target_allowlist——该字段只可收紧，
 # 写进来会把 127.0.0.1/localhost 一并交掉（2026-09-27 实测，见 ctf-crypto.yaml 注释）。

@@ -98,7 +98,12 @@ def test_inherits_deep_merge():
     assert ctf.inherits == "base"
 
     # 继承：子文件未声明的字段来自 base（嵌套映射逐键合并）
-    assert ctf.scope.requires_explicit_allowlist is True  # base 的 required
+    # 注意这两条是**两件事**：base 的 `target_allowlist: required` 仍逐字继承
+    # （字段为空元组），而 CTF 模式另声明了 `scope.unrestricted: true`
+    # （2026-09-27 拍板：CTF 的靶由平台给定，不再逐题授权），属性据此为 False
+    assert ctf.scope.target_allowlist == ()               # base 的 required 字段
+    assert ctf.scope.unrestricted is True                 # CTF 模式显式开关
+    assert ctf.scope.requires_explicit_allowlist is False
     assert ctf.budget.model_tier["reason"] == "strong"    # base 的 model_tier
     assert ctf.permission.default == "ask"                # base 的默认档位
     # sandbox 被 CTF 模式显式覆盖为 docker：解题脚本等价宿主任意代码执行，

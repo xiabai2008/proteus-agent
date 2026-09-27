@@ -235,3 +235,56 @@ def test_scope_change_refreshes_mode_tool_face(tmp_path):
 
     scope.add_targets(data, "example.com")
     assert _dns(server, "example.com", msg_id=16)["result"]["isError"] is False
+
+# ----------------------------------------------------------------------
+# 1c. 模式级"不做目标授权校验"（2026-09-27 拍板：CTF 的靶由平台给定）
+# ----------------------------------------------------------------------
+def test_ctf_modes_skip_target_gate_but_pentest_keeps_it():
+    """`scope.unrestricted: true` 只关目标白名单这一道，其余闸门照旧。
+
+    实测背景：CTF 练习/比赛里靶是平台给的，逐题 `/proteus-scope add` 是纯摩擦
+    （会话里直接拿到 http://hbc2.haobachang.com:19652/ 却被拒）。拍板做法是
+    **模式文件里的显式开关**（人写、可审、改回 false 即恢复），不是把闸门删掉。
+    """
+    from penagent.agent import Policy
+    from penagent.modes import load_mode
+
+    spec = type("S", (), {"name": "http_raw", "dangerous": False,
+                          "network": False})()
+    target = {"url": "http://hbc2.haobachang.com:19652/"}
+
+    for mode_id in ("ctf-web", "ctf-crypto", "ctf-reverse"):
+        mode = load_mode(mode_id)
+        assert mode.scope.unrestricted is True, mode_id
+        policy = Policy(allowed_targets=["127.0.0.1"], authorize=True,
+                        mode=mode)
+        ok, _ = policy.check("http_raw", spec, target)
+        assert ok is True, mode_id                    # 目标不再拦
+
+    pentest = load_mode("pentest-standard")
+    assert pentest.scope.unrestricted is False         # 渗透系保持闸门
+    policy = Policy(allowed_targets=["127.0.0.1"], authorize=True,
+                    mode=pentest)
+    ok, reason = policy.check("http_raw", spec, target)
+    assert ok is False and "不在授权范围" in reason
+
+
+def test_unrestricted_does_not_weaken_other_gates():
+    """开关只关目标校验：能力名单、档位、沙箱、出网开关全都还在。"""
+    from penagent.agent import Policy
+    from penagent.modes import load_mode
+
+    mode = load_mode("ctf-web")
+
+    denied = type("S", (), {"name": "nuclei_scan", "dangerous": False,
+                            "network": False})()
+    reason = Policy(allowed_targets=["127.0.0.1"], authorize=True,
+                    mode=mode).check("nuclei_scan", denied, {})[1]
+    assert "禁用" in reason                            # capability.deny 照旧
+
+    risky = type("S", (), {"name": "python_solve", "dangerous": True,
+                           "network": False})()
+    ok, reason = Policy(allowed_targets=["127.0.0.1"],
+                        mode=mode).check("python_solve", risky, {})
+    assert ok is False and "确认" in reason            # 档位照旧
+    assert mode.sandbox == "docker"                    # 沙箱档位照旧

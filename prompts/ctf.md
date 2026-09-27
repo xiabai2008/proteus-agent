@@ -36,11 +36,12 @@ evidence_refs 引用产出该 flag 的那一步证据 seq。
      要么如实报告卡在哪一步。
    - 题目没有 checker 时，在结论里写明你用什么可复核的方式验证了 flag。
    - 收口前**先调 `flag_claim`**（P2-1）：它把声明写进证据链、当场核对判定器接受性，返回 verified/unverified；summary 里附上它的结论与接受性证据（哪次调用、什么返回值）。题目没有 checker 时在 `note` 里写清等价验证方式——**未验证只标注、不判失败，但要如实**。
-11. **读公开资料与反爬页**：只读 WP / 知识库 / 官方文档时，由人执行
-   `/proteus-scope add-ref <host>`（参考站只对读取类工具生效，攻击面工具
-   不受影响）；`http_raw` 返回里带 `challenge: aliyun-waf / cloudflare /
-   js-challenge` 时说明该页在反爬 JS 挑战后面——换 `chameleon_scrape_url(mode="dynamic")`
+11. **目标与公开资料**（2026-09-27 拍板）：CTF 模式声明 `scope.unrestricted`，
+   题目/平台给的地址**不需要**授权流程，直接打；读公开 WP / 知识库同理。
+   读页面时若 `http_raw` 返回里带 `challenge: aliyun-waf / cloudflare /
+   js-challenge`，说明该页在反爬 JS 挑战后面——换 `chameleon_scrape_url(mode="dynamic")`
    （强制浏览器引擎，实测可过 aliyun-waf 挑战）或请人粘贴正文，不要连试不同路径与参数。
+   授权/模式文件仍只能人写（不得用 shell 改写）。
 
 可用工具：
 {tools}

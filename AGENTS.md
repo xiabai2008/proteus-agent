@@ -36,7 +36,7 @@
 
 1. **模式约束必须在工具执行前机制性生效**（禁用即拒绝执行），禁止只写在 system prompt 里靠模型自觉。
 2. **不得削弱证据链反幻觉语义**（`evidence.py` 的链式哈希与 `valid_refs` 引用校验是底线；结论引用不存在的证据必须判失败）。
-3. **目标白名单硬校验不可绕过**：任何模式下，越界目标一律拒绝；高危工具必须过 permission 档位（ask / auto / deny）。
+3. **目标白名单硬校验不可绕过**（CTF 三模式例外，2026-09-27 用户拍板）：默认任何模式下越界目标一律拒绝；`ctf-web` / `ctf-crypto` / `ctf-reverse` 在模式文件里显式声明 `scope.unrestricted: true`（靶由平台给定，逐题 `/proteus-scope add` 是纯摩擦）——这是**模式文件里的人工姿势**、可审可一键改回，不是模型的自我授权；其余闸门（能力名单、permission 档位、沙箱档位、出网开关、证据链、注入护栏、宿主侧目标动作裁决）在 CTF 模式下同样生效。高危工具必须过 permission 档位（ask / auto / deny）。
 4. **内核不得依赖任何宿主**：不 import DSH / Claude Code 专属能力；宿主只通过 MCP 或子进程调用内核。
 5. **不引入重型新依赖**：先看 `requirements.txt`；能用 stdlib / dataclass 就不引 Pydantic / LangChain（确需引入先在回复中说明理由）。
 6. **每次任务收尾必须**：全量 `pytest` 绿 + 一次 git commit（新功能与测试同一提交）。

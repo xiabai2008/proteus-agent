@@ -526,9 +526,14 @@ export function apply(ctx, config = {}) {
 
     // P0-5：档位由**会话模式**决定（越界目标不走这张表——至少 ask）
     const sessionMode = readSessionMode(modePath)
-    const tier = outside.length > 0
+    // 越界目标的档位：CTF 模式下**不再单独抬到 ask**（2026-09-27 拍板）——
+    // 内核侧同一模式已声明 scope.unrestricted（靶由平台给定），宿主侧再弹一次
+    // "请授权" 就是双重摩擦。仍按模式档位走（CTF = allow，且留痕）；pentest
+    // 系保持"越界一律至少 ask"的旧口径。
+    const modeTier = tierForMode(modePolicy, sessionMode, mode)
+    const tier = outside.length > 0 && modeTier !== 'allow'
       ? (mode === 'deny' ? 'deny' : 'ask')
-      : tierForMode(modePolicy, sessionMode, mode)
+      : modeTier
     const modeNote = sessionMode === ''
       ? ''
       : `【会话模式 ${sessionMode}】`
