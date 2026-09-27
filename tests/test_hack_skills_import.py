@@ -1,10 +1,11 @@
-"""hack-skills 知识源集成回归（路线 1/2，2026-09-27）。
+"""CTF 技能知识源集成回归（路线 1/2，2026-09-27）。
 
-- tools/import_hack_skills.py：把 yaklang/hack-skills 选定技能蒸馏进
-  内核技能库（<data>/skills/ctf-web/hs-*.json），幂等 upsert；
-- 注入链路：Skill.category 须通过 ctf-web 模式技能包过滤
-  （mode.skills = ["ctf-web"]），find_skills 按 target_fingerprint
-  关键词共现命中。
+- tools/import_hack_skills.py：把 yaklang/hack-skills（hs-*）与
+  ljagiello/ctf-skills（hcs-*）选定技能蒸馏进内核技能库
+  （<data>/skills/<category>/*.json），幂等 upsert；
+- 注入链路：Skill.category 须通过对应模式技能包过滤（ctf-web 模式
+  skills=["ctf-web"]、ctf-crypto 模式 skills=["ctf-crypto"]），
+  find_skills 按 target_fingerprint 关键词共现命中。
 """
 import json
 import sys
@@ -16,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import pytest
 
 from penagent.memory import Memory, Skill
-from tools.import_hack_skills import CURATED, import_skills
+from tools.import_hack_skills import CURATED, HCS_CURATED, import_skills
 
 
 @pytest.fixture()
@@ -28,12 +29,32 @@ def data_dir(tmp_path):
 
 def test_import_writes_curated_skills(data_dir):
     r = import_skills(str(data_dir))
-    assert len(r["written"]) == len(CURATED)
-    assert r["knowledge_source_missing"]          # 测试环境没克隆知识源
+    assert len(r["written"]) == len(CURATED) + len(HCS_CURATED)
+    assert r["knowledge_source_missing"]          # 测试环境没克隆 hack-skills
     for f in (data_dir / "skills" / "ctf-web").glob("hs-*.json"):
         skill = Skill.from_dict(json.loads(f.read_text(encoding="utf-8")))
         assert skill.title and skill.steps
         assert skill.category == "ctf-web"        # 模式技能包白名单要求
+
+
+def test_import_writes_hcs_skills_by_category(data_dir):
+    """hcs-* 条目按 category 落盘，crypto 两条可被 ctf-crypto 模式过滤保留。"""
+    from penagent.modes import load_mode
+
+    import_skills(str(data_dir))
+    for entry in HCS_CURATED:
+        path = (data_dir / "skills" / entry["category"] /
+                f"hcs-{entry['slug']}.json")
+        assert path.is_file(), path
+        skill = Skill.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        assert skill.source_mission == "ctf-skills-import"
+        assert "kb_search" in skill.evidence_text   # 指回 seckb 检索层
+    # ctf-crypto 模式过滤：hcs-crypto-* 保留，hcs-reverse/forensics 不上屏
+    mem = Memory(str(data_dir), namespace="ctf-crypto")
+    mode = load_mode("ctf-crypto")
+    kept = [s for s in mem.list_skills()
+            if not s.category or s.category in set(mode.skills)]
+    assert {s.id for s in kept} == {"hcs-crypto-rsa", "hcs-crypto-general"}
 
 
 def test_import_is_idempotent_and_keeps_stats(data_dir):
