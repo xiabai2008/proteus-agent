@@ -174,7 +174,9 @@ class Capability:
     def denial_reason(self, tool: str) -> str:
         hit = [p for p in self.deny if _matches(p, tool)]
         if hit:
-            return f"工具 {tool} 被当前模式 capability.deny 禁用（命中 {hit}）"
+            return (f"工具 {tool} 被当前模式 capability.deny 禁用（命中 {hit}）"
+                    f"——可用：换用本模式 allow 名单里的同类工具，"
+                    f"或由人用 /proteus-mode 切到允许该工具的模式")
         if not self.allow:
             return "当前模式 capability.allow 为空，未放行任何工具"
         return (f"工具 {tool} 不在当前模式 capability.allow "

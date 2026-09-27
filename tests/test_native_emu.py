@@ -275,7 +275,8 @@ def test_native_emu_visible_in_ctf_modes_only():
     entries = {e.name: e for e in center.discover(mode_id="ctf-crypto")}
     assert "native_emu" in entries
     assert entries["native_emu"].origin == "ctf_tools"
-    assert set(entries["native_emu"].modes) == {"ctf-web", "ctf-crypto"}
+    assert set(entries["native_emu"].modes) == {"ctf-web", "ctf-crypto",
+                                                "ctf-reverse"}
     assert entries["native_emu"].spec.dangerous is False   # 纯模拟器，无宿主副作用
 
     pentest = center.build_registry(load_mode("pentest-standard"))

@@ -1,0 +1,37 @@
+# modes/ctf-reverse.yaml
+id: ctf-reverse
+label: CTF 逆向模式
+inherits: base
+persona: {system_prompt: prompts/ctf.md, output_format: raw_flag}
+capability:
+  # 只写真名或前缀通配（2026-09-24 P0-2 统一口径，见 ctf-web.yaml 注释）。
+  # 逆向题的主力面：真机执行判定器（native_emu）、保护检查（checksec_bin）、
+  # 容器内一次性脚本（python_solve）、文件三件套（file_*：写脚本→跑→改→再跑）、
+  # 二进制分析家族（binwalk/capa/yara）。刻意**不含**扫描器家族（见 deny）。
+  allow: [native_emu, checksec_bin, file_type, python_solve,
+          codec_decode, codec_chain, file_read, file_write, file_edit,
+          http_raw, dns_lookup, report_gen,
+          pentest_set_mode, pentest_evidence, pentest_missions, pentest_skills,
+          binwalk_*, capa_*, yara_*, seckb_*]
+  deny: [nuclei_scan, fscan_scan, sqlmap_auto, ffuf_fuzz, gobuster_dir,
+         dalfox_xss, naabu_scan, pocsuite_poc]
+permission:
+  default: ask
+  auto_approve: [codec_decode, codec_chain, file_type, file_read, seckb_*,
+                 report_gen, native_emu, checksec_bin]
+  require_confirm: [python_solve, file_write, file_edit]
+  hard_deny: []
+# max_cost_usd 为预留字段（当前不生效），详见 modes/base.yaml 的注释
+# 与另两个 CTF 模式同口径（R-45 实测：真机反解类题目 60 步做不完）。
+budget: {max_steps: 120, max_minutes: 60, max_cost_usd: 1.0}
+scope: {network_egress: true}
+# 公开资料（WP/知识库）走只读参考站名单：/proteus-scope add-ref <host>
+# （只对读取类工具生效）。模式里刻意**不写** target_allowlist——该字段只可收紧，
+# 写进来会把 127.0.0.1/localhost 一并交掉（2026-09-27 实测，见 ctf-crypto.yaml 注释）。
+verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
+triggers: [reverse, 逆向, 反编译, 反汇编, 混淆, 固件, firmware, hap, apk, so, elf]
+skills: [ctf-reverse]
+memory_namespace: ctf-reverse
+# 解题脚本等价宿主任意代码执行（python_solve 声明 sandbox: docker）——容器不可用
+# 时该工具被**拒绝执行**，绝不回落宿主直跑（同 ctf-crypto / ctf-web）。
+sandbox: docker

@@ -49,7 +49,8 @@ def _agent(tmp_path: Path, mode=None, *tools: str) -> PenAgent:
 # ----------------------------------------------------------------------
 def test_load_modes_from_repo_directory():
     modes = load_modes()
-    assert set(modes) == {"base", "pentest-standard", "ctf-web", "ctf-crypto"}
+    assert set(modes) == {"base", "pentest-standard", "ctf-web",
+                          "ctf-crypto", "ctf-reverse"}
 
     pentest = modes["pentest-standard"]
     assert pentest.label == "常规渗透测试模式"
@@ -332,8 +333,65 @@ def test_unknown_mode_error_lists_available_modes():
     给出，猜错一次就能回到正轨。
     """
     with pytest.raises(ModeError) as exc:
-        load_mode("ctf-reverse")
+        load_mode("ctf-pwn")          # 仍不存在的模式名（ctf-reverse 已建）
     message = str(exc.value)
-    assert "模式不存在：ctf-reverse" in message
+    assert "模式不存在：ctf-pwn" in message
     assert "可用模式：" in message
     assert "ctf-crypto" in message and "ctf-web" in message
+
+
+# ----------------------------------------------------------------------
+# 6. ctf-reverse 模式（路线图 P1-2 / P1-3，2026-09-27）
+# ----------------------------------------------------------------------
+def test_ctf_reverse_mode_face_and_tiers():
+    """逆向模式的工具面与档位：真机执行判定器 + 文件三件套 + 二进制分析家族。
+
+    这道模式是为「云栈密令」那类题建的（R-45）：题面在安装包里、判定器在 .so
+    里、解脚本要反复改。判据落在**机制**上——工具面里真有这些工具、扫描器家族
+    不在、写脚本与写文件仍需确认档、预算与另两个 CTF 模式同口径。
+    """
+    from penagent.registry import build_center
+
+    mode = load_mode("ctf-reverse")
+    # 注意：build_registry(mode) 只按"工具的 modes 归属"登记，capability 的
+    # allow/deny 过滤要显式过 filtered_registry（两个入口都这么做：mcp.py 与
+    # PenAgent.__init__）——这里照消费方的口径断言
+    registry = build_center().build_registry(mode)
+    names = set(mode.filtered_registry(registry).names())
+    assert {"native_emu", "checksec_bin", "python_solve", "file_type",
+            "file_read", "file_write", "file_edit"} <= names
+    assert "nuclei_scan" not in names              # 逆向题面不带扫描器
+    assert mode.skills == ("ctf-reverse",)
+    assert mode.memory_namespace == "ctf-reverse"
+    assert mode.budget.max_steps == 120 and mode.budget.max_minutes == 60
+    assert mode.verifier.type == "flag_regex"
+    assert mode.permission.level_for("native_emu") == "ok"
+    assert mode.permission.level_for("file_read") == "ok"
+    assert mode.permission.level_for("file_write") == "ask"
+    assert mode.permission.level_for("python_solve") == "ask"
+
+
+def test_mode_skill_pack_admits_only_matching_categories(tmp_path):
+    """技能包过滤：category 与 mode.skills 一致才上屏（P1-3 的机制判据）。
+
+    逆向技能的落库位置是 `data/skills/ctf-reverse/`（category=ctf-reverse），
+    模式声明 `skills: [ctf-reverse]`。这里用两条技能（同类 / 异类）验证过滤
+    行为——仓库 data/ 不入库，所以不直接断言本机已导入的那条，只钉机制。
+    """
+    from penagent.memory import Skill
+
+    agent = PenAgent(ToolRegistry(), Memory(tmp_path / "mem"),
+                     EvidenceChain(tmp_path / "chain.jsonl"),
+                     LLMConfig(), mode=load_mode("ctf-reverse"))
+    # 必须种到 agent.memory（模式命名空间视图）——Memory(root) 与
+    # Memory(root).for_namespace(mode) 是两个目录，种错地方是静默失效
+    agent.memory.add_skill(Skill(id="rev-1", title="逆向三连",
+                                 category="ctf-reverse",
+                                 target_fingerprint="reverse elf so checker"))
+    agent.memory.add_skill(Skill(id="web-1", title="Web 枚举",
+                                 category="web-recon",
+                                 target_fingerprint="reverse elf so checker"))
+
+    matched = agent.memory.find_skills("reverse elf so checker")
+    kept = {s.id for s in agent._filter_mode_skills(matched)}
+    assert kept == {"rev-1"}                       # 异类别被过滤掉

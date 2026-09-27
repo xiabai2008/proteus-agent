@@ -189,7 +189,15 @@ function readSessionMode(modePath) {
  *
  * **越界目标不走这张表**：白名单外一律至少 ask（见 apply 里的 tier 计算）。
  */
-const DEFAULT_MODE_POLICY = { 'ctf-web': 'allow', 'ctf-crypto': 'allow' }
+const DEFAULT_MODE_POLICY = {
+  'ctf-web': 'allow',
+  'ctf-crypto': 'allow',
+  // 逆向模式（2026-09-27 新增，路线图 P1-2）：与另两个 CTF 模式同档位——
+  // 漏加它的后果不是"更严"，而是**不一致**：同一个 CTF 会话从 ctf-crypto 切到
+  // ctf-reverse 后，宿主 shell 的目标动作会突然从放行退回 ask，行为对不上
+  // 内核侧的工具面。
+  'ctf-reverse': 'allow',
+}
 
 function tierForMode(modePolicy, sessionMode, fallback) {
   const value = modePolicy[sessionMode]

@@ -58,7 +58,9 @@ class _Elf:
 
     def __init__(self, raw: bytes, path: str):
         if len(raw) < 64 or raw[:4] != b"\x7fELF":
-            raise ValueError(f"{path} 不是 ELF 文件")
+            raise ValueError(f"{path} 不是 ELF 文件（本工具只收 ELF；"
+                             f"可用 file_type 确认类型，"
+                             f"固件/安装包先解包再指向里面的 .so 或可执行文件）")
         if raw[4] != 2:
             raise ValueError("只支持 64 位 ELF（EI_CLASS=ELFCLASS64）")
         self.raw = raw
@@ -253,7 +255,9 @@ def native_emu(elf: str = "", func: str = "", args: str = "", expect: str = "1",
                 "hint": "先 file_type 确认是 ELF，再 native_emu(elf=...) 调用它"}
     path, tried = _resolve_path(elf)
     if not path.is_file():
-        return {"error": f"文件不存在: {path}", "tried": tried}
+        return {"error": f"文件不存在: {path}", "tried": tried,
+                "hint": "可用 /samples/...（容器视角）或宿主相对路径；"
+                        "先 file_type 确认文件在不在、是什么类型"}
     try:
         raw = path.read_bytes()
     except OSError as exc:

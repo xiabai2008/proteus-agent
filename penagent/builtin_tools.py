@@ -428,7 +428,7 @@ def report_gen(mission_id: str = "", format: str = "markdown",
     fmt = (format or "markdown").strip().lower()
     if fmt not in ("markdown", "sarif"):
         return {"ok": False, "error": f"不支持的 format: {format}"
-                                      f"（markdown / sarif）"}
+                                      f"（可用：markdown / sarif）"}
     if fmt == "markdown":
         text = evidence_report(data, mission_id)
     else:

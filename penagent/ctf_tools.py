@@ -177,8 +177,10 @@ def file_type(path: str) -> dict:
     return info
 
 
-def register_ctf_tools(center, modes=("ctf-web", "ctf-crypto")) -> int:
+def register_ctf_tools(center,
+                       modes=("ctf-web", "ctf-crypto", "ctf-reverse")) -> int:
     """把 CTF function 工具登记进注册中心（模式可用性由调用方给定）。"""
+    from penagent.file_tools import file_edit, file_read, file_write
     from penagent.native_emu import native_emu
     from penagent.registry import SOURCE_FUNCTION
     from penagent.tools import ToolSpec
@@ -222,6 +224,40 @@ def register_ctf_tools(center, modes=("ctf-web", "ctf-crypto")) -> int:
                              "dump": {"type": "string"},
                              "max_insns": {"type": "string"}},
                  fn=native_emu),
+        ToolSpec(name="file_read",
+                 description="读 data 目录内的文件（文本；二进制给十六进制预览）。"
+                             "长文件用 grep 参数在**完整内容**上做正则提取（绕过"
+                             "截断）。路径两种视角都支持：容器 /samples/... 与"
+                             "宿主相对/绝对路径；越界路径被拒",
+                 parameters={"path": {"type": "string"},
+                             "max_chars": {"type": "string"},
+                             "grep": {"type": "string"}},
+                 fn=file_read),
+        ToolSpec(name="file_write",
+                 description="在 data 目录内写文本文件（父目录自动创建；"
+                             "append=true 追加），返回字节数与 sha256。"
+                             "状态/审计文件（会话授权、模式、证据链、作战记录、"
+                             "技能库）一律拒绝写入",
+                 parameters={"path": {"type": "string"},
+                             "content": {"type": "string"},
+                             "append": {"type": "string"}},
+                 # 刻意不是 dangerous：沙箱判据里 "dangerous ⇒ 必须进容器"，
+                 # 而 function 工具进不了容器（会以"需要隔离但类型为 function"
+                 # 被拒，2026-09-27 真机撞到）。它的作用域由**工具自身的路径
+                 # 守卫**兜住（只写 data 目录、状态/审计文件拒写），摩擦交给
+                 # permission 档位（各 CTF 模式 require_confirm）——与 report_gen
+                 # 同规格：宿主侧写、范围自限。
+                 fn=file_write),
+        ToolSpec(name="file_edit",
+                 description="在 data 目录内做精确串替换（old→new）：默认要求 "
+                             "old **唯一**（0 次报未找到、多次报不唯一并不改），"
+                             "要替换多处显式给 count。用于迭代修改解题脚本",
+                 parameters={"path": {"type": "string"},
+                             "old": {"type": "string"},
+                             "new": {"type": "string"},
+                             "count": {"type": "string"}},
+                 # 同 file_write：不是 dangerous（见上），档位走 require_confirm
+                 fn=file_edit),
     ]
     for spec in specs:
         center.register_spec(spec, source=SOURCE_FUNCTION,

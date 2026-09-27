@@ -180,7 +180,9 @@ class Policy:
             level = self.mode.permission.level_for(tool)
             if level == "deny":
                 return False, (f"模式 {self.mode.id} 权限档位 deny："
-                               f"{tool} 被硬拒绝执行")
+                               f"{tool} 被硬拒绝执行——可用：换用本模式 allow "
+                               f"名单里的工具，或由人用 /proteus-mode 切到"
+                               f"允许该工具的模式")
             if level == "ask" and not self.authorize:
                 return False, (f"模式 {self.mode.id} 权限档位 ask："
                                f"{tool} 待人工确认（未执行）")

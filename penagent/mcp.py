@@ -369,7 +369,9 @@ class PentestMCPServer:
                                                 msg.get("params") or {}))
         return json.dumps({"jsonrpc": "2.0", "id": msg_id,
                            "error": {"code": -32601,
-                                     "message": f"不支持的方法: {method}"}})
+                                     "message": (f"不支持的方法: {method}"
+                                                 f"（可用: initialize / "
+                                                 f"tools/list / tools/call）")}})
 
     # ------------------------------------------------------------------
     def _notify(self, method: str, params: dict) -> None:

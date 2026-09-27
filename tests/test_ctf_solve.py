@@ -68,9 +68,11 @@ def test_ctf_tools_registered_with_source_and_modes():
         assert entries[name].source == SOURCE_FUNCTION
         assert entries[name].origin == "ctf_tools"
     # 模式可用性：只在 ctf-* 可见
+    ctf_modes = {"ctf-web", "ctf-crypto", "ctf-reverse"}
     for name in ("rsactf_attack", "python_solve", "codec_decode",
-                 "codec_chain", "file_type", "native_emu"):
-        assert set(entries[name].modes) == {"ctf-web", "ctf-crypto"}
+                 "codec_chain", "file_type", "native_emu", "file_read",
+                 "file_write", "file_edit"):
+        assert set(entries[name].modes) == ctf_modes
 
 
 def test_ctf_tools_declare_dangerous_and_timeout():
