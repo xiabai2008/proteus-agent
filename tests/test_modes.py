@@ -322,3 +322,18 @@ def test_persona_injected_from_mode(tmp_path):
     without_mode = _agent(tmp_path / "without", None, "codec_decode")
     assert "多模式" not in without_mode._system_prompt([])
     assert without_mode._system_prompt([]).startswith("你是 XPentest——一个 LLM")
+
+
+def test_unknown_mode_error_lists_available_modes():
+    """模式名写错时报错要能自我纠正：列出可用模式。
+
+    2026-09-27 实测：宿主会话想切 `ctf-reverse`（不存在的模式名），只拿到
+    "已查找 <目录>"——它无从知道有哪些名字可用，只能再猜一次。可用名一并
+    给出，猜错一次就能回到正轨。
+    """
+    with pytest.raises(ModeError) as exc:
+        load_mode("ctf-reverse")
+    message = str(exc.value)
+    assert "模式不存在：ctf-reverse" in message
+    assert "可用模式：" in message
+    assert "ctf-crypto" in message and "ctf-web" in message

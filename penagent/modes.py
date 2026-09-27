@@ -473,7 +473,12 @@ def load_mode(mode: Union[str, Path],
     if not path.is_file():
         path = directory / f"{mode}.yaml"
     if not path.is_file():
-        raise ModeError(f"模式不存在：{mode}（已查找 {directory}）")
+        # 报错要能自我纠正（2026-09-27 实测：宿主会话想切 `ctf-reverse`——一个
+        # 不存在的模式名——只拿到"已查找 <目录>"，无从知道有哪些名字可用，只能
+        # 再猜一次）。把可用模式一并列出。
+        available = sorted(p.stem for p in directory.glob("*.yaml"))
+        hint = f"；可用模式：{', '.join(available)}" if available else ""
+        raise ModeError(f"模式不存在：{mode}（已查找 {directory}{hint}）")
 
     chain: list[tuple[Path, dict]] = []
     visited: list[str] = []

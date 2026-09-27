@@ -157,10 +157,13 @@ class _Elf:
 
 
 def _parse_args_spec(spec: str) -> list[tuple[str, object]]:
-    """解析 `str:` / `hex:` / `int:` / `len` 参数序列。
+    """解析 `str:` / `hex:` / `int:` / `len` 参数序列（裸整数按 int 收）。
 
     `len` 取**上一个缓冲区参数**的长度（C checker 常见签名：
     `check(const char* input, int len, const uint8_t* key, int keylen)`）。
+
+    裸整数（如 `str:flag{...},42,hex:...,16`）是 2026-09-27 实测里模型的第一
+    反应写法——按 int 收下，省掉一次"参数无法解析"的往返。
     """
     parsed: list[tuple[str, object]] = []
     if not (spec or "").strip():
@@ -175,8 +178,14 @@ def _parse_args_spec(spec: str) -> list[tuple[str, object]]:
             parsed.append(("int", len(parsed[-1][1])))       # type: ignore[arg-type]
             continue
         if ":" not in item:
-            raise ValueError(f"参数 {item!r} 无法解析；"
-                             f"可用：int:N / str:TEXT / hex:AABB / len")
+            try:
+                parsed.append(("int", int(item, 0)))
+                continue
+            except ValueError:
+                raise ValueError(
+                    f"参数 {item!r} 无法解析；"
+                    f"可用：int:N / str:TEXT / hex:AABB / len（裸整数按 int 收）"
+                ) from None
         kind, _, value = item.partition(":")
         if kind == "int":
             parsed.append(("int", int(value, 0)))

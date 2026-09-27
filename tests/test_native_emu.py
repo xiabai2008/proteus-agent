@@ -194,6 +194,9 @@ def test_len_token_and_int_arg_land_in_same_register(elf_file):
     # int: 立即数与 len 渲染等价（同一寄存器通道）
     assert native_emu(elf=elf_file, func="CheckLen", args="str:abcd,int:4",
                       expect="1")["ret"] == 1
+    # 裸整数也按 int 收（2026-09-27 实测：模型第一反应就是写 42 而不是 int:42）
+    assert native_emu(elf=elf_file, func="CheckLen", args="str:abcd,4",
+                      expect="1")["ret"] == 1
     # expect 留空 → 只回原始返回值，不判 accept/reject
     out = native_emu(elf=elf_file, func="CheckLen", args="str:abcd,len",
                      expect="")
