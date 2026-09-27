@@ -341,8 +341,10 @@ def http_raw(url: str, method: str = "GET", body: str = "",
                 result["challenge"] = challenge
                 hint = (f"这是 {challenge} 的反爬/JS 挑战页：正文是挑战脚本，不是"
                         f"内容——纯 HTTP 抓不到（浏览器执行 JS 后才出正文）。"
-                        f"不要连试不同路径/参数；换来源，或请人把浏览器里的正文"
-                        f"存成文件（宿主 read 可读本地文件）或直接粘贴过来。")
+                        f"不要连试不同路径/参数。读法：`chameleon_scrape_url` "
+                        f"带 `mode=\"dynamic\"`（强制浏览器引擎，实测能过 "
+                        f"aliyun-waf 的 acw_sc__v2 挑战）；或请人把浏览器里的"
+                        f"正文存成文件（宿主 read 可读本地文件）/直接粘贴。")
                 result["note"] = (result["note"] + " " + hint) \
                     if result.get("note") else hint
             if grep:
