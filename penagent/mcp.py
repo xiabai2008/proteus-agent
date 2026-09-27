@@ -26,6 +26,7 @@ from penagent.reflect import Reflector
 from penagent.registry import ToolCenter, build_center
 from penagent.scope import read_scope as read_session_scope
 from penagent.tools import ToolSpec
+from penagent.verifier import oracle_evidence
 
 MCP_VERSION = "2025-06-18"
 
@@ -576,6 +577,9 @@ class PentestMCPServer:
             rec = self.evidence.append("tool_call", {
                 "mission": bound["id"], "tool": name, "direct": True,
                 "ok": bool(result.ok),
+                # flag 候选 + 判定器结论（accept/reject）：宿主路径的
+                # 接受性核对只看留证——report_gen 的 flag_verified 由它推出
+                **oracle_evidence(name, result.output, args),
                 **({} if result.ok else {"error": (result.error or "")[:300]})})
             steps = mem.get_mission(bound["id"]).get("steps", [])
             mem.add_step(bound["id"], {

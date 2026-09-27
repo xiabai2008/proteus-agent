@@ -16,7 +16,8 @@ from penagent.llm import LLMConfig, LLMError, LLMOutputError, chat_json
 from penagent.memory import Memory
 from penagent.modes import ModeProfile
 from penagent.tools import FROZEN_ARGS_KEY, ToolRegistry
-from penagent.verifier import EvidenceChainVerifier, Verifier, build_verifier
+from penagent.verifier import (EvidenceChainVerifier, Verifier,
+                               build_verifier, oracle_evidence)
 
 SYSTEM_PROMPT = """你是 XPentest——一个 LLM 驱动的渗透测试 Agent。
 约束：
@@ -68,6 +69,9 @@ class MissionResult:
     evidence_refs: list[int] = field(default_factory=list)
     injected_skills: list[str] = field(default_factory=list)
     reflection: str = ""
+    #: CTF 判定器接受性：True=判定器（native_emu）接受过该 flag；
+    #: False=正则命中但无接受留证（"未验证"，不判失败）；None=不适用。
+    flag_verified: Optional[bool] = None
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -585,7 +589,8 @@ class PenAgent:
                 # 反幻觉校验是内核底线，任何判定器都先过这一关
                 verdict = self.verifier.verify(
                     decision, self.evidence,
-                    context=self._mission_context(mission_start_seq))
+                    context=self._mission_context(mission_start_seq),
+                    mission=mission_id)
                 if not verdict.ok:
                     if verdict.retryable:
                         # 判定未过但可重试：回灌原因，让模型再试（不结束任务）
@@ -601,12 +606,17 @@ class PenAgent:
                 mission.outcome = "success"
                 mission.summary = decision.get("summary", "")
                 mission.evidence_refs = list(verdict.evidence_refs)
+                # 判定器接受性：False = 正则命中但无 accept 留证（"未验证"，
+                # 不判失败，只随结论落盘——报告与评分卡据此区分）
+                mission.flag_verified = verdict.flag_verified
                 self._append_evidence("conclusion", mission_id, step, {
                     "summary": mission.summary,
                     "evidence_refs": mission.evidence_refs,
-                    "verdict": verdict.reason})
+                    "verdict": verdict.reason,
+                    "flag_verified": verdict.flag_verified})
                 self.memory.finish(mission_id, mission.outcome,
-                                   evidence_refs=mission.evidence_refs)
+                                   evidence_refs=mission.evidence_refs,
+                                   flag_verified=verdict.flag_verified)
                 self._record_skill_outcomes(True)
                 return self._finish(mission)
 
@@ -651,6 +661,8 @@ class PenAgent:
                 "tool": tool, "args": args, "ok": tool_result.ok,
                 "output": str(tool_result.output)[:1500],
                 "error": tool_result.error,
+                # flag 候选 + 判定器结论（accept/reject）：接受性核对只看留证
+                **oracle_evidence(tool, tool_result.output, args),
             })
             self.memory.add_step(mission_id, {
                 "step": step, "tool": tool, "args": args,

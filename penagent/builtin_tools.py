@@ -380,6 +380,11 @@ def report_gen(mission_id: str = "", format: str = "markdown",
     - `format="sarif"`：标准容器（一条证据 = 一条 result），给 CI/工单消费；
     - `out`：可选，写到 `<data_dir>/reports/<name>`（只允许文件名，禁止路径
       穿越）；不传则只返回文本，由调用方决定落哪。
+
+    返回值里带 **`flag_verified`**（2026-09-27 起）：本任务期间有没有 flag 被
+    判定器（`native_emu`）接受过。宿主直调路径的结论不经内核判定器（R-45 未
+    闭环），至少要让报告能机检"这个 flag 有没有判定器背书"——`flags_seen`
+    与 `flags_accepted` 的差集就是"出现过但未经验证"的那些。
     """
     from penagent.report import evidence_report, sarif_report
     from penagent.http_session import DATA_DIR as _DEFAULT_DATA_DIR
@@ -401,6 +406,22 @@ def report_gen(mission_id: str = "", format: str = "markdown",
                     "report": text[:12000]}
     if len(text) > 12000:
         result["truncated"] = True
+    # 判定器接受性（只标注，不改判定口径）：flag_verified=False 时，报告里
+    # 出现的 flag 没有任何 accept 留证——按"未验证"消费，别当成解出。
+    try:
+        from penagent.evidence import EvidenceChain
+        from penagent.verifier import oracle_facts
+
+        facts = oracle_facts(EvidenceChain(Path(data) / "chain.jsonl"),
+                             mission_id)
+        result.update(facts)
+        unverified = [f for f in facts["flags_seen"]
+                      if f not in facts["flags_accepted"]]
+        if unverified:
+            result["note"] = ("以下 flag 出现过但没有判定器接受记录（未验证）："
+                              + ", ".join(unverified[:3]))
+    except Exception as exc:  # noqa: BLE001 —— 标注失败不影响报告本身
+        result["flag_facts_error"] = str(exc)[:200]
     name = str(out or "").strip()
     if name:
         if any(ch in name for ch in ("/", "\\", "..")):

@@ -138,7 +138,8 @@ class Memory:
 
     def finish(self, mission_id: str, outcome: str,
                reflection: str = "",
-               evidence_refs: Optional[list] = None) -> None:
+               evidence_refs: Optional[list] = None,
+               flag_verified: Optional[bool] = None) -> None:
         rec = self._load_mission(mission_id)
         rec["outcome"] = outcome
         rec["reflection"] = reflection
@@ -147,6 +148,10 @@ class Memory:
             # 结论引用了哪些证据——层级视图与评测都要它；此前只在链上，
             # 作战记录里查不到（P2-3 补齐）
             rec["evidence_refs"] = [int(x) for x in evidence_refs]
+        if flag_verified is not None:
+            # CTF 判定器接受性（2026-09-27）：False = 正则命中但无判定器
+            # accept 留证（"未验证"，不判失败）——报告/评分卡据此区分
+            rec["flag_verified"] = bool(flag_verified)
         self._save_mission(rec)
 
     def get_mission(self, mission_id: str) -> dict:
