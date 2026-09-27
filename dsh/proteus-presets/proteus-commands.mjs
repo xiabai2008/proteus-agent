@@ -152,10 +152,10 @@ async function handleSkills(invocation) {
 }
 
 /** 读会话授权清单（与内核 penagent/scope.py 同口径：缺失/损坏 → 空）。 */
-function readScope(scopePath) {
+function readScope(scopePath, field = 'targets') {
   try {
     const data = JSON.parse(readFileSync(scopePath, 'utf8'))
-    const list = Array.isArray(data.targets) ? data.targets : []
+    const list = Array.isArray(data[field]) ? data[field] : []
     return list.map((t) => String(t)).filter((t) => t !== '')
   } catch {
     return []
@@ -168,6 +168,10 @@ function readScope(scopePath) {
  * 设计边界：**只有人能写**——本命令由人在会话里敲，内核从不写这个文件。
  * 写操作交给内核 CLI（`python -m penagent scope`，单一实现）；读取走 fs，
  * 不依赖 PENTEST_PY312（只看一眼当前清单时不必起进程）。
+ *
+ * `add-ref` / `remove-ref`（2026-09-27 实测新增）：只读参考站（公开 WP /
+ * 知识库）——只对**读取类工具**生效（GET/HEAD、单页抓取），攻击面工具不受
+ * 影响；读一篇 WP 不该要求把公开站点写进目标授权。
  */
 async function handleScope(invocation) {
   const root = repoRoot()
@@ -176,17 +180,26 @@ async function handleScope(invocation) {
   }
   const scopePath = join(root, 'data', stateFile('session-scope'))
   const input = String(invocation.rawInput || '').trim()
-  const usage = '用法: /proteus-scope [add <host[,host]> | remove <host> | clear]'
+  const usage = '用法: /proteus-scope [add <host[,host]> | add-ref <host[,host]> '
+    + '| remove <host> | remove-ref <host> | clear | list]\n'
+    + 'add = 目标授权（对目标的动作）；add-ref = 只读参考站（公开 WP/知识库，'
+    + '只对读取类工具生效）。'
   if (!input || input === 'list') {
     const current = readScope(scopePath)
+    const reference = readScope(scopePath, 'reference')
     return { kind: 'success', text:
       `会话授权目标: ${current.length ? current.join(', ') : '(空——只有 --targets 基线)'}\n` +
+      `只读参考站  : ${reference.length ? reference.join(', ') : '(空)'}\n` +
       `${usage}\n授权由人执行，内核只读；模型不能自我授权。` }
   }
   const parts = input.split(/\s+/)
   const verb = parts[0]
   const targets = parts.slice(1).join(' ').trim()
-  if (!['add', 'remove', 'clear'].includes(verb)) {
+  const VERBS = {
+    add: '--add', remove: '--remove', clear: '--clear',
+    'add-ref': '--add-ref', 'remove-ref': '--remove-ref',
+  }
+  if (!Object.prototype.hasOwnProperty.call(VERBS, verb)) {
     return { kind: 'error', text: `未知子命令 ${verb}。${usage}` }
   }
   if (verb !== 'clear' && !targets) {
@@ -196,8 +209,7 @@ async function handleScope(invocation) {
   if (!py) {
     return { kind: 'error', text: 'PENTEST_PY312 未设置（内核解释器目录）。' }
   }
-  const args = ['-m', 'penagent', 'scope',
-                verb === 'add' ? '--add' : verb === 'remove' ? '--remove' : '--clear']
+  const args = ['-m', 'penagent', 'scope', VERBS[verb]]
   if (verb !== 'clear') args.push(targets)
   args.push('--note', 'DSH /proteus-scope（人工授权）')
   if (sessionKey) args.push('--session-key', sessionKey)
@@ -205,9 +217,14 @@ async function handleScope(invocation) {
     const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()
     const parsed = JSON.parse(out)
     const list = Array.isArray(parsed.targets) ? parsed.targets : []
+    const reference = Array.isArray(parsed.reference) ? parsed.reference : []
+    const isRef = verb.endsWith('-ref')
     return { kind: 'success', text:
-      `会话授权已更新: ${list.length ? list.join(', ') : '(空——回到 --targets 基线)'}\n` +
-      '内核下一次调用即生效（无需重启）；宿主 shell 的目标动作裁决行读同一份文件。' }
+      (isRef
+        ? `只读参考站已更新: ${reference.length ? reference.join(', ') : '(空)'}`
+          + '（只对读取类工具生效：GET/HEAD、单页抓取）\n'
+        : `会话授权已更新: ${list.length ? list.join(', ') : '(空——回到 --targets 基线)'}\n`)
+      + '内核下一次调用即生效（无需重启）；宿主 shell 的目标动作裁决行读同一份文件。' }
   } catch (e) {
     return { kind: 'error', text: `授权更新失败: ${String(e.message || e)}` }
   }

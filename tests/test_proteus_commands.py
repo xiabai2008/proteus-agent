@@ -35,6 +35,9 @@ RUNNER = textwrap.dedent("""
       scopeShow: await get('proteus-scope').handler({ rawInput: '' }),
       scopeAdd: await get('proteus-scope').handler(
         { rawInput: 'add example.com,10.0.0.5' }),
+      scopeAddRef: await get('proteus-scope').handler(
+        { rawInput: 'add-ref xz.aliyun.com' }),
+      scopeShow2: await get('proteus-scope').handler({ rawInput: 'list' }),
       scopeBad: await get('proteus-scope').handler({ rawInput: 'frobnicate x' }),
       tree: await get('proteus-tree').handler({ rawInput: '' }),
       evidence: await get('proteus-evidence').handler({ rawInput: '' }),
@@ -65,16 +68,25 @@ def fake_ws(tmp_path: Path) -> Path:
         "    print('  ├─ #1 codec_decode [OK]')\n"
         "elif argv[:1] == ['scope']:\n"
         "    path = os.path.join('data', 'session-scope.json')\n"
-        "    cur = []\n"
+        "    cur, ref = [], []\n"
         "    if os.path.exists(path):\n"
-        "        cur = json.load(open(path, encoding='utf-8')).get('targets', [])\n"
+        "        blob = json.load(open(path, encoding='utf-8'))\n"
+        "        cur = blob.get('targets', [])\n"
+        "        ref = blob.get('reference', [])\n"
+        "    def add(items, into):\n"
+        "        for x in items.split(','):\n"
+        "            if x and x not in into:\n"
+        "                into.append(x)\n"
         "    if '--add' in argv:\n"
-        "        for x in argv[argv.index('--add') + 1].split(','):\n"
-        "            if x and x not in cur:\n"
-        "                cur.append(x)\n"
+        "        add(argv[argv.index('--add') + 1], cur)\n"
+        "    if '--add-ref' in argv:\n"
+        "        add(argv[argv.index('--add-ref') + 1], ref)\n"
+        "    if '--remove-ref' in argv:\n"
+        "        ref = [x for x in ref if x not in argv[argv.index('--remove-ref') + 1].split(',')]\n"
+        "    if '--add' in argv or '--add-ref' in argv or '--remove-ref' in argv:\n"
         "        os.makedirs('data', exist_ok=True)\n"
-        "        json.dump({'targets': cur}, open(path, 'w', encoding='utf-8'))\n"
-        "    print(json.dumps({'targets': cur}))\n"
+        "        json.dump({'targets': cur, 'reference': ref}, open(path, 'w', encoding='utf-8'))\n"
+        "    print(json.dumps({'targets': cur, 'reference': ref}))\n"
         "elif argv[:1] == ['skills'] and '--export' in argv:\n"
         "    out = argv[argv.index('--out') + 1]\n"
         "    os.makedirs(out, exist_ok=True)\n"
@@ -139,6 +151,28 @@ def test_scope_command_is_human_authorization_entry(fake_ws):
 
     assert result["scopeBad"]["kind"] == "error"
     assert "未知子命令" in result["scopeBad"]["text"]
+
+
+def test_scope_add_ref_is_read_only_reference_channel(fake_ws):
+    """`/proteus-scope add-ref`（2026-09-27 实测）：公开 WP/知识库的只读通道。
+
+    读一篇 WP 不该要求把公开站点写进目标授权（那会让攻击面工具也够到它）。
+    判据：写进同一个文件的 `reference` 字段、与 `targets` 互不覆盖、list 两类都显示。
+    """
+    result = _run_plugin(fake_ws)
+
+    assert result["scopeAddRef"]["kind"] == "success", result["scopeAddRef"]
+    assert "只读参考站" in result["scopeAddRef"]["text"]
+    assert "只对读取类工具生效" in result["scopeAddRef"]["text"]
+
+    blob = json.loads(
+        (fake_ws / "proteus-agent" / "data" / "session-scope.json")
+        .read_text(encoding="utf-8"))
+    assert blob["reference"] == ["xz.aliyun.com"]
+    assert blob["targets"] == ["example.com", "10.0.0.5"]   # 没被覆盖
+
+    assert "只读参考站" in result["scopeShow2"]["text"]
+    assert "xz.aliyun.com" in result["scopeShow2"]["text"]
 
 
 def test_tree_command_spawns_kernel_cli(fake_ws):
