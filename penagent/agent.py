@@ -15,6 +15,7 @@ from penagent.evidence import EvidenceChain
 from penagent.llm import LLMConfig, LLMError, LLMOutputError, chat_json
 from penagent.memory import Memory
 from penagent.modes import ModeProfile
+from penagent.scope import is_read_only_call
 from penagent.tools import FROZEN_ARGS_KEY, ToolRegistry
 from penagent.verifier import (EvidenceChainVerifier, Verifier,
                                build_verifier, oracle_evidence)
@@ -92,11 +93,16 @@ class Policy:
 
     def __init__(self, allowed_targets: Optional[list[str]] = None,
                  authorize: bool = False,
-                 mode: Optional[ModeProfile] = None) -> None:
+                 mode: Optional[ModeProfile] = None,
+                 reference_targets: Optional[list[str]] = None) -> None:
         self._runtime_targets = self.normalize_targets(allowed_targets)
         self.allowed_targets = self._narrow_by_mode(self._runtime_targets, mode)
         self.authorize = authorize
         self.mode = mode
+        #: 只读参考站（公开 WP / 知识库）：**只对只读工具放行**（GET/HEAD 类
+        #: 读取），攻击面工具永远只看 allowed_targets。见 scope.is_read_only_call。
+        self.reference_targets = [str(t).strip() for t in
+                                  (reference_targets or []) if str(t).strip()]
 
     @staticmethod
     def normalize_targets(value) -> list[str]:
@@ -193,26 +199,47 @@ class Policy:
             value = args.get(key)
             if not value:
                 continue
-            if not self._in_scope(value):
-                return False, (f"目标 {value!r} 不在授权范围 "
-                               f"{self.allowed_targets}。"
-                               f"若确需访问，由人在会话里执行 "
-                               f"/proteus-scope add {value}（或 CLI："
-                               f"python -m penagent scope --add {value}）"
-                               f"显式授权后重试——模型不能自我授权")
+            if self._in_scope(value):
+                continue
+            # 只读参考站（2026-09-27 实测新增）：公开 WP / 知识库的**读取**
+            # （只读工具 + GET/HEAD）单独放行——"给人看一篇 WP"不该要求把
+            # 公开站点写进目标授权；写动作与攻击面工具不受这条影响。
+            if self.reference_targets and is_read_only_call(tool, args) \
+                    and self._matches(value, self.reference_targets):
+                continue
+            return False, (f"目标 {value!r} 不在授权范围 "
+                           f"{self.allowed_targets}。"
+                           f"若确需访问：**读公开资料**（WP / 知识库）由人执行 "
+                           f"/proteus-scope add-ref {value}（CLI："
+                           f"python -m penagent scope --add-ref {value}）"
+                           f"——只对读取类工具生效；**对目标的动作**由人执行 "
+                           f"/proteus-scope add {value}（CLI："
+                           f"python -m penagent scope --add {value}）"
+                           f"显式授权后重试——模型不能自我授权")
         return True, ""
 
-    def _in_scope(self, value: str) -> bool:
+    @staticmethod
+    def _host_of(value: str) -> str:
         import urllib.parse
 
-        if value.startswith(("http://", "https://")):
-            host = urllib.parse.urlparse(value).hostname or ""
-        elif ":" in value and not value.startswith("["):
-            host = value.split(":", 1)[0]
-        else:
-            host = value.split("/")[0]
+        text = str(value or "")
+        if text.startswith(("http://", "https://")):
+            return urllib.parse.urlparse(text).hostname or ""
+        if ":" in text and not text.startswith("["):
+            return text.split(":", 1)[0]
+        return text.split("/")[0]
+
+    @classmethod
+    def _matches(cls, value: str, targets) -> bool:
+        host = cls._host_of(value)
         return any(host == t or host.endswith("." + t.lstrip("."))
-                   for t in self.allowed_targets)
+                   for t in targets)
+
+    def _in_scope(self, value: str) -> bool:
+        return self._matches(value, self.allowed_targets)
+
+    def _in_reference(self, value: str) -> bool:
+        return self._matches(value, self.reference_targets)
 
 
 class PenAgent:

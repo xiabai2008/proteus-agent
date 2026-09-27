@@ -94,6 +94,18 @@ def raw_server():
                                 for i in range(5))
                 self._send(200, (pad + "<ul>" + links + "</ul>").encode(),
                            "text/html")
+            elif self.path == "/waf":
+                # 阿里云 WAF 挑战页形状（真实样本取自 xz.aliyun.com 的
+                # acw_sc__v2 挑战：renderData + arg1 + reload 脚本）
+                self._send(200, (
+                    '<textarea id="renderData" style="display:none">'
+                    '{"l1":"var arg1=\'5d951ef3bb87e15906a22214a06e70f0\'",'
+                    ' "l2":"GET"}</textarea>'
+                    '<meta name="aliyun_waf_aa" content="1adb65ab">'
+                    '<script>function setCookie(e,r){document.cookie=e+"="+r}'
+                    'function reload(e){setCookie("acw_sc__v2",e);'
+                    'window.location.reload()}</script>').encode(),
+                    "text/html")
             else:
                 self._send(200, b'{"ok":true}', "application/json")
 
@@ -154,6 +166,30 @@ def test_http_raw_truncates_body(raw_server):
     assert result["truncated"] is True
     assert len(result["body"]) == 1000
     assert result["status"] == 200
+
+
+def test_http_raw_flags_anti_bot_challenge(raw_server):
+    """反爬/JS 挑战页要被识别出来并给可操作提示（2026-09-27 实测教训）。
+
+    真实案例：先知社区（xz.aliyun.com）在阿里云 WAF 的 `acw_sc__v2` 挑战后面，
+    纯 HTTP 与宿主 web_fetch 都只拿到挑战脚本（200 + 无正文）。不识别的话，
+    模型会连试不同路径/参数白烧步数——识别后直接说清"换来源或让人粘贴"。
+    """
+    result = http_raw(f"{raw_server}/waf")
+    assert result["challenge"] == "aliyun-waf"
+    assert "不要连试不同路径" in result["note"]
+    assert "chameleon_scrape_url" in result["note"] or "存成文件" in result["note"]
+
+    plain = http_raw(f"{raw_server}/ok")
+    assert "challenge" not in plain
+
+
+def test_detect_challenge_markers():
+    from penagent.builtin_tools import detect_challenge
+
+    assert detect_challenge("<meta name='aliyun_waf_aa'>") == "aliyun-waf"
+    assert detect_challenge("<title>Just a moment...</title>") == "cloudflare"
+    assert detect_challenge("<html><body>hello</body></html>") == ""
 
 
 def test_http_raw_rejects_bad_scheme_and_method():

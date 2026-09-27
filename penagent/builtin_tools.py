@@ -224,6 +224,27 @@ def _grep_body(text: str, pattern: str,
             "matches": matches[:max_matches], "lines": lines}
 
 
+#: 反爬/JS 挑战页特征（WAF 拦截页）：命中时正文不是内容，而是挑战脚本。
+#: 2026-09-27 实测：先知社区（xz.aliyun.com）在阿里云 WAF 的 `acw_sc__v2` 挑战
+#: 后面——纯 HTTP 抓到 23KB 挑战脚本，宿主 web_fetch 同样只拿到空壳（200 + 无正文），
+#: 浏览器执行 JS 才拿得到正文。这类页面**不值得连试不同路径/参数**。
+_CHALLENGE_MARKS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("aliyun-waf", ("aliyun_waf_aa", "acw_sc__v2")),
+    ("cloudflare", ("cf-chl", "__cf_chl_", "Just a moment...",
+                    "Attention Required!")),
+    ("js-challenge", ("window.location.reload", "document.cookie")),
+)
+
+
+def detect_challenge(text: str) -> str:
+    """识别反爬/JS 挑战页；返回类型标签（'' = 没识别出）。"""
+    body = str(text or "")
+    for label, marks in _CHALLENGE_MARKS:
+        if any(mark in body for mark in marks):
+            return label
+    return ""
+
+
 def http_raw(url: str, method: str = "GET", body: str = "",
              headers=None, cookie: str = "", grep: str = "",
              timeout: float = 10.0, max_body: int = 1200) -> dict:
@@ -312,6 +333,18 @@ def http_raw(url: str, method: str = "GET", body: str = "",
                     "正文已截断——不要再加大 max_body（内核回灌给模型时按 2500"
                     " 字符截断，加大也看不见）。要从长页面取特定内容，改用 grep"
                     " 参数给正则，例如从目录列表页里取文件链接。")
+            challenge = detect_challenge(text_body) if method != "HEAD" else ""
+            if challenge:
+                # 反爬/JS 挑战页：正文是挑战脚本而不是内容。2026-09-27 实测
+                # （先知社区在阿里云 WAF 的 acw_sc__v2 挑战后，宿主 web_fetch
+                # 同样只拿到空壳）——这类页面不值得连试不同参数/路径，直接说清。
+                result["challenge"] = challenge
+                hint = (f"这是 {challenge} 的反爬/JS 挑战页：正文是挑战脚本，不是"
+                        f"内容——纯 HTTP 抓不到（浏览器执行 JS 后才出正文）。"
+                        f"不要连试不同路径/参数；换来源，或请人把浏览器里的正文"
+                        f"存成文件（宿主 read 可读本地文件）或直接粘贴过来。")
+                result["note"] = (result["note"] + " " + hint) \
+                    if result.get("note") else hint
             if grep:
                 result["grep"] = _grep_body(scan_text, grep)
                 result["grep"]["scanned_chars"] = len(scan_text)

@@ -36,6 +36,11 @@ evidence_refs 引用产出该 flag 的那一步证据 seq。
      要么如实报告卡在哪一步。
    - 题目没有 checker 时，在结论里写明你用什么可复核的方式验证了 flag。
    - 报 flag 的 summary 里要附上接受性证据（哪次调用、什么返回值）。
+11. **读公开资料与反爬页**：只读 WP / 知识库 / 官方文档时，由人执行
+   `/proteus-scope add-ref <host>`（参考站只对读取类工具生效，攻击面工具
+   不受影响）；`http_raw` 返回里带 `challenge: aliyun-waf / cloudflare /
+   js-challenge` 时说明该页在反爬 JS 挑战后面——换 `chameleon_scrape_url`
+   （浏览器引擎）或请人粘贴正文，不要连试不同路径与参数。
 
 可用工具：
 {tools}

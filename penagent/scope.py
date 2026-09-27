@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Iterable, Union
+from typing import Iterable, Optional, Union
 
 SESSION_SCOPE_FILE = "session-scope.json"
 
@@ -70,21 +70,44 @@ def _normalize(targets: Targets) -> list[str]:
 
 def read_scope(data_dir: Union[str, Path], key: str = "") -> list[str]:
     """读会话授权清单（缺失/损坏 → 空清单，不抛异常）。"""
+    return _read_list(data_dir, key, "targets")
+
+
+def read_reference(data_dir: Union[str, Path], key: str = "") -> list[str]:
+    """读**只读参考站**名单（公开 WP / 知识库；缺失/损坏 → 空清单）。
+
+    与 `targets` 的区别（2026-09-27 实测新增）：参考站只对**只读工具**
+    放行（`is_read_only_call`：GET/HEAD 类读取），扫描/爆破/利用类工具永远
+    只看 `targets`。这样"给人看 WP"不必把公开站点写进目标授权，也不会因为
+    加了一个参考站而让攻击面工具够到它。
+    """
+    return _read_list(data_dir, key, "reference")
+
+
+def _read_list(data_dir: Union[str, Path], key: str, field: str) -> list[str]:
     try:
         data = json.loads(scope_path(data_dir, key).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, dict):
         return []
-    return _normalize(data.get("targets"))
+    return _normalize(data.get(field))
 
 
 def write_scope(data_dir: Union[str, Path], targets: Targets, *,
-                note: str = "", key: str = "") -> list[str]:
-    """整体覆盖会话授权清单（幂等），返回写入后的清单。"""
+                note: str = "", key: str = "",
+                reference: Optional[Targets] = None) -> list[str]:
+    """整体覆盖会话授权清单（幂等），返回写入后的清单。
+
+    `reference=None` 时**保留**文件里既有的只读参考站名单——`write_scope` 的
+    调用方（CLI 的 add/remove/clear）只该动自己那一类，不能顺手把另一类抹掉。
+    """
     path = scope_path(data_dir, key)
     clean = _normalize(targets)
+    ref = read_reference(data_dir, key) if reference is None \
+        else _normalize(reference)
     payload = {"targets": clean,
+               "reference": ref,
                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                "note": str(note)}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +134,48 @@ def remove_targets(data_dir: Union[str, Path], targets: Targets,
     return write_scope(data_dir, kept, key=key)
 
 
+def add_reference(data_dir: Union[str, Path], hosts: Targets, *,
+                  note: str = "", key: str = "") -> list[str]:
+    """追加只读参考站（去重）；返回新的参考站清单。"""
+    merged = read_reference(data_dir, key)
+    for item in _normalize(hosts):
+        if item not in merged:
+            merged.append(item)
+    write_scope(data_dir, read_scope(data_dir, key), note=note, key=key,
+                reference=merged)
+    return merged
+
+
+def remove_reference(data_dir: Union[str, Path], hosts: Targets,
+                     key: str = "") -> list[str]:
+    """移除只读参考站；返回新清单。"""
+    drop = {t.lower() for t in _normalize(hosts)}
+    kept = [t for t in read_reference(data_dir, key) if t.lower() not in drop]
+    write_scope(data_dir, read_scope(data_dir, key), key=key, reference=kept)
+    return kept
+
+
 def clear_scope(data_dir: Union[str, Path], key: str = "") -> list[str]:
-    """清空会话授权（回到只剩 `--targets` 基线）。"""
-    return write_scope(data_dir, [], key=key)
+    """清空会话授权（回到只剩 `--targets` 基线）；参考站名单一并清空。"""
+    return write_scope(data_dir, [], key=key, reference=[])
+
+
+#: 只读工具：**参考站名单只对这些工具生效**。判据是"读"，不是"能出网"——
+#: 扫描/爆破/利用类工具永远只看 `targets`。
+#: `chameleon_scrape_url` / `get_robots_txt` 是单页读取（前者带浏览器引擎，
+#: 能过 WAF 的 JS 挑战）——站点级爬取（crawl_site / map_site）刻意不在名单里。
+READ_ONLY_TOOLS: tuple[str, ...] = (
+    "http_raw", "http_probe", "robots_fetch", "dns_lookup", "web_read",
+    "chameleon_scrape_url", "chameleon_get_robots_txt",
+)
+
+#: 只读方法：带 method 的工具（http_raw）只认这两个（POST 等写动作不放行）
+READ_ONLY_METHODS: tuple[str, ...] = ("GET", "HEAD")
+
+
+def is_read_only_call(tool: str, args: Optional[dict] = None) -> bool:
+    """参考站放行判据：工具在只读名单里，且（若带 method）是 GET/HEAD。"""
+    if str(tool or "") not in READ_ONLY_TOOLS:
+        return False
+    method = str((args or {}).get("method") or "GET").strip().upper()
+    return method in READ_ONLY_METHODS

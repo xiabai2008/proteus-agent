@@ -9,7 +9,8 @@ capability:
           http_raw, dns_lookup, session_http, replay_request, report_gen,
           checksec_bin, native_emu,
           pentest_set_mode, pentest_evidence, pentest_missions, pentest_skills,
-          binwalk_*, capa_*, yara_*, seckb_*]
+          binwalk_*, capa_*, yara_*, seckb_*,
+          chameleon_*]
   deny: [nuclei_scan, fscan_scan, sqlmap_auto, ffuf_fuzz, gobuster_dir,
          dalfox_xss, naabu_scan, pocsuite_poc]
 permission:

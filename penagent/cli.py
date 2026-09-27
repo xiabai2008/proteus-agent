@@ -326,19 +326,35 @@ def cmd_scope(args) -> int:
     data = args.data
     key = getattr(args, "session_key", "")
     if args.clear:
-        print(json.dumps({"targets": scope.clear_scope(data, key)},
-                         ensure_ascii=False))
+        print(json.dumps({"targets": scope.clear_scope(data, key),
+                          "reference": []}, ensure_ascii=False))
         return 0
     if args.add:
         current = scope.add_targets(data, args.add, note=args.note, key=key)
-        print(json.dumps({"targets": current}, ensure_ascii=False))
+        print(json.dumps({"targets": current,
+                          "reference": scope.read_reference(data, key)},
+                         ensure_ascii=False))
         return 0
     if args.remove:
         current = scope.remove_targets(data, args.remove, key=key)
-        print(json.dumps({"targets": current}, ensure_ascii=False))
+        print(json.dumps({"targets": current,
+                          "reference": scope.read_reference(data, key)},
+                         ensure_ascii=False))
+        return 0
+    if getattr(args, "add_ref", ""):
+        current = scope.add_reference(data, args.add_ref, note=args.note,
+                                      key=key)
+        print(json.dumps({"targets": scope.read_scope(data, key),
+                          "reference": current}, ensure_ascii=False))
+        return 0
+    if getattr(args, "remove_ref", ""):
+        current = scope.remove_reference(data, args.remove_ref, key=key)
+        print(json.dumps({"targets": scope.read_scope(data, key),
+                          "reference": current}, ensure_ascii=False))
         return 0
     current = scope.read_scope(data, key)
     print(json.dumps({"targets": current,
+                      "reference": scope.read_reference(data, key),
                       "file": str(scope.scope_path(data, key))},
                      ensure_ascii=False))
     return 0
@@ -488,6 +504,11 @@ def main(argv: list[str] | None = None) -> int:
                            help="追加授权目标（逗号分隔）")
             p.add_argument("--remove", default="",
                            help="移除授权目标（逗号分隔）")
+            p.add_argument("--add-ref", default="", dest="add_ref",
+                           help="追加**只读参考站**（公开 WP/知识库；只对"
+                                "读取类工具 GET/HEAD 生效，攻击面工具不受影响）")
+            p.add_argument("--remove-ref", default="", dest="remove_ref",
+                           help="移除只读参考站（逗号分隔）")
             p.add_argument("--clear", action="store_true",
                            help="清空会话授权（回到 --targets 基线）")
             p.add_argument("--note", default="",

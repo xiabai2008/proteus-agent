@@ -24,6 +24,7 @@ from penagent.memory import Memory
 from penagent.policy_gate import PolicyGate
 from penagent.reflect import Reflector
 from penagent.registry import ToolCenter, build_center
+from penagent.scope import read_reference
 from penagent.scope import read_scope as read_session_scope
 from penagent.tools import ToolSpec
 from penagent.verifier import oracle_evidence
@@ -110,6 +111,10 @@ class PentestMCPServer:
         self.policy = Policy(allowed_targets=self.allowed_targets or None,
                              authorize=self.authorize)
         self.registry.gate = PolicyGate(self.policy)
+        #: 只读参考站（公开 WP / 知识库）：由人写进会话授权文件的 `reference`
+        #: 字段（`/proteus-scope add-ref` / `scope --add-ref`），只对只读工具
+        #: 生效。_refresh_scope 每次请求前重读（人工授权立即生效）。
+        self.reference_targets: list[str] = []
         self.memory = Memory(data_dir)
         self.evidence = EvidenceChain(Path(data_dir) / "chain.jsonl")
         # 会话绑定的作战任务（§8.7-2，2026-09-26）：DSH 会话大多绕过
@@ -155,13 +160,16 @@ class PentestMCPServer:
         使新授权对底层工具、pentest_run、沙箱裁决**同时**生效（不需要重启）。
         """
         scope = read_session_scope(self.data_dir, self.session_key)
-        if scope == self._session_scope:
+        reference = read_reference(self.data_dir, self.session_key)
+        if scope == self._session_scope and reference == self.reference_targets:
             return
         self._session_scope = scope
+        self.reference_targets = reference
         self.allowed_targets = Policy.normalize_targets(
             list(self._operator_targets) + list(scope))
         self.policy = Policy(allowed_targets=self.allowed_targets,
-                             authorize=self.authorize)
+                             authorize=self.authorize,
+                             reference_targets=reference)
         self.registry.gate = PolicyGate(self.policy)
         self._mode_registries.clear()
 
@@ -223,7 +231,8 @@ class PentestMCPServer:
                 mode = self._default_profile
         policy = Policy(allowed_targets=self.allowed_targets or None,
                         authorize=bool(authorize) or self.authorize,
-                        mode=mode)
+                        mode=mode,
+                        reference_targets=self.reference_targets)
         if mode is not None:
             registry = self.center.build_registry(mode)
         else:
@@ -256,7 +265,8 @@ class PentestMCPServer:
             return cached
         registry = self.center.build_registry(mode, kernel_only=False)
         policy = Policy(allowed_targets=self.allowed_targets or None,
-                        authorize=self.authorize, mode=mode)
+                        authorize=self.authorize, mode=mode,
+                        reference_targets=self.reference_targets)
         registry.gate = PolicyGate(policy)
         registry = mode.filtered_registry(registry)
         self._mode_registries[mode.id] = registry

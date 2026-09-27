@@ -49,12 +49,101 @@ def test_scope_tolerates_corrupt_file(tmp_path):
 
     path.write_text("{ not json", encoding="utf-8")
     assert scope.read_scope(data) == []
+    assert scope.read_reference(data) == []
 
     path.write_text(json.dumps(["a", "b"]), encoding="utf-8")   # 顶层不是对象
     assert scope.read_scope(data) == []
 
     path.write_text(json.dumps({"targets": "a,b"}), encoding="utf-8")
     assert scope.read_scope(data) == ["a", "b"]     # 字符串按逗号分隔（同 CLI）
+
+
+# ----------------------------------------------------------------------
+# 1b. 只读参考站（2026-09-27 实测新增）：公开 WP/知识库的读取通道
+# ----------------------------------------------------------------------
+def test_reference_roundtrip_and_isolation(tmp_path):
+    """参考站与目标授权互不覆盖：动一类不能抹掉另一类。"""
+    data = tmp_path / "data"
+    scope.add_targets(data, "127.0.0.1")
+    assert scope.add_reference(data, "xz.aliyun.com, ctf-wiki.org") == \
+        ["xz.aliyun.com", "ctf-wiki.org"]
+    assert scope.read_scope(data) == ["127.0.0.1"]        # 目标清单没被写坏
+
+    scope.add_targets(data, "example.com")                # 再动目标
+    assert scope.read_reference(data) == ["xz.aliyun.com", "ctf-wiki.org"]
+
+    assert scope.remove_reference(data, "ctf-wiki.org") == ["xz.aliyun.com"]
+    assert scope.read_scope(data) == ["127.0.0.1", "example.com"]
+
+    scope.clear_scope(data)                               # clear 两类一起清
+    assert scope.read_scope(data) == [] and scope.read_reference(data) == []
+
+
+def test_read_only_classification():
+    """放行判据是"读"：只读工具 + GET/HEAD；扫描器与写动作永远不算。"""
+    assert scope.is_read_only_call("http_raw", {"url": "https://x/"}) is True
+    assert scope.is_read_only_call("http_raw", {"method": "POST"}) is False
+    assert scope.is_read_only_call("chameleon_scrape_url", {}) is True
+    assert scope.is_read_only_call("chameleon_crawl_site", {}) is False
+    assert scope.is_read_only_call("nuclei_scan", {}) is False
+    assert scope.is_read_only_call("python_solve", {}) is False
+
+
+def test_policy_allows_read_only_reference_but_not_attack(tmp_path):
+    """参考站只开读取：GET 放行、POST 拒绝、扫描器拒绝、非参考站拒绝。"""
+    from penagent.agent import Policy
+
+    policy = Policy(allowed_targets=["127.0.0.1"],
+                    reference_targets=["xz.aliyun.com"])
+    spec = type("S", (), {"dangerous": False, "network": False})()
+
+    ok, _ = policy.check("http_raw", spec,
+                         {"url": "https://xz.aliyun.com/news/92577"})
+    assert ok is True                                     # 只读读取放行
+
+    ok, reason = policy.check("http_raw", spec,
+                              {"url": "https://xz.aliyun.com/x",
+                               "method": "POST"})
+    assert ok is False and "add-ref" in reason            # 写动作不放行
+
+    ok, reason = policy.check("nuclei_scan", spec,
+                              {"target": "https://xz.aliyun.com"})
+    assert ok is False and "不在授权范围" in reason        # 攻击面工具不放行
+
+    ok, reason = policy.check("http_raw", spec,
+                              {"url": "https://evil.example.com/"})
+    assert ok is False                                    # 非参考站照旧拒绝
+    assert "add-ref" in reason and "/proteus-scope add " in reason
+
+
+def test_policy_reference_does_not_leak_to_subdomain_of_targets(tmp_path):
+    """参考站匹配与目标匹配同一套规则（含子域），但不放宽 targets。"""
+    from penagent.agent import Policy
+
+    policy = Policy(allowed_targets=["127.0.0.1"],
+                    reference_targets=["aliyun.com"])
+    spec = type("S", (), {"dangerous": False, "network": False})()
+    ok, _ = policy.check("http_raw", spec, {"url": "https://xz.aliyun.com/"})
+    assert ok is True                                     # 子域命中参考站
+    assert policy.allowed_targets == ["127.0.0.1"]        # 目标清单没被污染
+
+
+def test_cli_add_ref_and_list(tmp_path, capsys):
+    """CLI 入口：`scope --add-ref` 只动参考站名单。"""
+    data = str(tmp_path / "data")
+    assert main(["scope", "--data", data, "--add", "127.0.0.1"]) == 0
+    capsys.readouterr()
+
+    assert main(["scope", "--data", data,
+                 "--add-ref", "xz.aliyun.com"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reference"] == ["xz.aliyun.com"]
+    assert payload["targets"] == ["127.0.0.1"]
+
+    assert main(["scope", "--data", data]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reference"] == ["xz.aliyun.com"]
+    assert payload["targets"] == ["127.0.0.1"]
 
 
 # ----------------------------------------------------------------------
