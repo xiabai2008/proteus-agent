@@ -107,6 +107,69 @@ def ws(tmp_path: Path) -> Path:
     return tmp_path
 
 
+# 审计路径：preset 归属打标（2026-09-27 实测缺陷——会话头是"创建时"的值，
+# 用户在会话里切 preset 后不更新，于是 proteus 会话被记成 standard）。
+AUDIT_RUNNER = textwrap.dedent("""
+    const { pathToFileURL } = await import('node:url')
+    const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href)
+    const listeners = {}
+    const ctx = { on: (name, fn) => { (listeners[name] ||= []).push(fn) } }
+    mod.apply(ctx, { role: 'audit', spoolPath: process.env.SPOOL })
+    const emit = listeners['session/event'][0]
+
+    const toolCall = (time, name) => ({
+      type: 'tool/call', time,
+      data: { name, arguments: {}, turn: 1, step: 1, callId: `c${time}` },
+    })
+    const selected = (time, preset) => ({
+      type: 'agent-preset/selected', time, data: { agentPreset: preset },
+    })
+
+    // A：会话头 standard，随后切到 proteus-ctf-crypto（实测形状）
+    const a = { header: { id: 'session-a', agentPreset: 'standard' } }
+    emit(a, toolCall(1, 'read'))                       // 选择之前：仍是旧值
+    emit(a, selected(2, 'proteus-ctf-crypto'))
+    emit(a, toolCall(3, 'native_emu'))                 // 选择之后：应标新值
+
+    // B：没有选择事件 → 回退会话头
+    const b = { header: { id: 'session-b', agentPreset: 'proteus-ctf-web' } }
+    emit(b, toolCall(4, 'http_raw'))
+
+    // C：选择事件的值为空 → 不覆盖成空串，保持会话头
+    const c = { header: { id: 'session-c', agentPreset: 'standard' } }
+    emit(c, selected(5, ''))
+    emit(c, toolCall(6, 'read'))
+
+    // D：其它事件类型不留痕
+    const d = { header: { id: 'session-d', agentPreset: 'standard' } }
+    emit(d, { type: 'step/start', time: 7, data: {} })
+
+    console.log(JSON.stringify({ ok: true }))
+""")
+
+
+def test_audit_labels_preset_from_selection_not_stale_header(ws):
+    """归属按"实际选中的 preset"打标：会话头过期时不采信它。
+
+    2026-09-27 实测：一次 `proteus-ctf-crypto` 会话（用户先开 standard 再切 preset）
+    被记成 `standard`，而 `benchmark.py --suite dsh-session --preset` 按这个字段分臂
+    ——战绩会被漏掉或归错臂。判据：选择事件之后的事件带新值；选择之前的不回溯
+    （spool 追加写）；没有选择事件时回退会话头；空值不覆盖已有值。
+    """
+    _run(ws, AUDIT_RUNNER)
+    records = [json.loads(line) for line in
+               (ws / "data" / "dsh-events.jsonl").read_text(
+                   encoding="utf-8").strip().splitlines()]
+    calls = [r for r in records if r.get("kind") == "call"]
+    pairs = {(r["session"], r["tool"]): r["preset"] for r in calls}
+
+    assert pairs[("session-a", "read")] == "standard"          # 选择之前不回溯
+    assert pairs[("session-a", "native_emu")] == "proteus-ctf-crypto"
+    assert pairs[("session-b", "http_raw")] == "proteus-ctf-web"  # 回退会话头
+    assert pairs[("session-c", "read")] == "standard"          # 空值不覆盖
+    assert len(calls) == 4                                     # step/start 不留痕
+
+
 def _run(ws: Path, script: str = RUNNER, mode: str = "") -> dict:
     runner = ws / "runner.mjs"
     runner.write_text(script, encoding="utf-8")

@@ -237,6 +237,9 @@ function readStringArray(value, fallback) {
 /**
  * 会话属于哪个 preset（`SessionHeader.agentPreset`，类型见 dsh-session）。
  *
+ * **注意这是"创建时"的值**：用户中途切 preset 时它不更新。审计打标请用
+ * `resolvePreset`（优先会话流里最近的 `agent-preset/selected`，再回退到这里）。
+ *
  * 拿不到就返回 ''（= 归属未知）。**未知不等于"不是我们的"**：调用方必须把
  * 未知当作"保留"，否则一次形状变化就会让审计静默丢数据。
  *
@@ -373,12 +376,48 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * 会话 id → 最近一次 `agent-preset/selected` 的值。
+   *
+   * 为什么需要它（2026-09-27 实测）：`SessionHeader.agentPreset` 写的是**会话创建
+   * 时**的默认 preset；用户在会话里切 preset（例如先开 standard 再切
+   * `proteus-ctf-crypto`）之后，头字段不更新。按它打标会把 proteus 会话记成
+   * standard——而消费端（`benchmark.py --suite dsh-session --preset`）正是按这个
+   * 字段分臂/过滤，战绩会被漏掉或归错臂。
+   *
+   * 上限 500 条：长驻进程里会话数会涨，Map 按插入序淘汰最旧的键即可。
+   */
+  const selectedPreset = new Map()
+  const rememberPreset = (session, event) => {
+    const id = session?.header?.id
+    const chosen = event?.data?.agentPreset
+    if (typeof id !== 'string' || id === '') return
+    if (typeof chosen !== 'string' || chosen === '') return
+    if (!selectedPreset.has(id) && selectedPreset.size >= 500) {
+      selectedPreset.delete(selectedPreset.keys().next().value)
+    }
+    selectedPreset.set(id, chosen)
+  }
+
+  /** 有效 preset：优先"最近一次选择"，回退会话头。 */
+  const resolvePreset = (session) => {
+    const id = session?.header?.id
+    const chosen = typeof id === 'string' ? selectedPreset.get(id) : undefined
+    return typeof chosen === 'string' && chosen !== '' ? chosen : presetOf(session)
+  }
+
   // ---- 审计：每次工具调用/结果都留痕（含宿主工具） ----
   if (wantAudit) {
     ctx.on('session/event', (session, event) => {
       const type = event?.type
+      // 先记"实际选中的 preset"（实测它出现在会话第 3 条事件，早于任何工具调用；
+      // 在它之前的少量记录仍带会话头的旧值——spool 是追加写，不回溯）
+      if (type === 'agent-preset/selected') {
+        rememberPreset(session, event)
+        return
+      }
       if (type !== 'tool/call' && type !== 'tool/result') return
-      const preset = presetOf(session)
+      const preset = resolvePreset(session)
       // 归属未知（''）不参与过滤：宁可多留，也不要在形状变化时静默丢审计
       if (presets.length > 0 && preset !== '' && !presets.includes(preset)) return
       const data = event?.data ?? {}
