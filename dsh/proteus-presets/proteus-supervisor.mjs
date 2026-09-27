@@ -99,13 +99,16 @@ export function apply(ctx, config = {}) {
 
     state.intervened += 1
     const repeated = seen >= sameToolLimit
-    const detail = repeated
-      ? `同一个调用（${name}）已重复 ${seen} 次`
-      : `本会话工具调用已达 ${state.total} 次`
-    const reason = `${detail}——监督层判定为陷入循环。`
-      + '换思路：改写参数（例如长页面改用 grep 做定向提取，不要加大 max_body）、'
-      + '换一个工具验证同一个假设，或停下来把卡点如实告诉人。'
-      + '（内核侧工具另有步数预算，本条只拦宿主会话里的循环。）'
+    const reason = repeated
+      ? `同一个调用（${name}）已重复 ${seen} 次——监督层判定为陷入循环。`
+        + '换思路：改写参数（例如长页面改用 grep 做定向提取，不要加大 max_body）、'
+        + '换一个工具验证同一个假设，或停下来把卡点如实告诉人。'
+      : `本会话工具调用已达 ${state.total} 次（上限 ${totalLimit}）——这是会话总闸门，`
+        + '不是循环判定：前面的调用是有效工作量，只是预算用完了。'
+        + '正确动作：立即收口——把当前结论、中间产物路径、下一步计划如实交代，'
+        + '请求人开新会话续跑（监督层计数按会话归零，盘上产物可复用）。'
+        + '不要再尝试调用工具，只会被继续拒绝。'
+      + (repeated ? '（内核侧工具另有步数预算，本条只拦宿主会话里的循环。）' : '')
     const decision = (state.intervened >= 2 && escalate === 'ask')
       ? 'ask' : 'deny'
     write({

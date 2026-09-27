@@ -141,7 +141,7 @@ def test_rank_skills_scoped_to_mode_namespace(monkeypatch, tmp_path):
 # 3. 步数预算：模式决定上限；超限换策略而非硬退出
 # ----------------------------------------------------------------------
 def test_budget_max_steps_from_mode(tmp_path):
-    assert _agent(tmp_path, load_mode("ctf-web")).max_steps == 60
+    assert _agent(tmp_path, load_mode("ctf-web")).max_steps == 120
     assert _agent(tmp_path, load_mode("pentest-standard")).max_steps == 40
     assert _agent(tmp_path, None).max_steps == 12
     # 显式传参优先于模式预算

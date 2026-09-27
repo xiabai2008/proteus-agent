@@ -111,6 +111,50 @@ SEED_SKILLS: tuple[Skill, ...] = (
                       "index.html（text/html），而同轮的 /api/Feedbacks 返回 "
                       "application/json 才是真接口",
     ),
+    # 类别落在 ctf-* 模式声明的技能包里（见 modes/ctf-*.yaml 的 `skills:`），
+    # 否则会被 _filter_mode_skills 机制性过滤掉。
+    Skill(
+        id="ctf-native-checker-oracle",
+        title="逆向/固件题：先找到 checker 并真机跑通，再反解它的约束（中间量不是 flag）",
+        target_fingerprint="reverse native checker elf so apk hap firmware "
+                           "binary unpack flag",
+        category="ctf-crypto",
+        steps=[
+            "**先找判定器，别先猜 flag**：附件是 .hap/.apk/.jar 就按 zip 解包，"
+            "在 libs/ 下找 *.so（.hap 是 HarmonyOS 安装包，本质是 zip；"
+            "libs/<abi>/lib*.so 常带导出校验函数），配 file_type 认清容器与架构",
+            "**用 `native_emu` 真机执行它**（按 PT_LOAD 装载：vaddr ≠ 文件偏移"
+            "也能正确读表）：func 留空先列符号表，挑名字含 check/verify/seal/"
+            "flag 的；参数按 C 签名给（`str:flag{...},len,hex:<key>,len`），"
+            "dump 读回中间缓冲区（如 `sp-0x70:16`）。**先拿到一次真实的 reject**"
+            "——那证明调用路径通了，之后的判定才有意义",
+            "**中间量不是 flag**：常量、算法推出的 key/seed/派生字节都只是判定器"
+            "的**输入**。把 seed 直接当 flag 是最常见的错——必须由 checker "
+            "accept 才算解出",
+            "**reject 不代表门不可满足**：不得写\"作者埋了死路 / 门恒返回 0\"。"
+            "随机样本全 reject 只说明接受集很小（可能是 2^128 里的一个点），"
+            "不构成不可满足的证明——要么继续求逆，要么如实报告卡点",
+            "**反解路线（此类 checker 的通用形态）**：格式门（长度/前缀/分隔符）"
+            "→ 逐字节置换 + S-box → 线性混合 → 与内嵌常量逐字节比较。反解顺序"
+            "从后往前：先解出\"混合变换必须等于的常量\"对应的中间值，再逐字节"
+            "反推（S-box 与置换都可逆）",
+            "**线性混合可精确求逆**：若变换对单个输入字节的响应是 GF(2) 线性的"
+            "（判据：固定其余字节、对某字节遍历 256 个值，看输出差分张成的 GF(2)"
+            "维数是否 ≤ 8——用 `python_solve` 采样即可测），就把变换展开成 "
+            "128×128 二元线性系统，采样 128 列后高斯消元求逆，得到唯一中间值",
+            "**收口前用 oracle 复验**：最终字符串必须再跑一次 `native_emu` 拿到 "
+            "accept，并把这次调用的返回值写进结论（接受性证据）",
+        ],
+        tools=["native_emu", "python_solve", "file_type", "checksec_bin"],
+        evidence_text="来源：2026-09-27 黄鹤杯「云栈密令」实测（HarmonyOS .hap 内"
+                      "的 ARM64 libcloudseal.so）——会话把 deriveWindSeed 的种子"
+                      "直接当 flag；手搓 Unicorn 装载时把整文件放到 0x10000，读 "
+                      ".rodata（该题在 vaddr 0x2c0，而 .text 在 0x1067c）时 "
+                      "UC_ERR_READ_UNMAPPED，于是把失败写成\"作者埋了死路\"，交了"
+                      "一个过不了 checker 的 flag（真机 ret=0）。正确解：checker "
+                      "的 128 位约束满秩唯一解，反解后真机 ret=1。工具缺口与本条"
+                      "经验见 docs/修复待办清单.md R-45",
+    ),
 )
 
 

@@ -7,19 +7,31 @@ capability:
   # 只写真名或前缀通配（2026-09-24 P0-2 统一口径，见 ctf-web.yaml 注释）
   allow: [rsactf_attack, python_solve, codec_decode, codec_chain, file_type,
           http_raw, dns_lookup, session_http, replay_request, report_gen,
-          checksec_bin,
+          checksec_bin, native_emu,
           pentest_set_mode, pentest_evidence, pentest_missions, pentest_skills,
           binwalk_*, capa_*, yara_*, seckb_*]
   deny: [nuclei_scan, fscan_scan, sqlmap_auto, ffuf_fuzz, gobuster_dir,
          dalfox_xss, naabu_scan, pocsuite_poc]
 permission:
   default: ask
-  auto_approve: [codec_decode, codec_chain, file_type, seckb_*, report_gen]
+  auto_approve: [codec_decode, codec_chain, file_type, seckb_*, report_gen,
+                 native_emu]
   require_confirm: [python_solve, rsactf_attack]
   hard_deny: []
 # max_cost_usd 为预留字段（当前不生效），详见 modes/base.yaml 的注释
-budget: {max_steps: 60, max_minutes: 20, max_cost_usd: 1.0}
+# 60/20 → 120/60（2026-09-27 实测）：真机反解类题目（装载 ELF、跑 checker、
+# 反解判定器）在 60 步内做不完——黄鹤杯「云栈密令」那次会话 83 步仍未收敛
+# （R-45）。预算是天花板不是目标，抬高只影响"允许跑多久"，不影响判定口径。
+budget: {max_steps: 120, max_minutes: 60, max_cost_usd: 1.0}
 scope: {network_egress: true}
+# 关于"公开参考资料站"（2026-09-27 订正）：此前这里写过
+# target_allowlist: [xz.aliyun.com, ...]，**已撤销**——该字段语义是
+# "只可收紧"（与运行期显式授权取交集，见 penagent/agent.py 的
+# _narrow_by_mode 与 tests/test_policy_mode.py），写进模式会把 127.0.0.1 /
+# localhost 一并交掉：交集为空 = 全拒（实测
+# tests/test_modes.py::test_ctf_web_allows_http_and_denies_heavy_scanners 转红，
+# 且 CLI 默认授权下 CTF 模式连本地靶都够不着）。要放公开站，走运行期显式
+# 授权：会话内 /proteus-scope add <host>，或 preset 的 --targets（人工编辑）。
 verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
 triggers: [ctf, crypto, rsa, 编码, 解码, 密码]
 skills: [ctf-crypto]

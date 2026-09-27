@@ -13,7 +13,7 @@ capability:
   allow: [http_raw, http_probe, dns_lookup, robots_fetch, port_scan,
           session_http, replay_request, report_gen, oob_read,
           codec_decode, codec_chain, file_type, python_solve, rsactf_attack,
-          checksec_bin,
+          checksec_bin, native_emu,
           pentest_set_mode, pentest_evidence, pentest_missions, pentest_skills,
           chameleon_*, seckb_*, binwalk_*, capa_*, yara_*, searchsploit_*,
           cyberchef_*]
@@ -22,12 +22,21 @@ capability:
 permission:
   default: ask
   auto_approve: [codec_decode, codec_chain, file_type, http_probe, http_raw,
-                 dns_lookup, robots_fetch, seckb_*, report_gen, oob_read]
+                 dns_lookup, robots_fetch, seckb_*, report_gen, oob_read,
+                 native_emu]
   require_confirm: [python_solve, rsactf_attack, port_scan]
   hard_deny: []
 # max_cost_usd 为预留字段（当前不生效），详见 modes/base.yaml 的注释
-budget: {max_steps: 60, max_minutes: 20, max_cost_usd: 1.0}
+# 60/20 → 120/60：与 ctf-crypto 同口径（2026-09-27 实测，见 R-45）。
+budget: {max_steps: 120, max_minutes: 60, max_cost_usd: 1.0}
 scope: {network_egress: true}
+# 关于"公开参考资料站"（2026-09-27 订正）：此前这里写过
+# target_allowlist: [xz.aliyun.com, ...]，**已撤销**——该字段语义是
+# "只可收紧"（与运行期显式授权取交集），写进模式会把 127.0.0.1 / localhost
+# 一并交掉：交集为空 = 全拒（实测
+# tests/test_modes.py::test_ctf_web_allows_http_and_denies_heavy_scanners
+# 转红，本地 CTF 靶也够不着）。要放公开站走运行期显式授权：
+# 会话内 /proteus-scope add <host>，或 preset 的 --targets（人工编辑）。
 verifier: {type: flag_regex, pattern: '(?i)(flag|ctf)\{[^}]+\}', auto_retry: 3}
 triggers: [ctf, flag, 解题, 比赛, web]
 skills: [ctf-web]

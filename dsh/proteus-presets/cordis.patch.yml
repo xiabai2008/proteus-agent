@@ -196,14 +196,14 @@
           - id: proteus-supervisor
             name: 'dsh-proteus-presets/supervisor'
             config:
-              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
-              # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
+              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级；
+              # 会话总量超过 500 次也拦（2026-09-27 二调：60 在黄鹤杯 RE 长链误伤后
+              # 先调 120，用户再放宽到 500——基本只兜底真失控，防烧钱闸门意义已弱，
+              # 依赖 sameToolLimit=5 拦同类循环）。留痕进同一个 spool。
+              # escalate=deny（2026-09-27 §8.7-4 实测）：ask 在无头驱动会话里会挂起
+              # 等审批（UI 审批无人应答 → 整轮超时假死），deny 立即终止并回提示。
               sameToolLimit: 5
-              totalLimit: 60
-              # escalate=deny（2026-09-26 §8.7-4 实测）：ask 在无头驱动会话里
-              # 无人应答即永久挂起（8099 盲打 480s 超时复盘：total=32 触发
-              # ask → turn 停摆）。deny 带换思路提示直接回给 agent，turn 继续；
-              # 交互会话里 agent 也会把卡点如实转述给人，不丢"人看一眼"。
+              totalLimit: 500
               escalate: deny
               spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
           - id: proteus-commands
@@ -407,14 +407,14 @@
           - id: proteus-supervisor
             name: 'dsh-proteus-presets/supervisor'
             config:
-              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
-              # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
+              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级；
+              # 会话总量超过 500 次也拦（2026-09-27 二调：60 在黄鹤杯 RE 长链误伤后
+              # 先调 120，用户再放宽到 500——基本只兜底真失控，防烧钱闸门意义已弱，
+              # 依赖 sameToolLimit=5 拦同类循环）。留痕进同一个 spool。
+              # escalate=deny（2026-09-27 §8.7-4 实测）：ask 在无头驱动会话里会挂起
+              # 等审批（UI 审批无人应答 → 整轮超时假死），deny 立即终止并回提示。
               sameToolLimit: 5
-              totalLimit: 60
-              # escalate=deny（2026-09-26 §8.7-4 实测）：ask 在无头驱动会话里
-              # 无人应答即永久挂起（8099 盲打 480s 超时复盘：total=32 触发
-              # ask → turn 停摆）。deny 带换思路提示直接回给 agent，turn 继续；
-              # 交互会话里 agent 也会把卡点如实转述给人，不丢"人看一眼"。
+              totalLimit: 500
               escalate: deny
               spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
           - id: proteus-commands
@@ -618,14 +618,14 @@
           - id: proteus-supervisor
             name: 'dsh-proteus-presets/supervisor'
             config:
-              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级为 ask；
-              # 会话总量超过 30 次也拦。留痕进同一个 spool（kind=supervisor）。
+              # P2-1 监督层：同工具同参数重复到阈值即拦（缺省 5 次），再触发升级；
+              # 会话总量超过 500 次也拦（2026-09-27 二调：60 在黄鹤杯 RE 长链误伤后
+              # 先调 120，用户再放宽到 500——基本只兜底真失控，防烧钱闸门意义已弱，
+              # 依赖 sameToolLimit=5 拦同类循环）。留痕进同一个 spool。
+              # escalate=deny（2026-09-27 §8.7-4 实测）：ask 在无头驱动会话里会挂起
+              # 等审批（UI 审批无人应答 → 整轮超时假死），deny 立即终止并回提示。
               sameToolLimit: 5
-              totalLimit: 60
-              # escalate=deny（2026-09-26 §8.7-4 实测）：ask 在无头驱动会话里
-              # 无人应答即永久挂起（8099 盲打 480s 超时复盘：total=32 触发
-              # ask → turn 停摆）。deny 带换思路提示直接回给 agent，turn 继续；
-              # 交互会话里 agent 也会把卡点如实转述给人，不丢"人看一眼"。
+              totalLimit: 500
               escalate: deny
               spoolPath: !!js (process.env.PENTEST_WS || '.') + '/proteus-agent/data/dsh-events.jsonl'
           - id: proteus-commands

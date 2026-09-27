@@ -64,12 +64,12 @@ def test_ctf_tools_registered_with_source_and_modes():
 
     assert entries["rsactf_attack"].source == SOURCE_CLI
     assert entries["python_solve"].source == SOURCE_CLI
-    for name in ("codec_decode", "codec_chain", "file_type"):
+    for name in ("codec_decode", "codec_chain", "file_type", "native_emu"):
         assert entries[name].source == SOURCE_FUNCTION
         assert entries[name].origin == "ctf_tools"
     # 模式可用性：只在 ctf-* 可见
     for name in ("rsactf_attack", "python_solve", "codec_decode",
-                 "codec_chain", "file_type"):
+                 "codec_chain", "file_type", "native_emu"):
         assert set(entries[name].modes) == {"ctf-web", "ctf-crypto"}
 
 

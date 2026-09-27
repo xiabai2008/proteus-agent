@@ -179,6 +179,7 @@ def file_type(path: str) -> dict:
 
 def register_ctf_tools(center, modes=("ctf-web", "ctf-crypto")) -> int:
     """把 CTF function 工具登记进注册中心（模式可用性由调用方给定）。"""
+    from penagent.native_emu import native_emu
     from penagent.registry import SOURCE_FUNCTION
     from penagent.tools import ToolSpec
 
@@ -202,6 +203,25 @@ def register_ctf_tools(center, modes=("ctf-web", "ctf-crypto")) -> int:
                              "与宿主视角（绝对路径或相对进程 cwd）",
                  parameters={"path": {"type": "string"}},
                  fn=file_type),
+        ToolSpec(name="native_emu",
+                 description="真机执行 ELF 里的判定器函数（Unicorn 模拟，按 "
+                             "PT_LOAD 装载：vaddr≠文件偏移也能正确读表），返回"
+                             "结构化 verdict（accept/reject）。逆向/固件题只要"
+                             "包里有 checker（校验 flag 的 so/ELF 函数），**先"
+                             "定位它并在这里跑一遍**——它是唯一 oracle。用法："
+                             "func 留空先看导出符号表，func 可给符号名或 0x 地址；"
+                             "args 形如 str:flag{...},len,hex:<key>,len；"
+                             "dump 读回内存（支持 sp-0x70:16）。注意：reject 只"
+                             "说明这次输入没被接受，不代表门不可满足——中间量"
+                             "（key/seed/常量推导值）不是 flag，必须由判定器"
+                             "接受才算解出",
+                 parameters={"elf": {"type": "string"},
+                             "func": {"type": "string"},
+                             "args": {"type": "string"},
+                             "expect": {"type": "string"},
+                             "dump": {"type": "string"},
+                             "max_insns": {"type": "string"}},
+                 fn=native_emu),
     ]
     for spec in specs:
         center.register_spec(spec, source=SOURCE_FUNCTION,

@@ -37,7 +37,7 @@ def test_modes_expose_verifier_budget_and_triggers(service):
 
     ctf = modes["ctf-web"]
     assert ctf["verifier"]["type"] == "flag_regex"
-    assert ctf["budget"]["max_steps"] == 60
+    assert ctf["budget"]["max_steps"] == 120
     assert ctf["triggers"]                          # 关键词触发词非空
     assert modes["pentest-standard"]["verifier"]["type"] == "evidence_chain"
 

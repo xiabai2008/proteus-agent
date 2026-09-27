@@ -17,43 +17,58 @@ from penagent.modes import load_mode                                   # noqa: E
 from penagent.skill_seeds import SEED_SKILLS, seed_skills              # noqa: E402
 from penagent.tools import ToolRegistry                                # noqa: E402
 
-# 生产口径的目标指纹（penagent/cli.py 的 _auto_fingerprint 形如 "<host> web service"）
-PROD_FINGERPRINT = "127.0.0.1 web service"
+# 生产口径的目标指纹：
+# - 渗透：penagent/cli.py 的 _auto_fingerprint 形如 "<host> web service"；
+# - CTF：题面目标形如附件路径 / 题面 URL（2026-09-27 实测：「云栈密令」的
+#   target 是 .hap 附件路径），取题面特征词。
+PENTEST_FP = "127.0.0.1 web service"
+MODE_FINGERPRINTS = {
+    "pentest-standard": PENTEST_FP,
+    "ctf-crypto": "cloudseal hap reverse native checker elf",
+    "ctf-web": "ctf web flag 解题",
+}
 
 
-def _agent(tmp_path: Path, memory: Memory) -> PenAgent:
+def _agent(tmp_path: Path, memory: Memory,
+           mode_id: str = "pentest-standard") -> PenAgent:
     return PenAgent(ToolRegistry(), memory,
                     EvidenceChain(tmp_path / "chain.jsonl"),
-                    mode=load_mode("pentest-standard"))
+                    mode=load_mode(mode_id))
 
 
-def test_all_seeds_survive_injection_top3_limit(tmp_path):
-    """所有种子都要能进提示词——注入上限是 **3 条**（skills[-3:]）。
+def test_seeds_fit_injection_capacity_per_mode(tmp_path):
+    """每个模式各自都要装得下自己的种子——注入上限是 **3 条**（skills[-3:]）。
 
     超出的技能会**静默**不进提示词（不报错、分数不动，同 R-20 那类失效）。
-    这条把容量钉住：种子加到第 4 条时这里直接失败，提醒先合并/取舍，
-    而不是让某条知识悄悄失效。
+    2026-09-27 起种子按模式分家（渗透 3 条 web-recon + CTF 1 条 ctf-crypto），
+    判据随之从"全局 ≤3"改为**按模式算容量**：某个模式的种子超过 3 条时这里
+    直接失败，提醒先合并/取舍，而不是让某条知识悄悄失效。
     """
-    memory = Memory(tmp_path / "mem")
-    agent = _agent(tmp_path, memory)
-    seed_skills(agent.memory)
+    for mode_id, fingerprint in MODE_FINGERPRINTS.items():
+        mode = load_mode(mode_id)
+        memory = Memory(tmp_path / f"mem-{mode_id}")
+        agent = _agent(tmp_path, memory, mode_id)
+        seed_skills(agent.memory)
 
-    matched = agent.memory.find_skills(PROD_FINGERPRINT)
-    ranked = agent._rank_skills(matched, PROD_FINGERPRINT)
-    injected = {s.id for s in ranked[-3:]}
+        relevant = {s.id for s in SEED_SKILLS if s.category in mode.skills}
+        matched = agent.memory.find_skills(fingerprint)
+        kept = agent._filter_mode_skills(matched)
+        injected = {s.id for s in agent._rank_skills(kept, fingerprint)[-3:]}
 
-    missing = {s.id for s in SEED_SKILLS} - injected
-    assert not missing, (
-        f"这些种子进不了提示词（注入上限 3 条，当前 {len(SEED_SKILLS)} 条）: "
-        f"{sorted(missing)}")
-    assert len(SEED_SKILLS) <= 3, "种子超过注入容量，需要合并或改注入上限"
+        missing = relevant - injected
+        assert not missing, (
+            f"{mode_id}: 这些种子进不了提示词（该模式注入上限 3 条）: "
+            f"{sorted(missing)}")
+        assert len(kept) <= 3, (
+            f"{mode_id}: 命中 {len(kept)} 条种子，超过注入容量")
 
 
 def test_seed_ids_pinned():
-    """三条种子一个都不能少（删掉等于把量出来的教训丢了）。"""
+    """四条种子一个都不能少（删掉等于把量出来的教训丢了）。"""
     ids = {s.id for s in SEED_SKILLS}
     assert {"web-api-family-enum", "web-dir-listing-enum",
-            "web-catchall-discriminate"} <= ids
+            "web-catchall-discriminate",
+            "ctf-native-checker-oracle"} <= ids
 
 
 def test_seed_skills_idempotent(tmp_path):
@@ -137,20 +152,28 @@ def test_seed_skills_match_production_fingerprint_and_survive_filter(
     """种子的指纹要能命中目标、类别要能过模式过滤——否则静默失效。
 
     匹配（find_skills 关键词共现）与过滤（mode.skills 类别白名单）是两道
-    独立的门，任一不过技能都进不了提示词。
+    独立的门，任一不过技能都进不了提示词。判据**按模式分别成立**：每个模式
+    自己的种子都要在该模式的生产指纹下命中并通过过滤。
 
     **必须用 `agent.memory` 断言**：`Memory(root)` 与
     `Memory(root).for_namespace(模式)` 是两个目录，往前者种、agent 读后者，
     是不报错的静默失效（本用例最初就是这么写的，被 `agent.memory` 抓出）。
     """
-    memory = Memory(tmp_path / "mem")
-    agent = _agent(tmp_path, memory)
-    seed_skills(agent.memory)                # 种到 agent 实际读取的那个 memory
+    for mode_id, fingerprint in MODE_FINGERPRINTS.items():
+        mode = load_mode(mode_id)
+        expected = {s.id for s in SEED_SKILLS if s.category in mode.skills}
+        if not expected:
+            continue
+        memory = Memory(tmp_path / f"mem-{mode_id}")
+        agent = _agent(tmp_path, memory, mode_id)
+        seed_skills(agent.memory)            # 种到 agent 实际读取的那个 memory
 
-    matched = agent.memory.find_skills(PROD_FINGERPRINT)
-    assert matched, "预置技能未命中生产口径指纹"
-    kept = agent._filter_mode_skills(matched)
-    assert {s.id for s in kept} >= {s.id for s in SEED_SKILLS}
+        matched = agent.memory.find_skills(fingerprint)
+        assert matched, f"{mode_id}: 预置技能未命中该模式的生产指纹"
+        kept = {s.id for s in agent._filter_mode_skills(matched)}
+        assert expected <= kept, (
+            f"{mode_id}: 这些种子被模式技能包过滤掉了: "
+            f"{sorted(expected - kept)}")
 
 
 def test_seeding_wrong_namespace_is_invisible(tmp_path):
@@ -158,8 +181,8 @@ def test_seeding_wrong_namespace_is_invisible(tmp_path):
     memory = Memory(tmp_path / "mem")
     agent = _agent(tmp_path, memory)
     seed_skills(memory)                      # 故意种到默认分区
-    assert agent.memory.find_skills(PROD_FINGERPRINT) == []
-    assert memory.find_skills(PROD_FINGERPRINT), "默认分区里确实写进去了"
+    assert agent.memory.find_skills(PENTEST_FP) == []
+    assert memory.find_skills(PENTEST_FP), "默认分区里确实写进去了"
 
 
 def test_seed_skills_reach_system_prompt(tmp_path):
@@ -168,7 +191,7 @@ def test_seed_skills_reach_system_prompt(tmp_path):
     agent = _agent(tmp_path, memory)
     seed_skills(agent.memory)
     skills = agent._filter_mode_skills(
-        agent.memory.find_skills(PROD_FINGERPRINT))
+        agent.memory.find_skills(PENTEST_FP))
 
     system = agent._system_prompt(skills)
 
@@ -202,28 +225,43 @@ def test_cli_seed_into_mode_namespace(tmp_path, capsys):
 
 
 def test_seed_skill_fingerprints_are_keyword_matchable():
-    """指纹的写法约定：必须与生产指纹有非数字关键词交集。
+    """指纹的写法约定：必须与**所属模式**的生产指纹有非数字关键词交集。
 
     纯数字 token（IP / 端口）在 find_skills 里被过滤，指纹里只写它们是
-    死字符串。
+    死字符串；指纹写成了别的模式的词同样是静默失效。
     """
     import re
 
-    prod_words = set(re.findall(r"[a-z0-9]+", PROD_FINGERPRINT.lower()))
-    prod_words = {w for w in prod_words if not w.isdigit()}
+    def words(text: str) -> set[str]:
+        return {w for w in re.findall(r"[a-z0-9]+", text.lower())
+                if not w.isdigit()}
+
     for skill in SEED_SKILLS:
-        words = set(re.findall(r"[a-z0-9]+", skill.target_fingerprint.lower()))
-        words = {w for w in words if not w.isdigit()}
-        assert words & prod_words, f"{skill.id} 指纹与生产指纹无交集"
+        owners = [m for m in MODE_FINGERPRINTS
+                  if skill.category in load_mode(m).skills]
+        assert owners, f"{skill.id} 的类别不被任何模式声明"
+        assert any(words(skill.target_fingerprint) & words(MODE_FINGERPRINTS[m])
+                   for m in owners), (
+            f"{skill.id} 指纹与所属模式的生产指纹无交集："
+            f"{skill.target_fingerprint!r}")
 
 
-def test_seed_skill_categories_allowed_by_pentest_mode():
-    """种子的 category 必须在 pentest-standard 的技能包里（否则被过滤）。"""
-    mode = load_mode("pentest-standard")
-    allowed = set(mode.skills)
+def test_seed_skill_categories_declared_by_some_mode():
+    """种子的 category 必须被**某个**已发布模式声明（否则在哪都被过滤）。
+
+    2026-09-27 起种子按模式分家（渗透 3 条 web-recon + CTF 1 条 ctf-crypto），
+    故判据从"必须落在 pentest-standard"放宽为"至少被一个已发布模式声明"——
+    没被任何模式声明的类别才是真的静默失效。
+    """
+    from penagent.modes import load_modes
+
+    declared = set()
+    for mode in load_modes().values():
+        declared |= set(mode.skills or ())
     for skill in SEED_SKILLS:
-        assert skill.category in allowed, (
-            f"{skill.id} 的类别 {skill.category!r} 不在 {sorted(allowed)} 里")
+        assert skill.category in declared, (
+            f"{skill.id} 的类别 {skill.category!r} 不被任何模式声明"
+            f"（会被静默过滤，已声明：{sorted(declared)}）")
 
 
 def test_seed_skills_have_actionable_steps():
