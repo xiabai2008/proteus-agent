@@ -756,6 +756,25 @@ def run_dsh_session_suite(root: Path, driver: str = "scripted",
                f"tampered={verify.get('tampered')} "
                f"broken={verify.get('broken_links')}")]
 
+    # P2-2：守卫可观测一行（观测行，不参与通过率）——裁决分布 / 同指纹重复率 /
+    # 步数分布 / 假声明率。守卫参数此前只能凭感觉调，这一行把它们的影响摊开。
+    try:
+        from penagent.guard_stats import collect, render
+
+        stats = collect(chain_path.parent, spool_path=spool, preset=preset)
+        results.append(CaseResult(
+            suite="dsh-session", case_id="guard-stats", category="audit",
+            outcome="success", passed=True,
+            steps=int(stats.get("records") or 0),
+            expected="守卫与声明统计可读（裁决/重复率/步数/假声明率）",
+            got="; ".join(render(stats).splitlines()[1:]),
+            detail=render(stats)))
+    except Exception as exc:                              # noqa: BLE001
+        results.append(CaseResult(
+            suite="dsh-session", case_id="guard-stats", category="audit",
+            outcome="skipped", passed=False,
+            detail=f"统计不可读（不影响其它用例）: {type(exc).__name__}: {exc}"))
+
     for lab in LABS:
         base = DEFAULT_URLS.get(lab.id, "")
         picked = dsh_records_for_lab(records, base, preset=preset)

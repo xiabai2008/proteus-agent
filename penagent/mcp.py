@@ -479,7 +479,8 @@ class PentestMCPServer:
             mode = self._current_mode()
             # report_gen 不传 mission_id 时自动带上会话绑定任务（§8.7-2）：
             # 直调会话产出薄报告的另一半根因——报告聚合需要任务上下文
-            if (name == "report_gen" and self._bound_mission is not None
+            if (name in ("report_gen", "flag_claim")
+                    and self._bound_mission is not None
                     and not str(args.get("mission_id") or "")):
                 args = {**args, "mission_id": self._bound_mission["id"]}
             tool_result = self._mode_registry(mode).execute(name, args)

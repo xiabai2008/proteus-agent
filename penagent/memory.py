@@ -166,6 +166,40 @@ class Memory:
             rec["target"] = target
             self._save_mission(rec)
 
+    def note_flag_claim(self, mission_id: str, flag: str, verified: bool) -> None:
+        """记一次 flag 声明（P2-1）：追加到 `flag_claims`，verified 时置
+        `flag_verified=True`（不置 False——"没验证过"与"验证失败"是两回事，
+        只有真被判定器接受过才写成 True，评分卡据此算假声明率）。"""
+        rec = self._load_mission(mission_id)
+        claims = list(rec.get("flag_claims") or [])
+        claims.append({"flag": str(flag), "verified": bool(verified)})
+        rec["flag_claims"] = claims
+        if verified:
+            rec["flag_verified"] = True
+        self._save_mission(rec)
+
+    @classmethod
+    def note_flag_claim_anywhere(cls, root: Union[str, Path], mission_id: str,
+                                 flag: str, verified: bool) -> Optional[str]:
+        """跨分区记一次 flag 声明：返回写入的分区名，任务不存在返回 None。
+
+        为什么必须跨分区（2026-09-27 实测撞到）：工具拿到的是**任务号**，而任务
+        按 `memory_namespace` 落盘——`Memory(data)` 只看 `default` 分区，于是
+        CTF 会话的声明会写到一个不存在的任务上（异常还被工具吞掉，静默失效）。
+        与 R-37 同一根因，直接复用 `locate_mission`。
+        """
+        found = cls.locate_mission(root, mission_id)
+        if found is None:
+            return None
+        namespace, rec = found
+        claims = list(rec.get("flag_claims") or [])
+        claims.append({"flag": str(flag), "verified": bool(verified)})
+        rec["flag_claims"] = claims
+        if verified:
+            rec["flag_verified"] = True
+        cls(root, namespace=namespace)._save_mission(rec)
+        return namespace
+
     def list_missions(self) -> list[dict]:
         missions = []
         for p in sorted(self.missions_dir.glob("*.json")):

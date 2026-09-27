@@ -180,6 +180,7 @@ def file_type(path: str) -> dict:
 def register_ctf_tools(center,
                        modes=("ctf-web", "ctf-crypto", "ctf-reverse")) -> int:
     """把 CTF function 工具登记进注册中心（模式可用性由调用方给定）。"""
+    from penagent.flag_claim import flag_claim
     from penagent.file_tools import file_edit, file_read, file_write
     from penagent.native_emu import native_emu
     from penagent.registry import SOURCE_FUNCTION
@@ -258,6 +259,16 @@ def register_ctf_tools(center,
                              "count": {"type": "string"}},
                  # 同 file_write：不是 dangerous（见上），档位走 require_confirm
                  fn=file_edit),
+        ToolSpec(name="flag_claim",
+                 description="声明 flag 并核对判定器接受性（P2-1）：写一条 "
+                             "conclusion 记录入链、入作战记录，返回 verified/"
+                             "unverified。**收口时必须调用**——未验证只标注、"
+                             "不判失败，但评分卡按它算假声明率。note 可写"
+                             "等价验证方式（题目没有 checker 时）",
+                 parameters={"flag": {"type": "string"},
+                             "mission_id": {"type": "string"},
+                             "note": {"type": "string"}},
+                 fn=flag_claim),
     ]
     for spec in specs:
         center.register_spec(spec, source=SOURCE_FUNCTION,

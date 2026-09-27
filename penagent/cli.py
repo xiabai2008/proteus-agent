@@ -372,6 +372,54 @@ def cmd_tree(args) -> int:
     return 0
 
 
+def cmd_check_flag(args) -> int:
+    """用题目自带的 checker 核对一个 flag（判定器 CLI）。
+
+    给三臂对照与人工复核一个**可直接当 `--check` 用**的入口：内部就是
+    `native_emu`（按 PT_LOAD 装载 + 真机执行），`expect` 缺省 1，accept 时
+    退出码 0、reject 非 0——能把"声称解出"与"判定器真的接受"分开。
+
+        python -m penagent check-flag --elf data/cloudseal/libcloudseal.so \\
+            --func CloudSeal_NativeCheck \\
+            --args "str:{flag},len,hex:<key>,len" --flag 'flag{...}'
+    """
+    import json as _json
+
+    from penagent.native_emu import native_emu
+
+    if not args.elf or not args.flag:
+        print(_json.dumps({"ok": False,
+                           "error": "需要 --elf 与 --flag"},
+                          ensure_ascii=False))
+        return 2
+    call_args = str(getattr(args, "args", "") or "str:{flag},len")
+    call_args = call_args.replace("{flag}", args.flag)
+    out = native_emu(elf=args.elf, func=getattr(args, "func", "") or "",
+                     args=call_args, expect=str(getattr(args, "expect", "1")),
+                     dump=getattr(args, "dump", "") or "")
+    print(_json.dumps(out, ensure_ascii=False))
+    if out.get("ok") is True and out.get("verdict") == "accept":
+        return 0
+    return 1
+
+
+def cmd_guards(args) -> int:
+    """宿主会话守卫统计（P2-2）：裁决分布 / 同指纹重复率 / 步数分布 / 假声明率。
+
+    守卫参数（sameToolLimit / totalLimit）此前只能凭感觉调；这条命令把它们
+    的影响摊开——顺手也是 P2-3 三臂对照的读数入口（`--preset` 支持家族通配）。
+    """
+    from penagent.guard_stats import collect, render
+
+    stats = collect(args.data, spool_path=getattr(args, "spool", ""),
+                    preset=getattr(args, "preset", ""))
+    if getattr(args, "json", False):
+        print(json.dumps(stats, ensure_ascii=False, indent=1))
+    else:
+        print(render(stats))
+    return 0
+
+
 def cmd_gaps(args) -> int:
     """技能盲区发现：工具使用统计 + 能力盲区建议。"""
     from penagent.gaps import analyze_gaps, analyze_gaps_llm
@@ -472,10 +520,26 @@ def main(argv: list[str] | None = None) -> int:
                       help="外部 MCP 发现的全局预算（秒，缺省 %(default)s）")
     p_ag.set_defaults(fn=cmd_agents)
 
+    p_cf = sub.add_parser(
+        "check-flag",
+        help="用题目自带的 checker 核对 flag（判定器 CLI；accept 退出码 0）")
+    # 刻意不用 argparse 的 required：缺参时回我们自己的 JSON 错误（带 hint），
+    # 而不是 argparse 的用法提示——错误要能被调用方解析（与其它工具同口径）
+    p_cf.add_argument("--elf", default="", help="带 checker 的 ELF（.so / 可执行）")
+    p_cf.add_argument("--func", default="",
+                      help="导出符号名或地址（缺省留空=列符号表）")
+    p_cf.add_argument("--flag", default="", help="要核对的 flag（原样）")
+    p_cf.add_argument("--args", default="str:{flag},len",
+                      help="参数序列，{flag} 会被替换（缺省 str:{flag},len）")
+    p_cf.add_argument("--expect", default="1", help="视为接受的返回值（缺省 1）")
+    p_cf.add_argument("--dump", default="", help="返回后要读的内存，addr:len")
+    p_cf.set_defaults(fn=cmd_check_flag)
+
     p_scope = None
     for name, fn, help_t in (
         ("skills", cmd_skills, "经验库技能"),
         ("missions", cmd_missions, "作战记录"),
+        ("guards", cmd_guards, "宿主会话守卫统计（P2-2：守卫调参与假声明率）"),
         ("scope", cmd_scope, "会话授权目标（只有人能写；/proteus-scope 用）"),
         ("tree", cmd_tree, "审计层级视图：Task → Action → Artifact（P2-3）"),
         ("verify", cmd_verify, "证据链校验"),
@@ -499,6 +563,14 @@ def main(argv: list[str] | None = None) -> int:
                                 "独立于内核任务链）")
             p.add_argument("--flush-open", action="store_true",
                            help="把仍未配对的调用按 ok=None 落链（会话已结束时用）")
+        if name == "guards":
+            p.add_argument("--spool", default="",
+                           help="宿主事件 spool（缺省 <data>/dsh-events.jsonl）")
+            p.add_argument("--preset", default="",
+                           help="只看该 preset 的会话（支持 fnmatch 家族通配，"
+                                "如 proteus*；缺省全部）")
+            p.add_argument("--json", action="store_true",
+                           help="输出原始 JSON（缺省给人读的表格）")
         if name == "scope":
             p.add_argument("--add", default="",
                            help="追加授权目标（逗号分隔）")

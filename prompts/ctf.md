@@ -35,7 +35,7 @@ evidence_refs 引用产出该 flag 的那一步证据 seq。
      （若内部变换对单字节是 GF(2) 线性，可采样建 128 位线性系统精确求逆），
      要么如实报告卡在哪一步。
    - 题目没有 checker 时，在结论里写明你用什么可复核的方式验证了 flag。
-   - 报 flag 的 summary 里要附上接受性证据（哪次调用、什么返回值）。
+   - 收口前**先调 `flag_claim`**（P2-1）：它把声明写进证据链、当场核对判定器接受性，返回 verified/unverified；summary 里附上它的结论与接受性证据（哪次调用、什么返回值）。题目没有 checker 时在 `note` 里写清等价验证方式——**未验证只标注、不判失败，但要如实**。
 11. **读公开资料与反爬页**：只读 WP / 知识库 / 官方文档时，由人执行
    `/proteus-scope add-ref <host>`（参考站只对读取类工具生效，攻击面工具
    不受影响）；`http_raw` 返回里带 `challenge: aliyun-waf / cloudflare /

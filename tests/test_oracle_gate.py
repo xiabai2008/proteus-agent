@@ -206,7 +206,98 @@ def test_loop_records_accepted_flag(monkeypatch, tmp_path):
     agent = _ctf_agent(monkeypatch, tmp_path, decisions,
                        {"verdict": "accept", "ret": 1})
     result = agent.run("题面", "解出 flag")
-
     assert result.outcome == "success"
     assert result.flag_verified is True
     assert agent.memory.get_mission(result.mission_id)["flag_verified"] is True
+
+
+# ----------------------------------------------------------------------
+# 6. flag_claim（P2-1）：把"声明"变成一条可查的记录
+# ----------------------------------------------------------------------
+def test_flag_claim_verifies_against_chain(tmp_path):
+    """有 accept 留证（同任务）→ verified=True，声明入链 + 入作战记录。"""
+    chain = EvidenceChain(tmp_path / "chain.jsonl")
+    chain.append("tool_call", {"mission": "m1", "tool": "native_emu",
+                               "oracle": "accept", "flags": [FLAG]})
+    from penagent.flag_claim import flag_claim
+
+    out = flag_claim(flag=FLAG, mission_id="m1", data_dir=str(tmp_path))
+    assert out["ok"] is True and out["verified"] is True
+    assert "已接受" in out["reason"] and out["record_seq"] > 0
+
+    conclusions = [r for r in chain.load() if r.kind == "conclusion"]
+    assert conclusions[-1].content["flag"] == FLAG
+    assert conclusions[-1].content["flag_verified"] is True
+    assert conclusions[-1].content["source"] == "flag_claim"
+
+
+def test_flag_claim_unverified_is_annotated_not_failed(tmp_path):
+    """没有 accept → verified=False + 补跑判定器的提示；记录照写（只标注）。"""
+    from penagent.flag_claim import flag_claim
+
+    out = flag_claim(flag=FLAG, mission_id="m1", data_dir=str(tmp_path))
+    assert out["ok"] is True and out["verified"] is False
+    assert "未验证" in out["reason"] and "native_emu" in out["hint"]
+
+    from penagent.memory import Memory
+
+    memory = Memory(tmp_path)
+    mission_id = memory.new_mission("题面", "解出 flag")
+    out2 = flag_claim(flag=FLAG, mission_id=mission_id, data_dir=str(tmp_path))
+    assert out2["verified"] is False
+    rec = memory.get_mission(mission_id)
+    assert rec["flag_claims"] == [{"flag": FLAG, "verified": False}]
+    assert "flag_verified" not in rec          # 没验证过 ≠ 验证失败
+
+
+def test_flag_claim_marks_mission_verified_only_when_accepted(tmp_path):
+    """真被接受过才写 flag_verified=True（评分卡据此算假声明率）。"""
+    from penagent.flag_claim import flag_claim
+    from penagent.memory import Memory
+
+    memory = Memory(tmp_path)
+    mission_id = memory.new_mission("题面", "解出 flag")
+    chain = EvidenceChain(tmp_path / "chain.jsonl")
+    chain.append("tool_call", {"mission": mission_id, "tool": "native_emu",
+                               "oracle": "accept", "flags": [FLAG]})
+
+    assert flag_claim(flag=FLAG, mission_id=mission_id,
+                      data_dir=str(tmp_path))["verified"] is True
+    assert memory.get_mission(mission_id)["flag_verified"] is True
+
+
+def test_flag_claim_rejects_non_flag_shape(tmp_path):
+    from penagent.flag_claim import flag_claim
+
+    bad = flag_claim(flag="not-a-flag", data_dir=str(tmp_path))
+    assert bad["ok"] is False and "不是 flag 形态" in bad["error"]
+    assert "hint" in bad
+    empty = flag_claim(data_dir=str(tmp_path))
+    assert empty["ok"] is False and "缺少 flag" in empty["error"]
+
+
+def test_flag_claim_without_mission_checks_whole_chain(tmp_path):
+    """未绑定任务时按全链核对，并在理由里标注这一点。"""
+    from penagent.flag_claim import flag_claim
+
+    chain = EvidenceChain(tmp_path / "chain.jsonl")
+    chain.append("tool_call", {"mission": "other", "tool": "native_emu",
+                               "oracle": "accept", "flags": [FLAG]})
+    out = flag_claim(flag=FLAG, data_dir=str(tmp_path))
+    assert out["verified"] is True
+    assert "未绑定任务" in out["reason"] and "mission" not in out
+
+
+def test_flag_claim_registered_in_ctf_modes_only():
+    from penagent.modes import load_mode
+    from penagent.registry import build_center
+
+    center = build_center()
+    for mode_id in ("ctf-web", "ctf-crypto", "ctf-reverse"):
+        entries = {e.name: e for e in center.discover(mode_id=mode_id)}
+        assert "flag_claim" in entries, mode_id
+        assert set(entries["flag_claim"].modes) == {"ctf-web", "ctf-crypto",
+                                                    "ctf-reverse"}
+        assert "flag_claim" in load_mode(mode_id).capability.allow
+    pentest = center.build_registry(load_mode("pentest-standard"))
+    assert "flag_claim" not in pentest.names()

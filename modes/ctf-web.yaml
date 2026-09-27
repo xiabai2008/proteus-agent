@@ -14,6 +14,7 @@ capability:
           session_http, replay_request, report_gen, oob_read,
           codec_decode, codec_chain, file_type, python_solve, rsactf_attack,
           checksec_bin, native_emu, file_read, file_write, file_edit,
+          flag_claim,
           pentest_set_mode, pentest_evidence, pentest_missions, pentest_skills,
           chameleon_*, seckb_*, binwalk_*, capa_*, yara_*, searchsploit_*,
           cyberchef_*]
@@ -23,7 +24,7 @@ permission:
   default: ask
   auto_approve: [codec_decode, codec_chain, file_type, file_read, http_probe,
                  http_raw, dns_lookup, robots_fetch, seckb_*, report_gen,
-                 oob_read, native_emu]
+                 oob_read, native_emu, flag_claim]
   require_confirm: [python_solve, rsactf_attack, port_scan, file_write,
                     file_edit]
   hard_deny: []

@@ -87,6 +87,43 @@ def test_report_gen_auto_binds_mission_id(server):
     assert bound_id in payload["output"]["report"]
 
 
+def test_flag_claim_auto_binds_mission_id(tmp_path):
+    """flag_claim（P2-1）同样自动带绑定任务：声明落到会话任务上。
+
+    判据：不传 mission_id 时返回里带绑定任务号；链上 conclusion 记录带该任务号；
+    作战记录里能看到这次声明（`flag_claims`）——宿主路径的"声明"从此可查，
+    评分卡据此算假声明率。
+    """
+    # flag_claim 只在 ctf-* 模式可见（fail-closed），故本用例自建 CTF 会话
+    ctf = PentestMCPServer(data_dir=str(tmp_path / "data"),
+                           default_mode="ctf-crypto")
+    _call(ctf, "tools/call",
+          {"name": "dns_lookup", "arguments": {"domain": "localhost"}},
+          msg_id=2)
+    bound_id = ctf._bound_mission["id"]
+    payload = _payload(_call(ctf, "tools/call", {
+        "name": "flag_claim",
+        "arguments": {"flag": "flag{11111111-2222-3333-4444-555555555555}"}},
+        msg_id=3))
+    out = payload["output"]
+    assert out["ok"] is True and out["mission"] == bound_id
+    assert out["verified"] is False                  # 没跑过判定器 → 未验证
+
+    from penagent.evidence import EvidenceChain
+
+    chain = EvidenceChain(f"{ctf.data_dir}/chain.jsonl")
+    claims = [r for r in chain.load()
+              if r.kind == "conclusion"
+              and (r.content or {}).get("source") == "flag_claim"]
+    assert claims and claims[-1].content["mission"] == bound_id
+
+    # 作战记录：按任务号找（分区由会话模式决定，不写死路径）
+    found = list(Path(ctf.data_dir).glob(f"missions/*/{bound_id}.json"))
+    assert found, "作战记录里找不到该任务"
+    mission = json.loads(found[0].read_text(encoding="utf-8"))
+    assert mission["flag_claims"][-1]["flag"].startswith("flag{1111")
+
+
 def test_report_gen_explicit_mission_id_wins(server):
     """显式传了 mission_id 就不覆盖——自动注入只在缺省时兜底。"""
     _call(server, "tools/call",
