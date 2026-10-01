@@ -96,6 +96,27 @@ def test_oob_read_rebind_same_port_switches_address():
     assert oob_read(port=port, wait=0)["count"] == 1
 
 
+def test_rebind_releases_old_listener_socket():
+    """换绑必须**留在同一端口**，且旧监听套接字真的释放（2026-10-01 CI 实测补）。
+
+    `shutdown()` 只停 `serve_forever` 循环，**不关监听套接字**——只有
+    `server_close()` 才关。少了它，POSIX 上紧接着绑同端口必 EADDRINUSE，
+    于是 `_start_locked` 的"端口上移"容错把同端口换绑**悄悄换成换端口**，
+    旧端口还留个半死监听（连接能进、没人接）。
+
+    判据刻意落在"套接字已释放"而不是"端口号没变"：Windows 的 SO_REUSEADDR
+    允许覆盖同端口绑定，端口号那半边在本机恒真、抓不到这个回归——上面
+    `test_oob_read_rebind_same_port_switches_address` 就是这么被盖住的。
+    """
+    port = _free_port()
+    oob.start(port, bind="loopback")
+    stale = oob._servers[("127.0.0.1", port)]
+    assert oob.start(port, bind="all") == port          # 留在同一端口
+    assert stale.socket.fileno() == -1                  # 旧监听已释放
+    assert ("127.0.0.1", port) not in oob._servers
+    assert ("0.0.0.0", port) in oob._servers
+
+
 def test_oob_read_clear_empties_hits():
     port = _free_port()
     oob_read(port=port, wait=0)

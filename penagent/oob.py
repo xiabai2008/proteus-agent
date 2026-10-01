@@ -93,9 +93,19 @@ def _start_locked(port: int, bind_host: str) -> int:
             return candidate                      # 已是我们启动的：直接复用
         for key, srv in list(_servers.items()):
             if key[1] == candidate:
+                # shutdown() **只停 serve_forever 循环，不释放监听套接字**——
+                # 少了 server_close()，紧接着绑同端口在 POSIX 上必 EADDRINUSE，
+                # 于是下面"端口上移"的容错会把它悄悄挪到 candidate+1：同端口
+                # 换绑变成了换端口，旧端口还留着半死的监听（连接能进、没人接）。
+                # Windows 因 SO_REUSEADDR 允许覆盖，把这个缺陷盖住了
+                # （2026-10-01 CI Linux 实测：两个用例红）。
                 try:
                     srv.shutdown()
                 except Exception:  # noqa: BLE001 —— 关旧失败不挡重绑
+                    pass
+                try:
+                    srv.server_close()
+                except Exception:  # noqa: BLE001
                     pass
                 del _servers[key]
         try:
