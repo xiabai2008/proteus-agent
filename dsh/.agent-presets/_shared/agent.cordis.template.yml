@@ -372,7 +372,10 @@
 # 模型侧看到的就是 mcp__proteus__pentest_run 这类名字。
 #
 # command/cwd 经 !!js 读环境变量（PENTEST_WS / PENTEST_PY312）。注意：!!js
-# 整行禁止出现 ": "（冒号+空格会被 YAML 拆成映射键）。
+# 表达式里禁止出现冒号加空格（YAML 会把它拆成映射键）——所以三元运算符**不能
+# 带空格**（写成 ?'a':'b'，不是 ? 'a' : 'b'）。
+# 解释器文件名按平台取：写死 python.exe 会让 Linux 上内核 MCP 直接起不来
+# （2026-10-01 实测同类问题）。Windows 行为与改动前完全一致。
 # env 三个键透传宿主环境变量给内核侧 LLM 决策循环（内核自己也会读仓库 .env）。
 # 内核没起来时不让整个 preset 挂载失败（failOnStartupError: false）。
 - id: mcp-proteus
@@ -380,7 +383,7 @@
   config:
     transport: stdio
     serverName: proteus
-    command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
+    command: !!js (process.env.PENTEST_PY312||'python')+'/'+(process.platform==='win32'?'python.exe':'python3')
     args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', '{{DEFAULT_MODE}}', '--session-key', '{{SESSION_KEY}}', '--discover-mcp']
     cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
     env:

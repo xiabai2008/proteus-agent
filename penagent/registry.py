@@ -102,6 +102,12 @@ class ToolCenter:
         self._entries: dict[str, ToolEntry] = {}
         self._servers: dict[str, MCPServerSpec] = {}
         self._notes: list[str] = []
+        # 配置里**声明过**的工具名（含因本机二进制缺失而未注册的）。
+        # 用途：把"名字写错了"与"本机没装这个工具"分开——模式 allow 名单的
+        # 校验只该对前者报错。CI 上既没有 PENTEST_TOOLS 工具库也没有
+        # pwntools/RsaCtfTool，若拿"已注册名"当校验基准，合法的声明会被
+        # 误判成拼写错误（真实案例：checksec_bin，2026-10-01）。
+        self._declared: set[str] = set()
 
     # ------------------------------------------------------------------
     # 登记
@@ -154,6 +160,11 @@ class ToolCenter:
         for spec in _specs_from(probe):
             self.register_spec(spec, source=SOURCE_CLI,
                                origin="external_tools.json")
+            self._declared.add(spec.name)
+        # 声明了但本机二进制缺失的名字也要记——它们是**合法声明**，
+        # 只是当前环境跑不了（见 _declared 的说明）
+        for name in info.get("unavailable") or ():
+            self._declared.add(str(name))
         if info.get("note"):
             self._notes.append(str(info["note"]))
         return info
@@ -180,6 +191,7 @@ class ToolCenter:
         label = origin or p.name
         loaded, unavailable = 0, []
         for name, block in (data.get("tools") or {}).items():
+            self._declared.add(str(name))
             command = [str(part).replace("{python}", sys.executable)
                        for part in (block.get("command") or [])]
             first = command[0] if command else ""
@@ -261,6 +273,20 @@ class ToolCenter:
         仅限某些模式使用的工具（如 CTF 工具链）。诊断类输出需要完整清单。
         """
         return sorted(self._entries.values(), key=lambda e: (e.source, e.name))
+
+    def declared_tool_names(self) -> set[str]:
+        """**合法工具名的全集**：已登记 ∪ 配置里声明过的（含未注册的）。
+
+        与 `all_entries()` 的区别只在一点：本机缺二进制时，配置里声明过的工具
+        不会出现在 `all_entries()` 里（"不可用不注册"语义），但它仍然是个
+        **写对了的名字**。校验配置（如模式 allow 名单有没有写错名）要用这个
+        集合；校验运行期工具面要用 `all_entries()` / `discover()`。
+
+        典型场景：CI 上没有 pwntools 与 PENTEST_TOOLS，`checksec_bin` /
+        `nuclei_scan` 都注册不了，但它们出现在 `modes/*.yaml` 的 allow 里是
+        完全正确的——拿 `all_entries()` 当基准会把正确声明误报成拼写错误。
+        """
+        return self._declared | set(self._entries)
 
     def servers(self) -> list[MCPServerSpec]:
         return list(self._servers.values())

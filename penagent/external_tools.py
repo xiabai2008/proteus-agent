@@ -25,7 +25,8 @@ def load_external_tools(registry: ToolRegistry,
 
     p = Path(path) if path else DEFAULT_TOOLS_JSON
     if not p.exists():
-        return {"loaded": 0, "note": f"配置文件缺失: {p}"}
+        return {"loaded": 0, "unavailable": [],
+                "note": f"配置文件缺失: {p}"}
     from penagent.envcfg import expand_deep
     data = expand_deep(json.loads(p.read_text(encoding="utf-8")))
     loaded = 0
@@ -60,4 +61,6 @@ def load_external_tools(registry: ToolRegistry,
     note = data.get("note", "")
     if unavailable:
         note += f" 未注册（本地缺失，请 git pull 后重试）: {unavailable}"
-    return {"loaded": loaded, "note": note}
+    # `unavailable` 结构化返回：这些名字**声明是合法的**，只是本机没有二进制。
+    # 消费方（ToolCenter）用它把"写错了名"与"没装这个工具"区分开。
+    return {"loaded": loaded, "unavailable": unavailable, "note": note}

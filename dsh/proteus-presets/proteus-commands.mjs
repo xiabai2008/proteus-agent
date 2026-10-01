@@ -18,7 +18,7 @@
  *     （公开仓库零本机路径约定）。
  */
 import { execFile } from 'node:child_process'
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 /** Cordis 诊断用的插件名。 */
@@ -44,6 +44,34 @@ function stateFile(kind) {
 function repoRoot() {
   const ws = process.env.PENTEST_WS || ''
   return ws ? join(ws, 'proteus-agent') : ''
+}
+
+/**
+ * 内核解释器可执行文件的**平台正确**路径。
+ *
+ * 这里以前写死 `${py}/python.exe`：Windows 上碰巧对，Linux 上拼出来就是
+ * `/usr/bin/python.exe`，spawn 直接 ENOENT——evidence / skills / tree / scope
+ * 四个内核命令在 Linux 上**全线失效**（2026-10-01 CI 实测，8 个用例红）。
+ * 解释器文件名是平台相关的，不能照着宿主想当然。
+ *
+ * `PENTEST_PY312` 按目录读（与错误提示"内核解释器目录"一致）；若它直接指向
+ * 解释器本身（历史写法/自定义路径）也照用，不再追加文件名。
+ */
+function kernelPython(py) {
+  if (!py) return ''
+  try {
+    if (statSync(py).isFile()) return py
+  } catch {
+    // 路径不存在：按目录处理，交给下面的候选探测
+  }
+  const names = process.platform === 'win32'
+    ? ['python.exe', 'python3.exe', 'python']
+    : ['python3', 'python']
+  for (const n of names) {
+    const candidate = join(py, n)
+    if (existsSync(candidate)) return candidate
+  }
+  return join(py, names[0])
 }
 
 /** 可用模式 id：modes/*.yaml 的文件名（排除 base）。 */
@@ -119,7 +147,7 @@ async function handleEvidence(invocation) {
   const args = ['-m', 'penagent', 'evidence']
   if (mission) args.push('--mission', mission)
   try {
-    const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()
+    const out = (await runKernelCli(kernelPython(py), args, root)).trim()
     return { kind: 'success', text: out.slice(0, 4000) || '(空输出)' }
   } catch (e) {
     return { kind: 'error', text: `内核命令执行失败: ${String(e.message || e)}` }
@@ -144,7 +172,7 @@ async function handleSkills(invocation) {
   const args = ['-m', 'penagent', 'skills', '--export', '--out', outDir]
   if (namespace) args.push('--export-namespace', namespace)
   try {
-    const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()
+    const out = (await runKernelCli(kernelPython(py), args, root)).trim()
     return { kind: 'success', text: out.slice(0, 2000) }
   } catch (e) {
     return { kind: 'error', text: `技能导出失败: ${String(e.message || e)}` }
@@ -214,7 +242,7 @@ async function handleScope(invocation) {
   args.push('--note', 'DSH /proteus-scope（人工授权）')
   if (sessionKey) args.push('--session-key', sessionKey)
   try {
-    const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()
+    const out = (await runKernelCli(kernelPython(py), args, root)).trim()
     const parsed = JSON.parse(out)
     const list = Array.isArray(parsed.targets) ? parsed.targets : []
     const reference = Array.isArray(parsed.reference) ? parsed.reference : []
@@ -244,7 +272,7 @@ async function handleTree(invocation) {
   const args = ['-m', 'penagent', 'tree']
   if (mission) args.push('--mission', mission)
   try {
-    const out = (await runKernelCli(`${py}/python.exe`, args, root)).trim()
+    const out = (await runKernelCli(kernelPython(py), args, root)).trim()
     return { kind: 'success', text: out.slice(0, 4000) || '(空输出)' }
   } catch (e) {
     return { kind: 'error', text: `内核命令执行失败: ${String(e.message || e)}` }

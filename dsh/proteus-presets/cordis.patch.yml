@@ -216,7 +216,7 @@
             config:
               transport: stdio
               serverName: proteus
-              command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
+              command: !!js (process.env.PENTEST_PY312||'python')+'/'+(process.platform==='win32'?'python.exe':'python3')
               args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'pentest-standard', '--session-key', 'pentest', '--discover-mcp']
               cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
               env:
@@ -427,7 +427,7 @@
             config:
               transport: stdio
               serverName: proteus
-              command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
+              command: !!js (process.env.PENTEST_PY312||'python')+'/'+(process.platform==='win32'?'python.exe':'python3')
               args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'ctf-web', '--session-key', 'ctf-web', '--discover-mcp']
               cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
               env:
@@ -638,7 +638,7 @@
             config:
               transport: stdio
               serverName: proteus
-              command: !!js (process.env.PENTEST_PY312 || 'python') + '/python.exe'
+              command: !!js (process.env.PENTEST_PY312||'python')+'/'+(process.platform==='win32'?'python.exe':'python3')
               args: ['-m', 'penagent', 'mcp', '--data', 'data', '--targets', '127.0.0.1,localhost', '--authorize', '--default-mode', 'ctf-crypto', '--session-key', 'ctf-crypto', '--discover-mcp']
               cwd: !!js (process.env.PENTEST_WS || '') + '/proteus-agent'
               env:

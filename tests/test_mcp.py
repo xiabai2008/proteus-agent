@@ -126,7 +126,14 @@ def test_tools_list_is_filtered_by_mode(tmp_path):
                               default_mode="pentest-standard")
     names = set(_tools(server))
     assert "codec_decode" not in names and "rsactf_attack" not in names
-    assert {"http_raw", "nuclei_scan", "pentest_run"} <= names
+    assert {"http_raw", "pentest_run"} <= names
+    # nuclei_scan 来自 external_tools.json 的 ${PENTEST_TOOLS}/tools/nuclei.exe，
+    # 未部署本地工具库时内核不注册它（"不可用不注册"，同 test_m3 的外部工具
+    # 口径）。工具库就位时它必须出现在渗透面里——这半边不能省。
+    from penagent.registry import build_center
+
+    if "nuclei_scan" in {e.name for e in build_center().all_entries()}:
+        assert "nuclei_scan" in names
 
 
 def test_initialize_declares_tools_list_changed(tmp_path):

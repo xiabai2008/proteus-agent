@@ -231,11 +231,15 @@ def test_pentest_mode_keeps_wildcard_but_blocks_denied(tmp_path):
 # 真实工具名（或指向已声明的 MCP server 家族）。
 # ----------------------------------------------------------------------
 def _real_tool_names() -> set[str]:
-    """当前仓库里"确实存在"的工具名：注册中心基数 + 服务端高层能力。"""
+    """当前仓库里"确实存在"的工具名：注册中心声明全集（含本机缺二进制未注册的）+ 服务端高层能力。"""
     from penagent.mcp import SERVER_TOOLS
     from penagent.registry import build_center
 
-    names = {e.name for e in build_center().all_entries()}
+    # 基准取**声明全集**而不是**已注册**：本机缺二进制（CI 上没有 PENTEST_TOOLS
+    # 工具库、也没有 pwntools）只会让工具注册不了，不会让模式里的声明变成错的。
+    # 取 all_entries() 会把 checksec_bin 这类合法声明误报成"不是真实注册名"
+    # （2026-10-01 CI 实测）。拼写错误照样抓得到——错的名字不在声明集里。
+    names = build_center().declared_tool_names()
     names |= {str(t.name) for t in SERVER_TOOLS}
     return names
 
@@ -363,8 +367,15 @@ def test_ctf_reverse_mode_face_and_tiers():
     # PenAgent.__init__）——这里照消费方的口径断言
     registry = build_center().build_registry(mode)
     names = set(mode.filtered_registry(registry).names())
-    assert {"native_emu", "checksec_bin", "python_solve", "file_type",
+    assert {"native_emu", "python_solve", "file_type",
             "file_read", "file_write", "file_edit"} <= names
+    # checksec_bin 依赖 pwntools 的 `pwn`（可选依赖，2026-10-01）：没装就注册
+    # 不出来。声明层必须一直在（allow 漏了才是真回归）；运行期可见性只在工具
+    # 真的注册出来时才断言——否则报的是"环境缺 pwntools"，不是模式面有问题。
+    declared = build_center().declared_tool_names()
+    assert "checksec_bin" in declared, "ctf-reverse 的 allow 漏掉了 checksec_bin"
+    if "checksec_bin" in {e.name for e in build_center().all_entries()}:
+        assert "checksec_bin" in names
     assert "nuclei_scan" not in names              # 逆向题面不带扫描器
     assert mode.skills == ("ctf-reverse",)
     assert mode.memory_namespace == "ctf-reverse"

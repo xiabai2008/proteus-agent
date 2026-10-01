@@ -31,6 +31,34 @@ from penagent.registry import (SOURCE_CLI, SOURCE_FUNCTION,  # noqa: E402
 from penagent.tools import ToolRegistry  # noqa: E402
 
 
+# ----------------------------------------------------------------------
+# 可选工具链守卫（2026-10-01 CI 实测补）
+#
+# CTF 工具链里有几个工具依赖**可选依赖**：`checksec_bin` 要 pwntools 的 `pwn`，
+# `rsactf_attack` 要 RsaCtfTool 包，其余扫描器要 PENTEST_TOOLS 工具库。它们都
+# 不在 requirements.txt 里（与 torch / unicorn 同为可选依赖，见 AGENTS.md 硬
+# 规则 5）。内核的既定语义是"不可用不注册"——本机没装就注册不出来，这不是缺陷。
+#
+# 于是"环境缺依赖"不该表现为**失败**（那会掩盖真回归），也不该表现为**静默**
+# 通过（那会假装覆盖过）。照 test_m3.py 的外部工具口径做显式 skip，理由里写清
+# 缺什么、怎么装。
+# ----------------------------------------------------------------------
+def _require_checksec_bin():
+    """`checksec_bin` 需要 `pwn`（pwntools）才能注册。"""
+    if "checksec_bin" not in {e.name for e in build_center().all_entries()}:
+        pytest.skip("pwntools 未安装（可选依赖，提供 `pwn checksec`），"
+                    "checksec_bin 未注册。安装：pip install pwntools")
+
+
+def _require_rsactftool():
+    """参考解的分档里程碑要 RsaCtfTool **真跑出明文**才算解出。"""
+    import importlib.util
+
+    if importlib.util.find_spec("RsaCtfTool") is None:
+        pytest.skip("RsaCtfTool 未安装（可选依赖），参考解覆盖不到 decrypt "
+                    "里程碑。安装：pip install RsaCtfTool")
+
+
 @pytest.fixture(scope="module")
 def challenges(tmp_path_factory):
     return build_challenges(tmp_path_factory.mktemp("ctf"))
@@ -129,6 +157,7 @@ def test_control_mode_denies_rsa_tool():
 # ----------------------------------------------------------------------
 def test_checksec_declares_container_requirement():
     """`checksec_bin` 声明 docker 档：容器不可用时被拒，不回落宿主直跑。"""
+    _require_checksec_bin()
     from penagent.sandbox import SandboxPolicy, tool_needs_isolation
     from penagent.tools import ToolRegistry
 
@@ -157,8 +186,12 @@ def test_checksec_is_visible_in_ctf_and_hidden_in_pentest():
     center = build_center()
     ctf = {e.name for e in center.discover(mode_id="ctf-web")}
     pentest = {e.name for e in center.discover(mode_id="pentest-standard")}
-    assert "checksec_bin" in ctf
+    # "渗透面看不见"与依赖装没装无关（模式归属写在 ctf_tools.json 的 modes
+    # 里），先把它钉死——这半边在任何环境都有效，不能因为缺 pwntools 就丢
     assert "checksec_bin" not in pentest
+    # "CTF 面看得见"依赖工具真的注册成功，缺 pwntools 时这里如实跳过
+    _require_checksec_bin()
+    assert "checksec_bin" in ctf
 
 
 # ----------------------------------------------------------------------
@@ -477,6 +510,10 @@ def test_all_challenges_score_full_on_the_reference_path(tmp_path, challenges,
     """脚本化参考解在 33 题上都应拿满分档——分档与二值口径不矛盾。"""
     from eval_ctf_solve import solve_graded
 
+    # 参考解要真调工具：crypto 题的 decrypt 里程碑判据是"明文出现在工具输出
+    # 里"，RsaCtfTool 没装就必然 2/3。本机 vs CI 的差异必须在守卫里说清，
+    # 否则 CI 上看不出这是"环境缺依赖"还是"分档口径坏了"。
+    _require_rsactftool()
     root = _fresh_root(tmp_path)
     lagging = {}
     for cid, meta in build_challenges(root).items():
